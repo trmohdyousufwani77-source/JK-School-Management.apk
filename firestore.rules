@@ -1,0 +1,322 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core Primitives
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isBootstrappedAdmin() {
+      return isVerifiedUser() && request.auth.token.email == 'mohdyousufwani1977@gmail.com';
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() || (
+        isVerifiedUser() &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // Entity Validators (Blueprint Synchronized)
+    function isValidAdminEntry(data) {
+      return data.keys().hasAll(['uid', 'email', 'role', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'name', 'role', 'createdAt']) &&
+        data.uid is string && data.uid.size() > 0 && data.uid.size() <= 128 &&
+        data.email is string && data.email.size() > 0 && data.email.size() <= 160 &&
+        (!('name' in data) || (data.name is string && data.name.size() <= 120)) &&
+        data.role in ['primary_admin', 'senior_admin', 'junior_admin'] &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidSchoolProfile(data) {
+      return data.keys().hasAll(['name', 'code', 'academicSession', 'updatedAt']) &&
+        data.keys().hasOnly(['name', 'nameUrdu', 'code', 'address', 'district', 'state', 'pinCode', 'academicSession', 'headTeacherName', 'motto', 'updatedAt']) &&
+        data.name is string && data.name.size() >= 2 && data.name.size() <= 160 &&
+        (!('nameUrdu' in data) || (data.nameUrdu is string && data.nameUrdu.size() <= 200)) &&
+        data.code is string && data.code.size() >= 4 && data.code.size() <= 32 &&
+        (!('address' in data) || (data.address is string && data.address.size() <= 300)) &&
+        (!('district' in data) || (data.district is string && data.district.size() <= 80)) &&
+        (!('state' in data) || (data.state is string && data.state.size() <= 80)) &&
+        (!('pinCode' in data) || (data.pinCode is string && data.pinCode.size() <= 16)) &&
+        data.academicSession is string && data.academicSession.size() <= 32 &&
+        (!('headTeacherName' in data) || (data.headTeacherName is string && data.headTeacherName.size() <= 120)) &&
+        (!('motto' in data) || (data.motto is string && data.motto.size() <= 120)) &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPrincipal(data) {
+      return data.keys().hasAll(['id', 'fullName', 'designation', 'joiningDate', 'isCurrent', 'createdByUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'fullName', 'designation', 'joiningDate', 'leavingDate', 'contactNumber', 'email', 'qualification', 'description', 'isCurrent', 'createdByUid', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 120 &&
+        data.designation in ['Principal', 'Headmaster', 'Headmistress', 'Officiating Principal', 'In-Charge Headmaster'] &&
+        data.joiningDate is string && data.joiningDate.size() <= 32 &&
+        (!('leavingDate' in data) || (data.leavingDate is string && data.leavingDate.size() <= 32)) &&
+        (!('contactNumber' in data) || (data.contactNumber is string && data.contactNumber.size() <= 32)) &&
+        (!('email' in data) || (data.email is string && data.email.size() <= 120)) &&
+        (!('qualification' in data) || (data.qualification is string && data.qualification.size() <= 160)) &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 1000)) &&
+        data.isCurrent is bool &&
+        data.createdByUid is string && data.createdByUid.size() <= 128 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidStudent(data) {
+      return data.keys().hasAll(['id', 'admissionNumber', 'fullName', 'classNumber', 'section', 'status', 'createdByUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'admissionNumber', 'fullName', 'fatherName', 'motherName', 'gender', 'dob', 'classNumber', 'section', 'rollNumber', 'category', 'religion', 'nationality', 'address', 'mobileNumber', 'previousSchool', 'admissionDate', 'academicSession', 'status', 'createdByUid', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        data.admissionNumber is string && data.admissionNumber.size() >= 1 && data.admissionNumber.size() <= 64 &&
+        data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 140 &&
+        (!('fatherName' in data) || (data.fatherName is string && data.fatherName.size() <= 140)) &&
+        (!('motherName' in data) || (data.motherName is string && data.motherName.size() <= 140)) &&
+        (!('gender' in data) || data.gender in ['Male', 'Female', 'Other']) &&
+        (!('dob' in data) || (data.dob is string && data.dob.size() <= 32)) &&
+        data.classNumber is string && data.classNumber.size() <= 24 &&
+        data.section is string && data.section.size() <= 16 &&
+        (!('rollNumber' in data) || data.rollNumber is int) &&
+        (!('category' in data) || (data.category is string && data.category.size() <= 40)) &&
+        (!('religion' in data) || (data.religion is string && data.religion.size() <= 40)) &&
+        (!('nationality' in data) || (data.nationality is string && data.nationality.size() <= 60)) &&
+        (!('address' in data) || (data.address is string && data.address.size() <= 300)) &&
+        (!('mobileNumber' in data) || (data.mobileNumber is string && data.mobileNumber.size() <= 32)) &&
+        (!('previousSchool' in data) || (data.previousSchool is string && data.previousSchool.size() <= 160)) &&
+        (!('admissionDate' in data) || (data.admissionDate is string && data.admissionDate.size() <= 32)) &&
+        (!('academicSession' in data) || (data.academicSession is string && data.academicSession.size() <= 32)) &&
+        data.status in ['Active', 'Transferred', 'Archived'] &&
+        data.createdByUid is string && data.createdByUid.size() <= 128 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidOcrBatch(data) {
+      return data.keys().hasAll(['id', 'sourceName', 'sourceType', 'totalScanned', 'importedCount', 'actorUid', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'sourceName', 'sourceType', 'totalScanned', 'importedCount', 'failedCount', 'duplicateCount', 'undone', 'actorUid', 'actorName', 'createdAt']) &&
+        isValidId(data.id) &&
+        data.sourceName is string && data.sourceName.size() <= 200 &&
+        data.sourceType in ['camera', 'image', 'pdf', 'excel', 'csv', 'text'] &&
+        data.totalScanned is int &&
+        data.importedCount is int &&
+        (!('failedCount' in data) || data.failedCount is int) &&
+        (!('duplicateCount' in data) || data.duplicateCount is int) &&
+        (!('undone' in data) || data.undone is bool) &&
+        data.actorUid is string && data.actorUid.size() <= 128 &&
+        (!('actorName' in data) || (data.actorName is string && data.actorName.size() <= 120)) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidLigatureReport(data) {
+      return data.keys().hasAll(['id', 'word', 'issueType', 'reportedByUid', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'word', 'unicodeHex', 'issueType', 'notes', 'reportedByUid', 'createdAt']) &&
+        isValidId(data.id) &&
+        data.word is string && data.word.size() >= 1 && data.word.size() <= 120 &&
+        (!('unicodeHex' in data) || (data.unicodeHex is string && data.unicodeHex.size() <= 250)) &&
+        data.issueType in ['Missing Glyph', 'Overlapping Nuqta', 'Broken Join', 'Spacing Anomaly'] &&
+        (!('notes' in data) || (data.notes is string && data.notes.size() <= 400)) &&
+        data.reportedByUid is string && data.reportedByUid.size() <= 128 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidFcmToken(data) {
+      return data.keys().hasAll(['id', 'uid', 'token', 'role', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'uid', 'token', 'role', 'platform', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        data.uid is string && data.uid.size() > 0 && data.uid.size() <= 128 &&
+        data.token is string && data.token.size() >= 10 && data.token.size() <= 512 &&
+        data.role in ['teacher', 'admin', 'principal'] &&
+        (!('platform' in data) || (data.platform is string && data.platform.size() <= 40)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPushNotification(data) {
+      return data.keys().hasAll(['id', 'title', 'message', 'category', 'targetRole', 'priority', 'senderUid', 'read', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'title', 'message', 'category', 'targetRole', 'priority', 'senderUid', 'read', 'createdAt']) &&
+        isValidId(data.id) &&
+        data.title is string && data.title.size() >= 2 && data.title.size() <= 180 &&
+        data.message is string && data.message.size() >= 2 && data.message.size() <= 600 &&
+        data.category in ['System', 'Academic', 'Attendance', 'Inspection', 'Leave', 'Exam'] &&
+        data.targetRole in ['teacher', 'admin', 'all'] &&
+        data.priority in ['high', 'normal'] &&
+        data.senderUid is string && data.senderUid.size() > 0 && data.senderUid.size() <= 128 &&
+        data.read is bool &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidExcelMappingSchema(data) {
+      return data.keys().hasAll(['id', 'name', 'columns', 'columnsCount', 'isDefault', 'createdByUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'name', 'description', 'sheetName', 'columns', 'columnsCount', 'isDefault', 'createdByUid', 'createdByName', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        data.name is string && data.name.size() >= 2 && data.name.size() <= 120 &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 300)) &&
+        (!('sheetName' in data) || (data.sheetName is string && data.sheetName.size() <= 80)) &&
+        data.columns is list && data.columns.size() > 0 && data.columns.size() <= 60 && data.columns[0] is map &&
+        data.columnsCount is int && data.columnsCount > 0 && data.columnsCount <= 60 &&
+        data.isDefault is bool &&
+        data.createdByUid is string && data.createdByUid.size() > 0 && data.createdByUid.size() <= 128 &&
+        (!('createdByName' in data) || (data.createdByName is string && data.createdByName.size() <= 120)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // /admins/{adminUid} - Authorised Admins Registry
+    match /admins/{adminUid} {
+      allow get: if isValidId(adminUid) && (isAdmin() || (isVerifiedUser() && request.auth.uid == adminUid));
+      allow list: if isAdmin();
+      allow create: if isValidId(adminUid) && isAdmin() && isValidAdminEntry(incoming()) && incoming().createdAt == request.time;
+      allow update: if isValidId(adminUid) && isAdmin() && isValidAdminEntry(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['email', 'name', 'role']);
+      allow delete: if isValidId(adminUid) && isBootstrappedAdmin();
+    }
+
+    // /schools/{schoolId} - School Profile (Non-PII institution identity + admin controlled writes)
+    match /schools/{schoolId} {
+      allow get: if isValidId(schoolId) && isVerifiedUser();
+      allow list: if isAdmin();
+      allow create: if isValidId(schoolId) && isAdmin() && isValidSchoolProfile(incoming()) && incoming().updatedAt == request.time;
+      allow update: if isValidId(schoolId) && isAdmin() && isValidSchoolProfile(incoming()) &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['name', 'nameUrdu', 'code', 'address', 'district', 'state', 'pinCode', 'academicSession', 'headTeacherName', 'motto', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    // /principals/{principalId} - Current & Historical Principal / Headmaster Records (contains contact PII -> admin only)
+    match /principals/{principalId} {
+      allow get: if isValidId(principalId) && isAdmin();
+      allow list: if isAdmin();
+      allow create: if isValidId(principalId) && isAdmin() && isValidPrincipal(incoming()) &&
+        incoming().createdByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(principalId) && isAdmin() && isValidPrincipal(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().createdByUid == existing().createdByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'designation', 'joiningDate', 'leavingDate', 'contactNumber', 'email', 'qualification', 'description', 'isCurrent', 'updatedAt']);
+      allow delete: if isValidId(principalId) && isAdmin();
+    }
+
+    // /students/{studentId} - Student Admission Database (Strict PII isolation: Admin or creator)
+    match /students/{studentId} {
+      allow get: if isValidId(studentId) && (isAdmin() || (isVerifiedUser() && existing().createdByUid == request.auth.uid));
+      allow list: if isVerifiedUser() && resource.data.createdByUid == request.auth.uid;
+      allow create: if isValidId(studentId) && isAdmin() && isValidStudent(incoming()) &&
+        incoming().createdByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(studentId) && isAdmin() && isValidStudent(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().createdByUid == existing().createdByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['admissionNumber', 'fullName', 'fatherName', 'motherName', 'gender', 'dob', 'classNumber', 'section', 'rollNumber', 'category', 'religion', 'nationality', 'address', 'mobileNumber', 'previousSchool', 'admissionDate', 'academicSession', 'status', 'updatedAt']);
+      allow delete: if isValidId(studentId) && isAdmin();
+    }
+
+    // /ocrBatches/{batchId} - Bulk OCR / Excel Import History
+    match /ocrBatches/{batchId} {
+      allow get: if isValidId(batchId) && isAdmin();
+      allow list: if isVerifiedUser() && resource.data.actorUid == request.auth.uid;
+      allow create: if isValidId(batchId) && isAdmin() && isValidOcrBatch(incoming()) &&
+        incoming().actorUid == request.auth.uid &&
+        incoming().createdAt == request.time;
+      allow update: if isValidId(batchId) && isAdmin() && isValidOcrBatch(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().actorUid == existing().actorUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['undone', 'importedCount', 'failedCount', 'duplicateCount']);
+      allow delete: if isValidId(batchId) && isAdmin();
+    }
+
+    // /ligatureReports/{reportId} - Noori Nastaleeq Missing Ligature Reports
+    match /ligatureReports/{reportId} {
+      allow get: if isValidId(reportId) && (isAdmin() || (isVerifiedUser() && existing().reportedByUid == request.auth.uid));
+      allow list: if isVerifiedUser() && resource.data.reportedByUid == request.auth.uid;
+      allow create: if isValidId(reportId) && isVerifiedUser() && isValidLigatureReport(incoming()) &&
+        incoming().reportedByUid == request.auth.uid &&
+        incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(reportId) && (isAdmin() || (isVerifiedUser() && existing().reportedByUid == request.auth.uid));
+    }
+
+    // /fcmTokens/{tokenId} - FCM Device Registration Tokens (strict owner/admin access)
+    match /fcmTokens/{tokenId} {
+      allow get: if isValidId(tokenId) && (isAdmin() || (isVerifiedUser() && existing().uid == request.auth.uid));
+      allow list: if isVerifiedUser() && resource.data.uid == request.auth.uid;
+      allow create: if isValidId(tokenId) && isVerifiedUser() && isValidFcmToken(incoming()) &&
+        incoming().uid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(tokenId) && isVerifiedUser() && isValidFcmToken(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().uid == existing().uid &&
+        incoming().uid == request.auth.uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['token', 'role', 'platform', 'updatedAt']);
+      allow delete: if isValidId(tokenId) && (isAdmin() || (isVerifiedUser() && existing().uid == request.auth.uid));
+    }
+
+    // /notifications/{notificationId} - Push Notification Feed
+    match /notifications/{notificationId} {
+      allow get: if isValidId(notificationId) && (
+        isAdmin() || (isVerifiedUser() && (existing().senderUid == request.auth.uid || existing().targetRole in ['all', 'teacher']))
+      );
+      allow list: if isVerifiedUser() && (
+        resource.data.senderUid == request.auth.uid || resource.data.targetRole in ['all', 'teacher']
+      );
+      allow create: if isValidId(notificationId) && isVerifiedUser() && isValidPushNotification(incoming()) &&
+        incoming().senderUid == request.auth.uid &&
+        incoming().createdAt == request.time;
+      allow update: if isValidId(notificationId) && isVerifiedUser() && isValidPushNotification(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().senderUid == existing().senderUid &&
+        incoming().createdAt == existing().createdAt &&
+        (isAdmin() || existing().senderUid == request.auth.uid) &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['read']);
+      allow delete: if isValidId(notificationId) && (isAdmin() || (isVerifiedUser() && existing().senderUid == request.auth.uid));
+    }
+
+    // /excelMappingSchemas/{schemaId} - Custom Excel Template Mapping Schemas (Admin configured)
+    match /excelMappingSchemas/{schemaId} {
+      allow get: if isValidId(schemaId) && (isAdmin() || (isVerifiedUser() && existing().createdByUid == request.auth.uid));
+      allow list: if isVerifiedUser() && resource.data.createdByUid == request.auth.uid;
+      allow create: if isValidId(schemaId) && isAdmin() && isValidExcelMappingSchema(incoming()) &&
+        incoming().createdByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(schemaId) && isAdmin() && isValidExcelMappingSchema(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().createdByUid == existing().createdByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'sheetName', 'columns', 'columnsCount', 'isDefault', 'updatedAt']);
+      allow delete: if isValidId(schemaId) && isAdmin();
+    }
+  }
+}

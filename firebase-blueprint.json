@@ -1,0 +1,212 @@
+{
+  "entities": {
+    "SchoolProfile": {
+      "title": "SchoolProfile",
+      "description": "Official institution metadata for Government Middle School Pamposh Colony.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "nameUrdu": { "type": "string", "maxLength": 200 },
+        "code": { "type": "string", "minLength": 4, "maxLength": 32 },
+        "address": { "type": "string", "maxLength": 300 },
+        "district": { "type": "string", "maxLength": 80 },
+        "state": { "type": "string", "maxLength": 80 },
+        "pinCode": { "type": "string", "maxLength": 16 },
+        "academicSession": { "type": "string", "maxLength": 32 },
+        "headTeacherName": { "type": "string", "maxLength": 120 },
+        "motto": { "type": "string", "maxLength": 120 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "code", "academicSession"]
+    },
+    "PrincipalRecord": {
+      "title": "PrincipalRecord",
+      "description": "Current and historical Principal / Headmaster records for Government Middle School Pamposh Colony.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "fullName": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "designation": {
+          "type": "string",
+          "enum": ["Principal", "Headmaster", "Headmistress", "Officiating Principal", "In-Charge Headmaster"]
+        },
+        "joiningDate": { "type": "string", "maxLength": 32 },
+        "leavingDate": { "type": "string", "maxLength": 32 },
+        "contactNumber": { "type": "string", "maxLength": 32 },
+        "email": { "type": "string", "maxLength": 120 },
+        "qualification": { "type": "string", "maxLength": 160 },
+        "description": { "type": "string", "maxLength": 1000 },
+        "isCurrent": { "type": "boolean" },
+        "createdByUid": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "fullName", "designation", "joiningDate", "isCurrent", "createdByUid", "createdAt", "updatedAt"]
+    },
+    "StudentRecord": {
+      "title": "StudentRecord",
+      "description": "Structured student admission register record supporting OCR bulk registration.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "admissionNumber": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "fullName": { "type": "string", "minLength": 2, "maxLength": 140 },
+        "fatherName": { "type": "string", "maxLength": 140 },
+        "motherName": { "type": "string", "maxLength": 140 },
+        "gender": { "type": "string", "enum": ["Male", "Female", "Other"] },
+        "dob": { "type": "string", "maxLength": 32 },
+        "classNumber": { "type": "string", "maxLength": 24 },
+        "section": { "type": "string", "maxLength": 16 },
+        "rollNumber": { "type": "integer" },
+        "category": { "type": "string", "maxLength": 40 },
+        "religion": { "type": "string", "maxLength": 40 },
+        "nationality": { "type": "string", "maxLength": 60 },
+        "address": { "type": "string", "maxLength": 300 },
+        "mobileNumber": { "type": "string", "maxLength": 32 },
+        "previousSchool": { "type": "string", "maxLength": 160 },
+        "admissionDate": { "type": "string", "maxLength": 32 },
+        "academicSession": { "type": "string", "maxLength": 32 },
+        "status": { "type": "string", "enum": ["Active", "Transferred", "Archived"] },
+        "createdByUid": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "admissionNumber", "fullName", "classNumber", "section", "status", "createdByUid", "createdAt", "updatedAt"]
+    },
+    "OcrImportBatch": {
+      "title": "OcrImportBatch",
+      "description": "Audit log of bulk OCR/Excel student registration import batches.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "sourceName": { "type": "string", "maxLength": 200 },
+        "sourceType": { "type": "string", "enum": ["camera", "image", "pdf", "excel", "csv", "text"] },
+        "totalScanned": { "type": "integer" },
+        "importedCount": { "type": "integer" },
+        "failedCount": { "type": "integer" },
+        "duplicateCount": { "type": "integer" },
+        "undone": { "type": "boolean" },
+        "actorUid": { "type": "string", "maxLength": 128 },
+        "actorName": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "sourceName", "sourceType", "totalScanned", "importedCount", "actorUid", "createdAt"]
+    },
+    "FontLigatureReport": {
+      "title": "FontLigatureReport",
+      "description": "Teacher-submitted missing or overlapping Noori Nastaleeq ligature report for font-face optimization.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "word": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "unicodeHex": { "type": "string", "maxLength": 250 },
+        "issueType": { "type": "string", "enum": ["Missing Glyph", "Overlapping Nuqta", "Broken Join", "Spacing Anomaly"] },
+        "notes": { "type": "string", "maxLength": 400 },
+        "reportedByUid": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "word", "issueType", "reportedByUid", "createdAt"]
+    },
+    "AdminUserEntry": {
+      "title": "AdminUserEntry",
+      "description": "Authorised administrator access record stored in /admins/{uid}.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 160 },
+        "name": { "type": "string", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["primary_admin", "senior_admin", "junior_admin"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "role", "createdAt"]
+    },
+    "FcmTokenRecord": {
+      "title": "FcmTokenRecord",
+      "description": "Firebase Cloud Messaging device registration token for teachers and administrators.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "uid": { "type": "string", "maxLength": 128 },
+        "token": { "type": "string", "minLength": 10, "maxLength": 512 },
+        "role": { "type": "string", "enum": ["teacher", "admin", "principal"] },
+        "platform": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "uid", "token", "role", "createdAt", "updatedAt"]
+    },
+    "PushNotificationRecord": {
+      "title": "PushNotificationRecord",
+      "description": "Dispatched FCM/push notification log for teacher leave decisions, attendance threshold alerts, and 3-day exam reminders.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "title": { "type": "string", "minLength": 2, "maxLength": 180 },
+        "message": { "type": "string", "minLength": 2, "maxLength": 600 },
+        "category": { "type": "string", "enum": ["System", "Academic", "Attendance", "Inspection", "Leave", "Exam"] },
+        "targetRole": { "type": "string", "enum": ["teacher", "admin", "all"] },
+        "priority": { "type": "string", "enum": ["high", "normal"] },
+        "senderUid": { "type": "string", "maxLength": 128 },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "message", "category", "targetRole", "priority", "senderUid", "read", "createdAt"]
+    },
+    "ExcelMappingSchema": {
+      "title": "ExcelMappingSchema",
+      "description": "Administrator-configured custom Excel column mapping schema for student bulk imports.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "name": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "description": { "type": "string", "maxLength": 300 },
+        "sheetName": { "type": "string", "maxLength": 80 },
+        "columnsCount": { "type": "integer" },
+        "isDefault": { "type": "boolean" },
+        "createdByUid": { "type": "string", "maxLength": 128 },
+        "createdByName": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "columnsCount", "isDefault", "createdByUid", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/admins/{adminUid}": {
+      "schema": { "$ref": "#/entities/AdminUserEntry" },
+      "description": "Registry of authorised school administrators."
+    },
+    "/schools/{schoolId}": {
+      "schema": { "$ref": "#/entities/SchoolProfile" },
+      "description": "Official school configuration and branding metadata."
+    },
+    "/principals/{principalId}": {
+      "schema": { "$ref": "#/entities/PrincipalRecord" },
+      "description": "Current and past Principal / Headmaster records."
+    },
+    "/students/{studentId}": {
+      "schema": { "$ref": "#/entities/StudentRecord" },
+      "description": "Structured student admission database."
+    },
+    "/ocrBatches/{batchId}": {
+      "schema": { "$ref": "#/entities/OcrImportBatch" },
+      "description": "Bulk OCR/Excel import batch audit records."
+    },
+    "/ligatureReports/{reportId}": {
+      "schema": { "$ref": "#/entities/FontLigatureReport" },
+      "description": "Reported Noori Nastaleeq ligature issues for font optimization."
+    },
+    "/fcmTokens/{tokenId}": {
+      "schema": { "$ref": "#/entities/FcmTokenRecord" },
+      "description": "Registered Firebase Cloud Messaging tokens per user device."
+    },
+    "/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/PushNotificationRecord" },
+      "description": "Push notification dispatch feed synced across staff and principals."
+    },
+    "/excelMappingSchemas/{schemaId}": {
+      "schema": { "$ref": "#/entities/ExcelMappingSchema" },
+      "description": "Saved custom Excel template column mapping schemas defined by school administrators."
+    }
+  }
+}
