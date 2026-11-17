@@ -250,11 +250,11 @@ export const AndroidApkGuideModal: React.FC<AndroidApkGuideModalProps> = ({
                 </div>
 
                 <p className="text-slate-700 font-medium text-[11px]">
-                  <strong>Release Highlights:</strong> Fingerprint & Pattern App Lock, Voice Typing in English & Urdu, Camera QR Attendance Scanner, High-Contrast Dark Mode, PWA Offline Service Worker, and Recharts Attendance Trends Date Filtering.
+                  <strong>Release Highlights (Android 8.0+):</strong> Fingerprint &amp; Pattern App Lock, Voice Typing in English &amp; Urdu, Camera QR Attendance Scanner, Persistent Scan Logs, Automated Low-Attendance Alerts, and Batch Class Exports.
                 </p>
 
                 <div className="p-2 rounded-lg bg-slate-900 text-slate-300 font-mono text-[10px] flex items-center justify-between">
-                  <span className="truncate">SHA-256: 7f83b1657ff1432e92c23f114c029311082e6d971a108bcf43</span>
+                  <span className="truncate">SHA-256: 98f96bf042373bff7d54261baf2ced738ce4d2d5dbd5b747d96c69c8d39c5043</span>
                   <span className="text-emerald-400 font-semibold shrink-0 ml-2">VERIFIED</span>
                 </div>
               </div>

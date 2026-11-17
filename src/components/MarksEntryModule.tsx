@@ -35,6 +35,7 @@ interface MarksEntryModuleProps {
   school: SchoolProfile;
   currentUser: User;
   language: Language;
+  subjectConfigs?: SubjectConfig[];
   onSaveMarks: (updatedMarks: StudentMarkEntry[]) => void;
 }
 
@@ -45,6 +46,7 @@ export const MarksEntryModule: React.FC<MarksEntryModuleProps> = ({
   school,
   currentUser,
   language,
+  subjectConfigs,
   onSaveMarks,
 }) => {
   const t = translations[language];
@@ -59,7 +61,7 @@ export const MarksEntryModule: React.FC<MarksEntryModuleProps> = ({
 
   // Active exam and subject
   const currentExam = examinations.find((e) => e.id === selectedExamId) || examinations[0];
-  const coreSubjects = sampleSubjectConfigs;
+  const coreSubjects = subjectConfigs && subjectConfigs.length > 0 ? subjectConfigs : sampleSubjectConfigs;
   const currentSubject = coreSubjects.find((s) => s.code === selectedSubjectCode) || coreSubjects[0];
 
   // Eligible students (strictly deduplicated by admissionNumber primary key)

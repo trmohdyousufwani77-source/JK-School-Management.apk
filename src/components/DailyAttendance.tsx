@@ -46,6 +46,8 @@ import {
   AlertCircle,
   FileText,
   VolumeX,
+  Settings,
+  Download,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -73,9 +75,23 @@ import {
   extractAdmissionOrIdFromQrText,
   deduplicateStudentsByAdmissionNumber,
   formatSchoolAddressOnce,
+  getMonthlyWorkingDays,
 } from '../utils/calculations';
+import {
+  exportAttendanceStatisticsCsv,
+  exportBatchMonthlyClassCsv,
+  exportBatchMonthlyClassPdf,
+} from '../utils/excelExport';
+import {
+  loadPushPreferences,
+  savePushPreferences,
+  dispatchParentLowAttendanceNotifications,
+  emitPushNotification,
+  PUSH_PREFS_UPDATED_EVENT,
+} from '../utils/pushNotifications';
 import { VoiceTypingButton } from './VoiceTypingButton';
 import { LocationMapModal, CheckInLocationData } from './LocationMapModal';
+import { AttendanceScanner, QueuedAutoSyncScan } from './AttendanceScanner';
 
 interface DailyAttendanceProps {
   students: Student[];
@@ -85,6 +101,7 @@ interface DailyAttendanceProps {
   auditLogs: AttendanceAuditLog[];
   isOffline: boolean;
   onSaveAttendance: (newRecords: AttendanceRecord[], auditEntries: AttendanceAuditLog[]) => void;
+  onTriggerSyncOfflineData?: () => void;
   language: Language;
 }
 
@@ -96,6 +113,7 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
   auditLogs,
   isOffline,
   onSaveAttendance,
+  onTriggerSyncOfflineData,
   language,
 }) => {
   const t = translations[language];
@@ -137,6 +155,75 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
   const [consecutiveScans, setConsecutiveScans] = useState<number>(0);
   const [batchSummaryToast, setBatchSummaryToast] = useState<{ count: number; duplicates: number } | null>(null);
   const [scannerActiveTab, setScannerActiveTab] = useState<'scanner' | 'history' | 'failures'>('scanner');
+  const [scannerAutoSync, setScannerAutoSync] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('school_master_scanner_auto_sync') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  const handleToggleScannerAutoSync = (next: boolean) => {
+    setScannerAutoSync(next);
+    try {
+      localStorage.setItem('school_master_scanner_auto_sync', String(next));
+    } catch {
+      // Ignore storage error
+    }
+  };
+
+  const handleScannerBackgroundSync = (queuedScans: QueuedAutoSyncScan[]) => {
+    if (isOffline) return;
+
+    const mergedByKey = new Map<string, AttendanceRecord>();
+
+    // Include any offline-queued QR attendance entries cached earlier
+    try {
+      const queueKey = 'school_master_offline_attendance_queue';
+      const raw = localStorage.getItem(queueKey);
+      const cached: AttendanceRecord[] = raw ? JSON.parse(raw) : [];
+      cached.forEach((rec) => {
+        mergedByKey.set(`${rec.studentId}::${rec.date}`, {
+          ...rec,
+          isOfflineSynced: true,
+          remarks: rec.remarks || 'QR Scanned (Auto-Synced)',
+        });
+      });
+      localStorage.removeItem(queueKey);
+    } catch {
+      // Ignore storage read error
+    }
+
+    queuedScans.forEach((item) => {
+      mergedByKey.set(`${item.studentId}::${item.date}`, {
+        id: `att-${item.studentId}-${item.date}`,
+        date: item.date,
+        studentId: item.studentId,
+        classNumber: item.classNumber || selectedClass,
+        section: item.section || selectedSection,
+        status: 'Present',
+        academicSession: school.academicSession,
+        markedByUserId: currentUser.id,
+        markedAt: item.markedAt,
+        isOfflineSynced: true,
+        remarks: 'QR Scanned (Auto-Synced)',
+      });
+    });
+
+    const recordsToSync = Array.from(mergedByKey.values());
+    if (recordsToSync.length > 0) {
+      onSaveAttendance(recordsToSync, []);
+      setIsSaved(true);
+      setQrScanSuccessToast(
+        language === 'ur'
+          ? `✓ خودکار سنک مکمل: ${recordsToSync.length} طلباء کی حاضری محفوظ ہو گئی`
+          : `✓ Auto-Sync complete: ${recordsToSync.length} scanned record(s) saved`
+      );
+      setTimeout(() => setQrScanSuccessToast(null), 3000);
+    }
+
+    onTriggerSyncOfflineData?.();
+  };
   
   // Attendance Scanning History (Last 20 scans with photo thumbnail & method)
   const [scanHistoryLog, setScanHistoryLog] = useState<Array<{
@@ -186,12 +273,106 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
   const [smsNoticeToast, setSmsNoticeToast] = useState<string | null>(null);
   const recentScannedIdsRef = useRef<Map<string, number>>(new Map());
 
+  // Attendance Settings & Automated Push Notification State
+  const [showAttendanceSettings, setShowAttendanceSettings] = useState<boolean>(false);
+  const [parentAlertsEnabled, setParentAlertsEnabled] = useState<boolean>(
+    () => loadPushPreferences().parentLowAttendanceAlerts
+  );
+  const [adminThresholdAlertsEnabled, setAdminThresholdAlertsEnabled] = useState<boolean>(
+    () => loadPushPreferences().attendanceThresholdAlerts
+  );
+  const [attendanceThresholdPct, setAttendanceThresholdPct] = useState<number>(
+    () => loadPushPreferences().attendanceThresholdPercent || 75
+  );
+  const alertedThresholdKeysRef = useRef<Set<string>>(new Set());
+  const thresholdInitializedRef = useRef<boolean>(false);
+
+  // Batch Export modal state in DailyAttendance
+  const [showBatchExportModal, setShowBatchExportModal] = useState<boolean>(false);
+  const [batchClassNumber, setBatchClassNumber] = useState<string>('5');
+  const [batchSectionScope, setBatchSectionScope] = useState<'all' | string>('all');
+  const [batchMonthIndex, setBatchMonthIndex] = useState<number>(9);
+  const [batchYear, setBatchYear] = useState<number>(2026);
+  const [isExportingBatchPdf, setIsExportingBatchPdf] = useState<boolean>(false);
+
+  // Floating Action Button Class Prompt Modal State (when no class is selected)
+  const [showFabClassPrompt, setShowFabClassPrompt] = useState<boolean>(false);
+  const [fabTempClass, setFabTempClass] = useState<string>(selectedClass || school.classesOffered[0] || '5');
+  const [fabTempSection, setFabTempSection] = useState<string>(selectedSection || 'A');
+
+  useEffect(() => {
+    const onPrefsUpdated = () => {
+      const p = loadPushPreferences();
+      setParentAlertsEnabled(p.parentLowAttendanceAlerts);
+      setAdminThresholdAlertsEnabled(p.attendanceThresholdAlerts);
+      setAttendanceThresholdPct(p.attendanceThresholdPercent || 75);
+    };
+    window.addEventListener(PUSH_PREFS_UPDATED_EVENT, onPrefsUpdated);
+    return () => window.removeEventListener(PUSH_PREFS_UPDATED_EVENT, onPrefsUpdated);
+  }, []);
+
+  const handleToggleParentLowAttendanceAlerts = () => {
+    const prefs = loadPushPreferences();
+    const nextEnabled = !parentAlertsEnabled;
+    savePushPreferences({
+      ...prefs,
+      parentLowAttendanceAlerts: nextEnabled,
+      attendanceThresholdPercent: attendanceThresholdPct,
+    });
+    setParentAlertsEnabled(nextEnabled);
+    setSmsNoticeToast(
+      nextEnabled
+        ? `Automated Parent Push Notifications (< ${attendanceThresholdPct}% attendance) enabled.`
+        : 'Automated Parent Push Notifications disabled.'
+    );
+    setTimeout(() => setSmsNoticeToast(null), 3500);
+  };
+
+  const handleToggleAdminThresholdAlerts = () => {
+    const prefs = loadPushPreferences();
+    const nextEnabled = !adminThresholdAlertsEnabled;
+    savePushPreferences({
+      ...prefs,
+      attendanceThresholdAlerts: nextEnabled,
+      attendanceThresholdPercent: attendanceThresholdPct,
+    });
+    setAdminThresholdAlertsEnabled(nextEnabled);
+    setSmsNoticeToast(
+      nextEnabled
+        ? `Automated Low-Attendance Threshold Alerts (< ${attendanceThresholdPct}%) enabled.`
+        : 'Automated Low-Attendance Threshold Alerts paused.'
+    );
+    setTimeout(() => setSmsNoticeToast(null), 3500);
+  };
+
+  const handleTriggerScannerFromFab = () => {
+    if (!selectedClass) {
+      setFabTempClass(school.classesOffered[0] || '5');
+      setFabTempSection(selectedSection || 'A');
+      setShowFabClassPrompt(true);
+      return;
+    }
+    setScannerActiveTab('scanner');
+    setShowQrScannerModal(true);
+  };
+
+  const handleConfirmFabClassAndScan = () => {
+    if (!fabTempClass) return;
+    setSelectedClass(fabTempClass);
+    setSelectedSection(fabTempSection || 'A');
+    setShowFabClassPrompt(false);
+    setScannerActiveTab('scanner');
+    setShowQrScannerModal(true);
+  };
+
   // Active students in selected class/section (deduplicated by Admission Number)
   const classStudents = useMemo(
     () =>
-      deduplicateStudentsByAdmissionNumber(students)
-        .filter((s) => s.classNumber === selectedClass && s.section === selectedSection && s.status === 'Active')
-        .sort((a, b) => a.rollNumber - b.rollNumber),
+      selectedClass
+        ? deduplicateStudentsByAdmissionNumber(students)
+            .filter((s) => s.classNumber === selectedClass && s.section === selectedSection && s.status === 'Active')
+            .sort((a, b) => a.rollNumber - b.rollNumber)
+        : [],
     [students, selectedClass, selectedSection]
   );
 
@@ -464,29 +645,9 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
     };
   }, [showQrScannerModal]);
 
-  // Manage Camera stream for QR Scanner (with front/back camera switch and torch support)
+  // Camera stream lifecycle is managed cleanly inside AttendanceScanner (html5-qrcode)
   useEffect(() => {
-    if (showQrScannerModal) {
-      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-        if (streamRef.current) {
-          streamRef.current.getTracks().forEach((track) => track.stop());
-          streamRef.current = null;
-        }
-        navigator.mediaDevices
-          .getUserMedia({ video: { facingMode: cameraFacing } })
-          .then((stream) => {
-            streamRef.current = stream;
-            if (videoRef.current) {
-              videoRef.current.srcObject = stream;
-            }
-            setCameraActive(true);
-          })
-          .catch((err) => {
-            console.warn('Camera stream could not start in this context:', err);
-            setCameraActive(false);
-          });
-      }
-    } else {
+    if (!showQrScannerModal) {
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((track) => track.stop());
         streamRef.current = null;
@@ -494,13 +655,7 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
       setCameraActive(false);
       setIsFlashOn(false);
     }
-    return () => {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-        streamRef.current = null;
-      }
-    };
-  }, [showQrScannerModal, cameraFacing]);
+  }, [showQrScannerModal]);
 
   // Toggle torch/flashlight
   const toggleFlashlight = async () => {
@@ -556,6 +711,164 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
     }
     return list;
   }, [selectedDate, selectedClass, selectedSection, attendanceRecords, classStudents]);
+
+  // Weekly Summary & 3+ Consecutive Days Absent Detector
+  const weeklySummary = useMemo(() => {
+    const anchor = new Date(`${selectedDate || '2026-10-28'}T00:00:00`);
+    const holidaySet = new Set((school.holidays || []).map((h) => h.date));
+
+    // Collect up to the last 14 school working days ending on selectedDate
+    const workingDates14: string[] = [];
+    for (let offset = 0; offset < 25 && workingDates14.length < 14; offset++) {
+      const d = new Date(anchor);
+      d.setDate(anchor.getDate() - offset);
+      const dow = d.getDay();
+      const iso = d.toISOString().slice(0, 10);
+      const isSecondOrFourthSat =
+        dow === 6 && (Math.ceil(d.getDate() / 7) === 2 || Math.ceil(d.getDate() / 7) === 4);
+      if (dow !== 0 && !isSecondOrFourthSat && !holidaySet.has(iso)) {
+        workingDates14.unshift(iso);
+      }
+    }
+
+    const weekDates = workingDates14.slice(-6);
+
+    const resolveStatus = (studentId: string, dateStr: string): AttendanceStatus | null => {
+      if (dateStr === selectedDate && draftStatus[studentId]) {
+        return draftStatus[studentId];
+      }
+      const found = attendanceRecords.find((r) => r.studentId === studentId && r.date === dateStr);
+      return found ? found.status : null;
+    };
+
+    const dailyBars = weekDates.map((dateStr) => {
+      let present = 0;
+      let absent = 0;
+      let leave = 0;
+      let tracked = 0;
+
+      classStudents.forEach((st) => {
+        const status = resolveStatus(st.id, dateStr);
+        if (!status) return;
+        tracked++;
+        if (status === 'Present' || status === 'Late') present++;
+        else if (status === 'Absent') absent++;
+        else if (status === 'Approved_Leave') leave++;
+      });
+
+      const pct = tracked > 0 ? Math.round((present / tracked) * 100) : null;
+      const dt = new Date(`${dateStr}T00:00:00`);
+      return {
+        dateStr,
+        dayLabel: dt.toLocaleDateString('en-IN', { weekday: 'short' }),
+        shortDate: dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }),
+        present,
+        absent,
+        leave,
+        tracked,
+        pct,
+      };
+    });
+
+    const recordedBars = dailyBars.filter((b) => b.pct !== null);
+    let livePresentOrLate = 0;
+    classStudents.forEach((s) => {
+      const st = draftStatus[s.id] || 'Present';
+      if (st === 'Present' || st === 'Late') livePresentOrLate++;
+    });
+    const fallbackPct = calculateAttendancePercentage(livePresentOrLate, classStudents.length);
+    const weeklyAvgPct =
+      recordedBars.length > 0
+        ? Math.round((recordedBars.reduce((acc, b) => acc + (b.pct ?? 0), 0) / recordedBars.length) * 10) / 10
+        : fallbackPct;
+
+    const consecutiveAbsentStudents: Array<{
+      student: Student;
+      consecutiveDays: number;
+      absentDates: string[];
+    }> = [];
+
+    classStudents.forEach((st) => {
+      let maxStreak = 0;
+      let maxStreakDates: string[] = [];
+      let curStreak = 0;
+      let curDates: string[] = [];
+
+      workingDates14.forEach((dateStr) => {
+        const status = resolveStatus(st.id, dateStr);
+        if (status === 'Absent') {
+          curStreak += 1;
+          curDates.push(dateStr);
+          if (curStreak >= maxStreak) {
+            maxStreak = curStreak;
+            maxStreakDates = [...curDates];
+          }
+        } else {
+          curStreak = 0;
+          curDates = [];
+        }
+      });
+
+      if (maxStreak >= 3) {
+        consecutiveAbsentStudents.push({
+          student: st,
+          consecutiveDays: maxStreak,
+          absentDates: maxStreakDates,
+        });
+      }
+    });
+
+    consecutiveAbsentStudents.sort((a, b) => b.consecutiveDays - a.consecutiveDays);
+
+    return {
+      dailyBars,
+      weeklyAvgPct,
+      consecutiveAbsentStudents,
+      rangeLabel:
+        weekDates.length > 0
+          ? `${weekDates[0]} to ${weekDates[weekDates.length - 1]}`
+          : selectedDate,
+    };
+  }, [selectedDate, school.holidays, classStudents, attendanceRecords, draftStatus]);
+
+  // CSV Monthly Class Attendance Statistics Export Handler
+  const handleExportAttendanceStatsCsv = () => {
+    const dt = new Date(`${selectedDate || '2026-10-28'}T00:00:00`);
+    const year = dt.getFullYear();
+    const monthIndex = dt.getMonth();
+    const monthName = dt.toLocaleDateString('en-US', { month: 'long' });
+    const { workingDays, dates } = getMonthlyWorkingDays(year, monthIndex, school.holidays);
+
+    // Merge current unsaved draftStatus for selectedDate cleanly so live edits reflect in CSV
+    const mergedRecords: AttendanceRecord[] = [
+      ...attendanceRecords.filter(
+        (r) => !(r.date === selectedDate && r.classNumber === selectedClass && r.section === selectedSection)
+      ),
+      ...classStudents.map((st) => ({
+        id: `att-${st.id}-${selectedDate}`,
+        date: selectedDate,
+        studentId: st.id,
+        classNumber: selectedClass,
+        section: selectedSection,
+        status: draftStatus[st.id] || 'Present',
+        academicSession: school.academicSession,
+        markedByUserId: currentUser.id,
+        markedAt: new Date().toISOString(),
+      })),
+    ];
+
+    exportAttendanceStatisticsCsv({
+      students: deduplicateStudentsByAdmissionNumber(students),
+      records: mergedRecords,
+      school,
+      classNumber: selectedClass,
+      section: selectedSection,
+      monthName,
+      year,
+      daysList: dates,
+      workingDaysTotal: workingDays,
+    });
+  };
 
   // Load existing records whenever date, class, or section changes
   useEffect(() => {
@@ -1318,7 +1631,117 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
     onSaveAttendance(newRecords, auditEntries);
     setIsSaved(true);
     setAlreadyExists(true);
+
+    // Evaluate automated low-attendance threshold & parent push alerts on Save
+    const mergedRecords = [
+      ...attendanceRecords.filter((r) => !newRecords.some((nr) => nr.id === r.id)),
+      ...newRecords,
+    ];
+
+    if (parentAlertsEnabled) {
+      const alertResult = dispatchParentLowAttendanceNotifications(
+        mergedRecords,
+        students,
+        attendanceThresholdPct
+      );
+      if (alertResult.notificationsSent.length > 0) {
+        setSmsNoticeToast(
+          `Automated parent push alerts sent for ${alertResult.flaggedStudents.length} student(s) below ${attendanceThresholdPct}% attendance.`
+        );
+        setTimeout(() => setSmsNoticeToast(null), 4000);
+      }
+    }
   };
+
+  // Real-time Student Cumulative Threshold Monitor (< attendanceThresholdPct%)
+  const studentsBelowThreshold = useMemo(() => {
+    if (!selectedClass || classStudents.length === 0) return [];
+    const results: Array<{
+      student: Student;
+      presentDays: number;
+      totalDays: number;
+      percentage: number;
+    }> = [];
+
+    classStudents.forEach((st) => {
+      const hist = attendanceRecords.filter(
+        (r) => r.studentId === st.id && r.date !== selectedDate
+      );
+      let present = 0;
+      let total = 0;
+      hist.forEach((r) => {
+        total += 1;
+        if (r.status === 'Present' || r.status === 'Late') present += 1;
+      });
+      const draft = draftStatus[st.id];
+      if (draft) {
+        total += 1;
+        if (draft === 'Present' || draft === 'Late') present += 1;
+      }
+      if (total > 0) {
+        const pct = Math.round((present / total) * 100);
+        if (pct < attendanceThresholdPct) {
+          results.push({
+            student: st,
+            presentDays: present,
+            totalDays: total,
+            percentage: pct,
+          });
+        }
+      }
+    });
+
+    return results.sort((a, b) => a.percentage - b.percentage);
+  }, [selectedClass, classStudents, attendanceRecords, selectedDate, draftStatus, attendanceThresholdPct]);
+
+  useEffect(() => {
+    if (!adminThresholdAlertsEnabled) return;
+    const currentKeys = new Set(
+      studentsBelowThreshold.map((item) => `${item.student.id}::${attendanceThresholdPct}`)
+    );
+
+    if (!thresholdInitializedRef.current) {
+      thresholdInitializedRef.current = true;
+      currentKeys.forEach((k) => alertedThresholdKeysRef.current.add(k));
+      return;
+    }
+
+    const newlyFlagged = studentsBelowThreshold.filter(
+      (item) => !alertedThresholdKeysRef.current.has(`${item.student.id}::${attendanceThresholdPct}`)
+    );
+
+    // Clear keys for students whose attendance recovered above threshold
+    alertedThresholdKeysRef.current.forEach((existingKey) => {
+      if (!currentKeys.has(existingKey)) {
+        alertedThresholdKeysRef.current.delete(existingKey);
+      }
+    });
+
+    if (newlyFlagged.length > 0) {
+      newlyFlagged.forEach((item) => {
+        alertedThresholdKeysRef.current.add(`${item.student.id}::${attendanceThresholdPct}`);
+      });
+
+      const primary = newlyFlagged[0];
+      const msg =
+        newlyFlagged.length === 1
+          ? `${primary.student.fullName} (Class ${primary.student.classNumber}-${primary.student.section}) dropped to ${primary.percentage}% (${primary.presentDays}/${primary.totalDays} days), below ${attendanceThresholdPct}% threshold.`
+          : `${newlyFlagged.length} students dropped below ${attendanceThresholdPct}% threshold including ${primary.student.fullName} (${primary.percentage}%).`;
+
+      emitPushNotification({
+        title: `Low Attendance Alert (<${attendanceThresholdPct}%)`,
+        titleUrdu: `کم حاضری کا الرٹ (<${attendanceThresholdPct}%)`,
+        message: msg,
+        messageUrdu: `${primary.student.fullName} کی حاضری ${primary.percentage}% ہو گئی ہے جو مقررہ حد سے کم ہے۔`,
+        category: 'Attendance',
+        targetRole: 'admin',
+        priority: 'high',
+      });
+
+      setSmsNoticeToast(`Low Attendance Alert (<${attendanceThresholdPct}%): ${msg}`);
+      window.setTimeout(() => setSmsNoticeToast(null), 5000);
+    }
+  }, [studentsBelowThreshold, attendanceThresholdPct, adminThresholdAlertsEnabled]);
 
   return (
     <div className="space-y-6">
@@ -1410,14 +1833,139 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
             </div>
           )}
           <button
+            type="button"
+            onClick={() => {
+              const dt = new Date(`${selectedDate || '2026-10-28'}T00:00:00`);
+              setBatchClassNumber(selectedClass || school.classesOffered[0] || '5');
+              setBatchSectionScope('all');
+              setBatchMonthIndex(Number.isNaN(dt.getTime()) ? 9 : dt.getMonth());
+              setBatchYear(Number.isNaN(dt.getTime()) ? 2026 : dt.getFullYear());
+              setShowBatchExportModal(true);
+            }}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-indigo-600 text-white hover:bg-indigo-700 transition-colors whitespace-nowrap shrink-0"
+          >
+            <Layers className="w-4 h-4" />
+            <span>Batch Export</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleExportAttendanceStatsCsv}
+            disabled={!selectedClass}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-emerald-50 text-emerald-800 hover:bg-emerald-100 border border-emerald-300 transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
+          >
+            <Download className="w-4 h-4 text-emerald-600" />
+            <span>Export Attendance Statistics</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowAttendanceSettings((prev) => !prev)}
+            className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border transition-colors whitespace-nowrap shrink-0 ${
+              showAttendanceSettings
+                ? 'bg-indigo-600 text-white border-indigo-600'
+                : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-300'
+            }`}
+          >
+            <Settings className="w-4 h-4" />
+            <span>Attendance Settings</span>
+          </button>
+          <button
             onClick={() => setShowAuditTrailModal(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200 border border-slate-300 transition-colors"
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200 border border-slate-300 transition-colors whitespace-nowrap shrink-0"
           >
             <History className="w-4 h-4 text-slate-600" />
             <span>{t.auditTrail} ({auditLogs.length})</span>
           </button>
         </div>
       </div>
+
+      {/* Attendance Settings Drawer (Automated Alert System & Configurable Threshold) */}
+      {showAttendanceSettings && (
+        <div className="bg-white p-4 sm:p-5 rounded-2xl border border-indigo-200 shadow-sm space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <div className="w-9 h-9 rounded-xl bg-indigo-50 text-indigo-600 border border-indigo-200 flex items-center justify-center shrink-0">
+                <Bell className="w-4 h-4" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">
+                  Automated Low-Attendance Alert System
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Automatically trigger a push notification and in-app toast whenever a student&apos;s attendance drops below {attendanceThresholdPct}%.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-4 shrink-0">
+              <label className="text-xs font-semibold text-slate-600 flex items-center gap-1.5">
+                <span>Threshold:</span>
+                <select
+                  value={attendanceThresholdPct}
+                  aria-label="Configure attendance alert threshold percentage"
+                  onChange={(e) => {
+                    const nextPct = Number(e.target.value) || 75;
+                    setAttendanceThresholdPct(nextPct);
+                    thresholdInitializedRef.current = false;
+                    const prefs = loadPushPreferences();
+                    savePushPreferences({
+                      ...prefs,
+                      attendanceThresholdPercent: nextPct,
+                    });
+                  }}
+                  className="px-2 py-1 rounded-lg border border-slate-300 bg-slate-50 font-mono font-bold text-slate-800 text-xs"
+                >
+                  <option value={65}>65%</option>
+                  <option value={70}>70%</option>
+                  <option value={75}>75%</option>
+                  <option value={80}>80%</option>
+                  <option value={85}>85%</option>
+                  <option value={90}>90%</option>
+                </select>
+              </label>
+
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-semibold text-slate-700">Admin Alerts</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={adminThresholdAlertsEnabled}
+                  aria-label="Enable automated admin low-attendance push and toast alerts"
+                  onClick={handleToggleAdminThresholdAlerts}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
+                    adminThresholdAlertsEnabled ? 'bg-indigo-600' : 'bg-slate-300'
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition duration-200 ${
+                      adminThresholdAlertsEnabled ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-semibold text-slate-700">Parent Push</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={parentAlertsEnabled}
+                  aria-label="Enable automated parent push notifications below threshold"
+                  onClick={handleToggleParentLowAttendanceAlerts}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
+                    parentAlertsEnabled ? 'bg-emerald-600' : 'bg-slate-300'
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition duration-200 ${
+                      parentAlertsEnabled ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Control Bar: Date & Class Selector */}
       <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-sm flex flex-wrap items-center justify-between gap-3">
@@ -1436,7 +1984,7 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
             />
           </div>
 
-          {/* Class Selector */}
+          {/* Class Selector (supports unselected state for FAB class prompt workflow) */}
           <div>
             <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
               {t.class}
@@ -1446,6 +1994,7 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
               onChange={(e) => setSelectedClass(e.target.value)}
               className="px-3 py-2 border border-slate-300 rounded-xl font-medium text-slate-800 bg-slate-50 focus:ring-2 focus:ring-indigo-500"
             >
+              <option value="">-- Select Class --</option>
               {school.classesOffered.map((c) => (
                 <option key={c} value={c}>Class {c}</option>
               ))}
@@ -1818,6 +2367,204 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
         </div>
       </div>
 
+      {/* Visual Weekly Summary Card (Highlights 3+ Consecutive Days Absent) */}
+      <section
+        aria-label="Weekly Summary"
+        className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 space-y-4"
+      >
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+          <div>
+            <h3 className="text-sm font-extrabold text-slate-900">
+              Weekly Summary · Class {selectedClass || '—'}-{selectedSection}
+            </h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              {weeklySummary.rangeLabel} · Flags students absent for 3 or more consecutive school days
+            </p>
+          </div>
+
+          <div className="flex items-center gap-4 text-xs font-mono tabular-nums">
+            <span className="text-slate-600">
+              Weekly Rate: <strong className="text-indigo-700 font-bold">{weeklySummary.weeklyAvgPct}%</strong>
+            </span>
+            <span aria-hidden="true" className="text-slate-300">|</span>
+            <span className={weeklySummary.consecutiveAbsentStudents.length > 0 ? 'text-rose-700 font-bold' : 'text-emerald-700 font-bold'}>
+              3+ Day Absences: {weeklySummary.consecutiveAbsentStudents.length}
+            </span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+          {/* 6-Day Visual Attendance Strip */}
+          <div className="lg:col-span-5 space-y-2">
+            <p className="text-xs font-semibold text-slate-600">
+              6-Working-Day Attendance Breakdown
+            </p>
+            <div className="grid grid-cols-6 gap-2 pt-1">
+              {weeklySummary.dailyBars.map((day) => {
+                const heightPct = day.pct !== null ? Math.max(12, day.pct) : 8;
+                const barColor =
+                  day.pct === null
+                    ? 'bg-slate-200'
+                    : day.pct >= 85
+                    ? 'bg-emerald-500'
+                    : day.pct >= 75
+                    ? 'bg-amber-500'
+                    : 'bg-rose-500';
+                return (
+                  <div key={day.dateStr} className="flex flex-col items-center gap-1.5 text-center">
+                    <span className="text-[11px] font-mono tabular-nums font-bold text-slate-700">
+                      {day.pct !== null ? `${day.pct}%` : '—'}
+                    </span>
+                    <div className="w-full h-20 bg-slate-100 rounded-lg flex items-end p-1">
+                      <div
+                        className={`w-full rounded ${barColor} transition-all`}
+                        style={{ height: `${heightPct}%` }}
+                        title={`${day.shortDate}: ${day.present} Present, ${day.absent} Absent, ${day.leave} Leave`}
+                      />
+                    </div>
+                    <div className="leading-tight">
+                      <span className="text-[11px] font-bold text-slate-700 block">{day.dayLabel}</span>
+                      <span className="text-[10px] text-slate-400 font-mono tabular-nums">{day.shortDate}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* 3+ Consecutive Absences Highlight Panel */}
+          <div className="lg:col-span-7 space-y-2">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
+                <AlertTriangle
+                  className={`w-4 h-4 shrink-0 ${
+                    weeklySummary.consecutiveAbsentStudents.length > 0 ? 'text-rose-600' : 'text-emerald-600'
+                  }`}
+                />
+                <span>Consecutive Absence Watch (3+ Days)</span>
+              </p>
+              <span className="text-[11px] text-slate-500 font-mono tabular-nums">
+                14-Day Window
+              </span>
+            </div>
+
+            {weeklySummary.consecutiveAbsentStudents.length === 0 ? (
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 flex items-center gap-2">
+                <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>No students in Class {selectedClass || '—'}-{selectedSection} have 3 or more consecutive absent days.</span>
+              </div>
+            ) : (
+              <ul className="divide-y divide-rose-100 border border-rose-200 rounded-xl bg-rose-50/40 overflow-hidden">
+                {weeklySummary.consecutiveAbsentStudents.map(({ student, consecutiveDays, absentDates }) => (
+                  <li
+                    key={student.id}
+                    className="px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-slate-900 truncate">{student.fullName}</span>
+                        <span className="text-[11px] text-slate-500 font-mono tabular-nums shrink-0">
+                          Roll #{student.rollNumber}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-rose-800 mt-0.5 truncate font-mono tabular-nums">
+                        Absent dates: {absentDates.join(', ')}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2.5 shrink-0">
+                      <span className="font-mono tabular-nums font-extrabold text-rose-700">
+                        {consecutiveDays} consecutive days
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSmsNoticeToast(
+                            `Parent outreach queued for ${student.fullName} (${consecutiveDays} consecutive absences)`
+                          );
+                          setTimeout(() => setSmsNoticeToast(null), 3500);
+                        }}
+                        className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-bold whitespace-nowrap shrink-0 transition-colors"
+                      >
+                        Notify Parent
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* Real-Time Student Threshold Intervention Watch (< attendanceThresholdPct%) */}
+      {studentsBelowThreshold.length > 0 && (
+        <section
+          aria-label="Low Attendance Threshold Watch"
+          className="bg-white rounded-2xl border border-rose-200 p-4 sm:p-5 space-y-3"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-rose-100 pb-2.5">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+              <h3 className="text-sm font-extrabold text-slate-900">
+                Early Intervention Watch · Below {attendanceThresholdPct}% Threshold ({studentsBelowThreshold.length})
+              </h3>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                const top = studentsBelowThreshold[0];
+                emitPushNotification({
+                  title: `Intervention Alert: ${studentsBelowThreshold.length} student(s) below ${attendanceThresholdPct}%`,
+                  message: `${top.student.fullName} (${top.percentage}%) and ${Math.max(0, studentsBelowThreshold.length - 1)} peer(s) require admin/parent follow-up.`,
+                  category: 'Attendance',
+                  targetRole: 'admin',
+                  priority: 'high',
+                });
+              }}
+              className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold whitespace-nowrap shrink-0 transition-colors"
+            >
+              Send Intervention Push
+            </button>
+          </div>
+          <ul className="divide-y divide-slate-100 text-xs">
+            {studentsBelowThreshold.map(({ student, presentDays, totalDays, percentage }) => (
+              <li
+                key={student.id}
+                className="py-2 flex flex-wrap items-center justify-between gap-2"
+              >
+                <div className="min-w-0">
+                  <span className="font-bold text-slate-900">{student.fullName}</span>
+                  <span className="text-slate-500 ml-2 font-mono tabular-nums">
+                    Roll #{student.rollNumber} · {presentDays}/{totalDays} days
+                  </span>
+                </div>
+                <div className="flex items-center gap-3 shrink-0">
+                  <span className="font-mono tabular-nums font-extrabold text-rose-700">
+                    {percentage}%
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      emitPushNotification({
+                        title: `Parent Intervention Notice: ${student.fullName}`,
+                        message: `${student.fullName} (Class ${student.classNumber}-${student.section}) attendance is ${percentage}% (<${attendanceThresholdPct}%).`,
+                        category: 'Attendance',
+                        targetRole: 'all',
+                        priority: 'high',
+                      });
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold whitespace-nowrap shrink-0 transition-colors"
+                  >
+                    Alert Parent
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
       {/* Attendance Anomaly Alert for Principal (< 75%) */}
       {attendancePercentage < 75 && (
         <div className="p-3.5 rounded-2xl bg-amber-500/10 border-2 border-amber-500/40 text-amber-900 flex items-center justify-between gap-3 shadow-xs">
@@ -2158,22 +2905,105 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
         </div>
       </div>
 
-      {/* Subtle Offline Mode Indicator Badge Glowing in Bottom-Right Corner */}
+      {/* Sync Status Pill & Floating Action Button (FAB) for Instant QR Camera Scanner */}
       <div
-        className={`fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full border shadow-lg backdrop-blur-md text-xs font-bold flex items-center gap-2 transition-all ${
+        className={`fixed bottom-4 left-4 lg:left-72 z-30 px-3 py-1.5 rounded-full border shadow-lg backdrop-blur-md text-xs font-bold flex items-center gap-2 transition-all no-print ${
           isOffline
-            ? 'bg-rose-950/90 text-rose-300 border-rose-500/80 shadow-rose-900/50 animate-pulse ring-2 ring-rose-500/30'
-            : 'bg-slate-900/80 text-emerald-300 border-slate-700 shadow-slate-950/30'
+            ? 'bg-rose-950/90 text-rose-300 border-rose-500/80 shadow-rose-900/50 ring-2 ring-rose-500/30'
+            : 'bg-slate-900/85 text-emerald-300 border-slate-700 shadow-slate-950/30'
         }`}
         title={isOffline ? 'Offline Mode Active - Attendance is safely stored in local queue and will sync when online' : 'System Online & Connected'}
       >
         <span
-          className={`w-2.5 h-2.5 rounded-full ${
-            isOffline ? 'bg-rose-500 animate-ping' : 'bg-emerald-400'
+          className={`w-2 h-2 rounded-full ${
+            isOffline ? 'bg-rose-500' : 'bg-emerald-400'
           }`}
         />
-        <span>{isOffline ? 'Offline Mode (Local Storage Sync Queue Active)' : 'Online Synced'}</span>
+        <span>{isOffline ? 'Offline Queue Active' : 'Online Synced'}</span>
       </div>
+
+      {/* Floating Action Button (FAB): Camera QR Scanner even when class isn't selected yet */}
+      <button
+        type="button"
+        onClick={handleTriggerScannerFromFab}
+        aria-label="Open QR Attendance Scanner"
+        title="Scan Student QR Attendance (selects class automatically if needed)"
+        className="fixed bottom-20 lg:bottom-6 right-6 z-40 inline-flex items-center gap-2 px-4 py-3.5 rounded-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-xl shadow-indigo-900/30 border border-indigo-400/40 transition-transform hover:scale-105 active:scale-95 no-print"
+      >
+        <QrCode className="w-5 h-5 text-amber-300" />
+        <span className="whitespace-nowrap">QR Scan Attendance</span>
+      </button>
+
+      {/* Prompt Class Selection Modal (when FAB is clicked with no class selected) */}
+      {showFabClassPrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/75 backdrop-blur-sm no-print">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-6 border border-slate-200 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center border border-indigo-200">
+                  <QrCode className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-black text-slate-900">Select Class to Scan</h3>
+                  <p className="text-[11px] text-slate-500">Choose class &amp; section before starting camera QR roll-call</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowFabClassPrompt(false)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-700"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Class</label>
+                <select
+                  value={fabTempClass}
+                  onChange={(e) => setFabTempClass(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl bg-slate-50 font-bold text-slate-800"
+                >
+                  {school.classesOffered.map((c) => (
+                    <option key={c} value={c}>Class {c}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Section</label>
+                <select
+                  value={fabTempSection}
+                  onChange={(e) => setFabTempSection(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl bg-slate-50 font-bold text-slate-800"
+                >
+                  <option value="A">Section A</option>
+                  <option value="B">Section B</option>
+                  <option value="C">Section C</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setShowFabClassPrompt(false)}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmFabClassAndScan}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm flex items-center gap-1.5"
+              >
+                <Camera className="w-3.5 h-3.5" />
+                <span>Start QR Scanner</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* =================================================================== */}
       {/* QR CODE ATTENDANCE SCANNER OVERLAY / MODAL                          */}
@@ -2278,220 +3108,44 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
                 </div>
               )}
 
-              {/* TAB 1: SCANNER & LIVE VIEWFINDER */}
+              {/* TAB 1: HTML5-QRCODE ATTENDANCE SCANNER */}
               {scannerActiveTab === 'scanner' && (
-                <>
-                  {/* Top HUD Controls Bar (Battery, Session Timer, Flash, Camera Flip, Continuous Mode) */}
-                  <div className="flex items-center justify-between gap-2 bg-slate-950/80 p-2.5 rounded-2xl border border-slate-800 flex-wrap text-xs">
-                    <div className="flex items-center gap-2">
-                      {/* Session Timer HUD */}
-                      <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-slate-900 border border-slate-700 font-mono text-[11px] text-slate-300">
-                        <Clock className="w-3.5 h-3.5 text-indigo-400" />
-                        <span>Session: {String(Math.floor(sessionSeconds / 60)).padStart(2, '0')}:{String(sessionSeconds % 60).padStart(2, '0')}</span>
-                      </div>
-
-                      {/* Battery Indicator (Turns Red when < 20%) */}
-                      <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-xl font-mono text-[11px] border ${
-                        batteryLevel < 20
-                          ? 'bg-rose-950/80 text-rose-300 border-rose-500/60 animate-pulse'
-                          : 'bg-slate-900 text-emerald-400 border-slate-700'
-                      }`}>
-                        {batteryLevel < 20 ? (
-                          <BatteryWarning className="w-3.5 h-3.5 text-rose-400" />
-                        ) : (
-                          <Battery className="w-3.5 h-3.5 text-emerald-400" />
-                        )}
-                        <span>{batteryLevel}% {isCharging ? '⚡' : ''}</span>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-2 flex-wrap">
-                      {/* Torch Toggle Button */}
-                      <button
-                        type="button"
-                        onClick={toggleFlashlight}
-                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-xs font-bold transition-all border ${
-                          isFlashOn
-                            ? 'bg-amber-500 text-slate-950 border-amber-400 shadow-md shadow-amber-500/30'
-                            : 'bg-slate-900 text-slate-300 border-slate-700 hover:bg-slate-800'
-                        }`}
-                        title="Toggle Flash / Torch"
-                      >
-                        <Zap className="w-3.5 h-3.5" />
-                        <span>{isFlashOn ? 'Torch On' : 'Torch'}</span>
-                      </button>
-
-                      {/* Front/Back Camera Flip */}
-                      <button
-                        type="button"
-                        onClick={handleToggleCameraFacing}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 transition-all active:scale-95"
-                        title="Switch between Environment (Rear) and User (Front) camera"
-                      >
-                        <RotateCw className="w-3.5 h-3.5 text-indigo-400" />
-                        <span>Flip ({cameraFacing === 'environment' ? 'Rear' : 'Front'})</span>
-                      </button>
-
-                      {/* Continuous Bulk Mode Toggle */}
-                      <button
-                        type="button"
-                        onClick={() => setIsContinuousBulkMode((prev) => !prev)}
-                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-xs font-bold transition-all border ${
-                          isContinuousBulkMode
-                            ? 'bg-indigo-600 text-white border-indigo-400 shadow-md shadow-indigo-600/30'
-                            : 'bg-slate-900 text-slate-400 border-slate-700 hover:bg-slate-800'
-                        }`}
-                        title="Continuous scanning without modal closing"
-                      >
-                        <ScanLine className="w-3.5 h-3.5" />
-                        <span>Continuous: {isContinuousBulkMode ? 'ON' : 'OFF'}</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Viewfinder Camera Area with Magnetic Snapping Reticle and Momentary Green Flash */}
-                  <div className="relative aspect-video w-full rounded-2xl bg-black overflow-hidden border border-slate-800 flex items-center justify-center shadow-inner">
-                    <video
-                      ref={videoRef}
-                      autoPlay
-                      playsInline
-                      muted
-                      className={`w-full h-full object-cover ${cameraActive ? 'block' : 'hidden'}`}
-                    />
-
-                    {!cameraActive && (
-                      <div className="flex flex-col items-center justify-center text-slate-500 space-y-2 p-6 text-center">
-                        <CameraOff className="w-10 h-10 text-slate-600" />
-                        <p className="text-xs font-medium text-slate-400">
-                          Live camera viewfinder initializing or preview mode active.
-                        </p>
-                        <p className="text-[10px] text-slate-500">
-                          Tap any student card below or type roll number to register attendance.
-                        </p>
-                      </div>
-                    )}
-
-                    {/* Momentary Green Visual Confirmation Flash on Success */}
-                    {flashGreenOverlay && (
-                      <div className="absolute inset-0 bg-emerald-500/50 backdrop-blur-xs pointer-events-none z-30 flex items-center justify-center animate-in fade-in duration-75">
-                        <div className="p-3 rounded-2xl bg-slate-950/90 border-2 border-emerald-400 text-emerald-300 font-extrabold flex items-center gap-2 shadow-2xl scale-110">
-                          <CheckCircle2 className="w-6 h-6 text-emerald-400" />
-                          <span className="text-sm">Verified & Recorded!</span>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Target Reticle Overlay with magnetic snapping animation & pulsating status */}
-                    <div className="absolute inset-6 sm:inset-10 rounded-2xl border-2 border-emerald-500/50 animate-qr-reticle pointer-events-none flex items-center justify-center overflow-hidden">
-                      <div className="absolute top-0 left-0 w-6 h-6 border-t-3 border-l-3 border-emerald-400 rounded-tl-xl" />
-                      <div className="absolute top-0 right-0 w-6 h-6 border-t-3 border-r-3 border-emerald-400 rounded-tr-xl" />
-                      <div className="absolute bottom-0 left-0 w-6 h-6 border-b-3 border-l-3 border-emerald-400 rounded-bl-xl" />
-                      <div className="absolute bottom-0 right-0 w-6 h-6 border-b-3 border-r-3 border-emerald-400 rounded-br-xl" />
-
-                      <div className="absolute left-0 right-0 animate-qr-laser pointer-events-none z-10">
-                        <div className="w-full h-0.5 sm:h-1 bg-gradient-to-r from-transparent via-emerald-400 to-transparent shadow-[0_0_15px_#10b981,0_0_25px_#34d399,0_0_40px_rgba(16,185,129,0.85)]" />
-                        <div className="w-full h-6 bg-gradient-to-b from-emerald-500/20 to-transparent" />
-                      </div>
-
-                      {/* Pulsating 'Scanning...' status label in viewfinder */}
-                      <div className="absolute top-2.5 inset-x-0 flex justify-center">
-                        <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-950/90 border border-emerald-500/60 shadow-lg backdrop-blur-xs">
-                          <span className="relative flex h-2 w-2">
-                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                            <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                          </span>
-                          <span className="text-[10px] font-mono tracking-wider text-emerald-300 font-extrabold uppercase animate-pulse">
-                            SCANNING... ({isContinuousBulkMode ? 'CONTINUOUS BULK' : 'SINGLE'})
-                          </span>
-                        </div>
-                      </div>
-
-                      <div className="absolute bottom-2 inset-x-0 flex justify-center">
-                        <span className="text-[10px] font-medium tracking-wide text-slate-300 bg-slate-950/85 px-3 py-0.5 rounded-full border border-slate-700/60 backdrop-blur-xs">
-                          Align student QR badge inside frame
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Manual / Barcode Search Input */}
-                  <div className="flex items-center gap-2">
-                    <div className="relative flex-1">
-                      <input
-                        type="text"
-                        value={manualScannerInput}
-                        onChange={(e) => setManualScannerInput(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            e.preventDefault();
-                            handleManualScanSubmit();
-                          }
-                        }}
-                        placeholder="Enter Student ID, Admission SRN, or Roll #..."
-                        className="w-full px-3 py-2 pl-8 rounded-xl bg-slate-800/90 border border-slate-700 text-xs text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 font-medium"
-                      />
-                      <ScanLine className="w-4 h-4 text-slate-400 absolute left-2.5 top-2.5" />
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleManualScanSubmit}
-                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-colors shrink-0 flex items-center gap-1.5 shadow-sm active:scale-95"
-                    >
-                      <span>Scan In</span>
-                    </button>
-                  </div>
-
-                  {/* Quick Scan Student ID Cards */}
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-bold text-slate-300 flex items-center gap-1.5">
-                        <UserCheck className="w-4 h-4 text-emerald-400" />
-                        <span>{t.manualOrQuickScan} ({classStudents.length})</span>
-                      </span>
-                      <span className="text-[11px] text-slate-400">Tap card to mark Present</span>
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-52 overflow-y-auto pr-1">
-                      {classStudents.map((st) => {
-                        const isMarkedPresent = draftStatus[st.id] === 'Present';
-                        return (
-                          <button
-                            key={st.id}
-                            type="button"
-                            onClick={() => handleScanStudent(st)}
-                            className={`p-2.5 rounded-xl border text-left flex items-center justify-between transition-all active:scale-95 ${
-                              isMarkedPresent
-                                ? 'bg-emerald-950/40 border-emerald-500/40 hover:bg-emerald-900/40'
-                                : 'bg-slate-800/80 border-slate-700/80 hover:border-indigo-400 hover:bg-slate-800'
-                            }`}
-                          >
-                            <div className="min-w-0 flex items-center gap-2.5">
-                              <div className="w-8 h-8 rounded-lg bg-slate-900 border border-slate-700 flex items-center justify-center shrink-0">
-                                <QrCode className="w-4 h-4 text-indigo-400" />
-                              </div>
-                              <div className="truncate">
-                                <div className="font-bold text-xs text-white truncate">{st.fullName}</div>
-                                <div className="text-[10px] text-slate-400 font-mono">
-                                  Roll #{st.rollNumber} • {st.gender}
-                                </div>
-                              </div>
-                            </div>
-
-                            {isMarkedPresent ? (
-                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shrink-0">
-                                Present ✓
-                              </span>
-                            ) : (
-                              <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-slate-700 text-slate-300 shrink-0">
-                                Tap Scan
-                              </span>
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </>
+                <AttendanceScanner
+                  students={students}
+                  classStudents={classStudents}
+                  attendanceRecords={attendanceRecords}
+                  selectedDate={selectedDate}
+                  selectedClass={selectedClass}
+                  selectedSection={selectedSection}
+                  draftStatus={draftStatus}
+                  continuousScanning={isContinuousBulkMode}
+                  onToggleContinuousScanning={setIsContinuousBulkMode}
+                  autoSync={scannerAutoSync}
+                  onToggleAutoSync={handleToggleScannerAutoSync}
+                  isOffline={isOffline}
+                  onTriggerBackgroundSync={handleScannerBackgroundSync}
+                  onScanSuccess={(student) => handleScanStudent(student)}
+                  onScanFailure={(rawText, reason) => {
+                    playErrorTone();
+                    setScanFailureLogs((prev) => [
+                      {
+                        id: `fl-${Date.now()}`,
+                        rawInput: rawText.slice(0, 60),
+                        reason,
+                        timestamp: new Date().toLocaleTimeString(),
+                      },
+                      ...prev.slice(0, 49),
+                    ]);
+                  }}
+                  onPromptSelectClass={() => {
+                    setShowQrScannerModal(false);
+                    setFabTempClass(selectedClass || school.classesOffered[0] || '5');
+                    setFabTempSection(selectedSection || 'A');
+                    setShowFabClassPrompt(true);
+                  }}
+                  cameraFacing={cameraFacing}
+                  language={language}
+                />
               )}
 
               {/* TAB 2: ATTENDANCE SCANNING HISTORY LOG (Last 20 Scans with Photo Thumbnail) */}
@@ -3399,6 +4053,175 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
           </div>
         </div>
       )}
+
+      {/* Batch Export Modal (Single PDF or CSV for Entire Class) */}
+      {showBatchExportModal && (() => {
+        const monthNames = [
+          'January', 'February', 'March', 'April', 'May', 'June',
+          'July', 'August', 'September', 'October', 'November', 'December',
+        ];
+        const batchTiming = getMonthlyWorkingDays(batchYear, batchMonthIndex, school.holidays);
+        const batchMonthName = monthNames[batchMonthIndex] || 'October';
+        const dedupedAll = deduplicateStudentsByAdmissionNumber(students);
+        const matchingCount = dedupedAll.filter(
+          (s) =>
+            s.status === 'Active' &&
+            s.classNumber === batchClassNumber &&
+            (batchSectionScope === 'all' || s.section === batchSectionScope)
+        ).length;
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/65 backdrop-blur-sm no-print">
+            <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
+              <div className="px-5 py-4 bg-slate-900 text-white flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <Layers className="w-5 h-5 text-indigo-400" />
+                  <div>
+                    <h3 className="text-sm font-bold">Batch Export Monthly Attendance</h3>
+                    <p className="text-[11px] text-slate-400">
+                      Export full-class monthly report in one PDF or CSV file
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowBatchExportModal(false)}
+                  className="p-1 rounded-lg text-slate-400 hover:text-white"
+                  aria-label="Close batch export modal"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="p-5 space-y-4 text-xs">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                      Target Class
+                    </label>
+                    <select
+                      value={batchClassNumber}
+                      onChange={(e) => setBatchClassNumber(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-slate-50 font-semibold text-slate-800"
+                    >
+                      {school.classesOffered.map((c) => (
+                        <option key={c} value={c}>Class {c}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                      Section Scope
+                    </label>
+                    <select
+                      value={batchSectionScope}
+                      onChange={(e) => setBatchSectionScope(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-slate-50 font-semibold text-slate-800"
+                    >
+                      <option value="all">Entire Class (All Sections)</option>
+                      <option value="A">Section A Only</option>
+                      <option value="B">Section B Only</option>
+                      <option value="C">Section C Only</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                      Month
+                    </label>
+                    <select
+                      value={batchMonthIndex}
+                      onChange={(e) => setBatchMonthIndex(Number(e.target.value))}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-slate-50 font-semibold text-slate-800"
+                    >
+                      {monthNames.map((m, idx) => (
+                        <option key={m} value={idx}>{m}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                      Year
+                    </label>
+                    <select
+                      value={batchYear}
+                      onChange={(e) => setBatchYear(Number(e.target.value))}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-slate-50 font-semibold text-slate-800"
+                    >
+                      <option value={2026}>2026</option>
+                      <option value={2027}>2027</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between text-[11px] text-slate-600 font-mono tabular-nums">
+                  <span>Matched Students: <strong className="text-slate-900">{matchingCount}</strong></span>
+                  <span>Working Days: <strong className="text-indigo-700">{batchTiming.workingDays}</strong></span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                  <button
+                    type="button"
+                    disabled={isExportingBatchPdf || matchingCount === 0}
+                    onClick={async () => {
+                      setIsExportingBatchPdf(true);
+                      try {
+                        const res = await exportBatchMonthlyClassPdf({
+                          students: dedupedAll,
+                          records: attendanceRecords,
+                          school,
+                          classNumber: batchClassNumber,
+                          sectionScope: batchSectionScope,
+                          monthName: batchMonthName,
+                          year: batchYear,
+                          daysList: batchTiming.dates,
+                          workingDaysTotal: batchTiming.workingDays,
+                        });
+                        setSmsNoticeToast(`Batch Export complete: ${res.filename} (${res.studentCount} students).`);
+                        setTimeout(() => setSmsNoticeToast(null), 4000);
+                        setShowBatchExportModal(false);
+                      } finally {
+                        setIsExportingBatchPdf(false);
+                      }
+                    }}
+                    className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold transition-colors disabled:opacity-50 whitespace-nowrap"
+                  >
+                    <FileText className="w-4 h-4" />
+                    <span>{isExportingBatchPdf ? 'Generating PDF...' : 'Download Single PDF'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={matchingCount === 0}
+                    onClick={() => {
+                      const res = exportBatchMonthlyClassCsv({
+                        students: dedupedAll,
+                        records: attendanceRecords,
+                        school,
+                        classNumber: batchClassNumber,
+                        sectionScope: batchSectionScope,
+                        monthName: batchMonthName,
+                        year: batchYear,
+                        daysList: batchTiming.dates,
+                        workingDaysTotal: batchTiming.workingDays,
+                      });
+                      setSmsNoticeToast(`Batch Export complete: ${res.filename} (${res.studentCount} students).`);
+                      setTimeout(() => setSmsNoticeToast(null), 4000);
+                      setShowBatchExportModal(false);
+                    }}
+                    className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold transition-colors disabled:opacity-50 whitespace-nowrap"
+                  >
+                    <FileSpreadsheet className="w-4 h-4" />
+                    <span>Download Single CSV</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
     </div>
   );

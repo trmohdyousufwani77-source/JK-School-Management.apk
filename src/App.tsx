@@ -88,6 +88,7 @@ import {
   StudentHistoryEvent,
   StudentHolisticRecord,
   StudentMarkEntry,
+  SubjectConfig,
   TeacherLeaveApplication,
   TeacherProfile,
   TeacherAttendanceRecord,
@@ -107,6 +108,7 @@ import {
   sampleHolisticRecords,
   sampleMarksEntries,
   sampleStudents,
+  sampleSubjectConfigs,
   sampleTeacherLeaveApplications,
   sampleTeachers,
   sampleTeacherAttendanceRecords,
@@ -543,6 +545,55 @@ function SchoolMasterApp() {
     localStorage.setItem(`${STORAGE_KEY_PREFIX}exams`, JSON.stringify(examinations));
   }, [examinations]);
 
+  // 10.5 Core Subject Configs & Order (Lifted & Synced Across Report Cards + Exam Schedules)
+  const [subjectConfigs, setSubjectConfigs] = useState<SubjectConfig[]>(() => {
+    const saved = localStorage.getItem(`${STORAGE_KEY_PREFIX}subject_configs`);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      } catch (e) { /* ignore */ }
+    }
+    return sampleSubjectConfigs;
+  });
+
+  useEffect(() => {
+    localStorage.setItem(`${STORAGE_KEY_PREFIX}subject_configs`, JSON.stringify(subjectConfigs));
+  }, [subjectConfigs]);
+
+  const handleUpdateSubjectConfigs = (updatedSubjects: SubjectConfig[]) => {
+    setSubjectConfigs(updatedSubjects);
+    const orderIndex = new Map(updatedSubjects.map((s, idx) => [s.code, idx]));
+    const updatedByCode = new Map(updatedSubjects.map((s) => [s.code, s]));
+
+    // Sync new subject sequence & marks configuration directly into all examinations' class schedules
+    setExaminations((prev) =>
+      prev.map((exam) => {
+        const nextSubjectsByClass: { [classNumber: string]: SubjectConfig[] } = {};
+        Object.entries(exam.subjects).forEach(([cls, subList]) => {
+          nextSubjectsByClass[cls] = [...subList]
+            .map((sub) => {
+              const cfg = updatedByCode.get(sub.code);
+              return cfg
+                ? {
+                    ...sub,
+                    name: cfg.name,
+                    nameHi: cfg.nameHi,
+                    nameUrdu: cfg.nameUrdu,
+                    isCompulsory: cfg.isCompulsory,
+                  }
+                : sub;
+            })
+            .sort((a, b) => (orderIndex.get(a.code) ?? 999) - (orderIndex.get(b.code) ?? 999));
+        });
+        return {
+          ...exam,
+          subjects: nextSubjectsByClass,
+        };
+      })
+    );
+  };
+
   const [marksEntries, setMarksEntries] = useState<StudentMarkEntry[]>(() => {
     const saved = localStorage.getItem(`${STORAGE_KEY_PREFIX}marks`);
     if (saved) {
@@ -853,6 +904,46 @@ function SchoolMasterApp() {
 
   const handleBulkAddStudents = (newStudents: Student[]) => {
     setStudents((prev) => deduplicateStudentsByAdmissionNumber([...prev, ...newStudents]));
+  };
+
+  const handleBulkPromoteStudents = (
+    studentIds: string[],
+    targetClass: string,
+    targetSection: string,
+    targetSession: string,
+    isGraduated = false
+  ) => {
+    if (studentIds.length === 0) return;
+    const idSet = new Set(studentIds);
+    const nowIso = new Date().toISOString();
+
+    setStudents((prev) =>
+      prev.map((st) => {
+        if (!idSet.has(st.id)) return st;
+        const nextSection = targetSection === 'KEEP' ? st.section : targetSection;
+        const nextClass = isGraduated ? st.classNumber : targetClass;
+        const nextStatus = isGraduated ? 'Archived' : st.status;
+        const event: StudentHistoryEvent = {
+          id: `hist-${Date.now()}-${st.id.slice(-4)}`,
+          date: nowIso,
+          type: 'CLASS_CHANGE',
+          title: isGraduated ? 'Completed & Graduated' : `Promoted to Class ${nextClass}`,
+          details: isGraduated
+            ? `Promoted from Class ${st.classNumber}-${st.section} to Alumni / Graduated Archive (Session ${targetSession})`
+            : `Promoted from Class ${st.classNumber}-${st.section} (${st.academicSession}) to Class ${nextClass}-${nextSection} (${targetSession})`,
+          actorName: currentUser.name,
+        };
+        return {
+          ...st,
+          classNumber: nextClass,
+          section: nextSection,
+          academicSession: targetSession,
+          status: nextStatus,
+          updatedAt: nowIso,
+          history: [event, ...(st.history || [])],
+        };
+      })
+    );
   };
 
   // Handlers for Excel Template Mapping Schemas
@@ -1351,6 +1442,7 @@ function SchoolMasterApp() {
             onUpdateStudent={handleUpdateStudent}
             onDeleteStudent={handleDeleteStudent}
             onBulkDeleteStudents={handleBulkDeleteStudents}
+            onBulkPromoteStudents={handleBulkPromoteStudents}
             language={language}
           />
         );
@@ -1412,6 +1504,8 @@ function SchoolMasterApp() {
             teachers={teachers}
             language={language}
             isAdmin={effectiveRole !== 'teacher'}
+            subjects={subjectConfigs}
+            onUpdateSubjectConfig={handleUpdateSubjectConfigs}
           />
         );
       case 'marks-entry':
@@ -1423,6 +1517,7 @@ function SchoolMasterApp() {
             school={school}
             currentUser={currentUser}
             language={language}
+            subjectConfigs={subjectConfigs}
             onSaveMarks={handleSaveMarks}
           />
         );
@@ -1435,6 +1530,7 @@ function SchoolMasterApp() {
             school={school}
             currentUser={currentUser}
             language={language}
+            subjectConfigs={subjectConfigs}
             onSaveMarks={handleSaveMarks}
             onNavigateToMarks={() => setCurrentTab('marks-entry')}
             onNavigateToHpc={() => setCurrentTab('progress-cards')}
@@ -1450,6 +1546,7 @@ function SchoolMasterApp() {
             auditLogs={auditLogs}
             isOffline={isOffline}
             onSaveAttendance={handleSaveAttendance}
+            onTriggerSyncOfflineData={handleSyncOfflineData}
             language={language}
           />
         );
@@ -1473,6 +1570,7 @@ function SchoolMasterApp() {
             marksEntries={marksEntries}
             school={school}
             language={language}
+            subjectConfigs={subjectConfigs}
             currentUser={currentUser}
             effectiveRole={effectiveRole}
             holisticRecords={holisticRecords}
@@ -1574,6 +1672,7 @@ function SchoolMasterApp() {
             marksEntries={marksEntries}
             school={school}
             currentUser={currentUser}
+            subjectConfigs={subjectConfigs}
             onSaveMarks={handleSaveMarks}
             onAddExamination={handleAddExamination}
             onUpdateExamination={handleUpdateExamination}
@@ -1615,6 +1714,7 @@ function SchoolMasterApp() {
             examinations={examinations}
             marksEntries={marksEntries}
             textbookRecords={textbookRecords}
+            subjectConfigs={subjectConfigs}
             language={language}
             onOpenDownloadHub={() => setIsDownloadHubOpen(true)}
           />

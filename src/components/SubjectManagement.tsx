@@ -1,17 +1,14 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   BookOpen,
   Edit2,
   Check,
   Award,
-  Layers,
-  Settings,
-  UserCheck,
-  TrendingUp,
-  Sliders,
-  ShieldCheck,
   Save,
-  HelpCircle,
+  GripVertical,
+  ArrowUp,
+  ArrowDown,
+  RotateCcw,
 } from 'lucide-react';
 import { SchoolProfile, TeacherProfile, SubjectConfig } from '../types';
 import { Language, translations } from '../utils/translations';
@@ -22,6 +19,7 @@ interface SubjectManagementProps {
   teachers: TeacherProfile[];
   language: Language;
   isAdmin: boolean;
+  subjects?: SubjectConfig[];
   onUpdateSubjectConfig?: (updatedSubjects: SubjectConfig[]) => void;
 }
 
@@ -30,15 +28,24 @@ export const SubjectManagement: React.FC<SubjectManagementProps> = ({
   teachers,
   language,
   isAdmin,
+  subjects: controlledSubjects,
   onUpdateSubjectConfig,
 }) => {
   const t = translations[language];
 
-  // Subject configs state with default 6 mandatory subjects
-  const [subjects, setSubjects] = useState<SubjectConfig[]>(sampleSubjectConfigs);
+  // Subject configs state synced with parent prop if provided
+  const [subjects, setSubjects] = useState<SubjectConfig[]>(controlledSubjects || sampleSubjectConfigs);
   const [editingCode, setEditingCode] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<SubjectConfig | null>(null);
   const [saveNotice, setSaveNotice] = useState<string>('');
+  const [draggedCode, setDraggedCode] = useState<string | null>(null);
+  const [dragOverCode, setDragOverCode] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (controlledSubjects && controlledSubjects.length > 0) {
+      setSubjects(controlledSubjects);
+    }
+  }, [controlledSubjects]);
 
   // Assessment weightages configuration
   const [weightages, setWeightages] = useState<{ [key: string]: { written: number; internal: number; practical: number } }>({
@@ -78,6 +85,55 @@ export const SubjectManagement: React.FC<SubjectManagementProps> = ({
     }));
   };
 
+  const commitReorder = (nextSubjects: SubjectConfig[], noticeText: string) => {
+    setSubjects(nextSubjects);
+    onUpdateSubjectConfig?.(nextSubjects);
+    setSaveNotice(noticeText);
+    setTimeout(() => setSaveNotice(''), 3500);
+  };
+
+  const handleMoveSubject = (index: number, direction: -1 | 1) => {
+    const targetIdx = index + direction;
+    if (targetIdx < 0 || targetIdx >= subjects.length) return;
+    const next = [...subjects];
+    const [moved] = next.splice(index, 1);
+    next.splice(targetIdx, 0, moved);
+    commitReorder(
+      next,
+      `Moved "${moved.name}" to position #${targetIdx + 1} for Report Cards & Exam Schedules.`
+    );
+  };
+
+  const handleDropSubject = (targetCode: string) => {
+    if (!draggedCode || draggedCode === targetCode) {
+      setDraggedCode(null);
+      setDragOverCode(null);
+      return;
+    }
+    const fromIdx = subjects.findIndex((s) => s.code === draggedCode);
+    const toIdx = subjects.findIndex((s) => s.code === targetCode);
+    if (fromIdx === -1 || toIdx === -1) {
+      setDraggedCode(null);
+      setDragOverCode(null);
+      return;
+    }
+    const next = [...subjects];
+    const [moved] = next.splice(fromIdx, 1);
+    next.splice(toIdx, 0, moved);
+    setDraggedCode(null);
+    setDragOverCode(null);
+    commitReorder(
+      next,
+      `Reordered "${moved.name}" to #${toIdx + 1}. Synced across Report Cards & Exam Schedules.`
+    );
+  };
+
+  const handleResetDefaultOrder = () => {
+    const codeMap = new Map(subjects.map((s) => [s.code, s]));
+    const restored = sampleSubjectConfigs.map((def) => codeMap.get(def.code) || def);
+    commitReorder(restored, 'Subject sequence restored to default curriculum order.');
+  };
+
   // Find assigned teachers for a subject
   const getAssignedTeacher = (subName: string) => {
     const matched = teachers.filter((tch) =>
@@ -96,37 +152,95 @@ export const SubjectManagement: React.FC<SubjectManagementProps> = ({
             <span>Subject Management & Assessment Criteria</span>
           </h1>
           <p className="text-xs text-slate-500 mt-1">
-            Configure the 6 mandatory curriculum subjects, maximum marks, passing thresholds, assessment weightages, and grading scales.
+            Drag and drop subject cards or use arrow controls to organize report card column order and examination schedules.
           </p>
         </div>
 
-        {saveNotice && (
-          <div className="px-3.5 py-2 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-bold animate-in fade-in flex items-center gap-2">
-            <Check className="w-4 h-4 text-emerald-600" />
-            <span>{saveNotice}</span>
-          </div>
-        )}
+        <div className="flex flex-wrap items-center gap-2.5">
+          {saveNotice && (
+            <div className="px-3.5 py-2 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-bold animate-in fade-in flex items-center gap-2">
+              <Check className="w-4 h-4 text-emerald-600" />
+              <span>{saveNotice}</span>
+            </div>
+          )}
+
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={handleResetDefaultOrder}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition-colors whitespace-nowrap shrink-0"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Reset Default Order</span>
+            </button>
+          )}
+        </div>
       </div>
 
-      {/* Six Subjects Grid */}
+      {/* Six Subjects Drag-and-Drop Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
         {subjects.map((sub, idx) => {
           const isEditing = editingCode === sub.code;
+          const isDragging = draggedCode === sub.code;
+          const isDragOver = dragOverCode === sub.code && draggedCode !== sub.code;
           const assigned = getAssignedTeacher(sub.name);
           const weightage = weightages[sub.code] || { written: 80, internal: 20, practical: 0 };
 
           return (
             <div
               key={sub.code}
+              draggable={isAdmin && !isEditing}
+              onDragStart={(e) => {
+                if (!isAdmin || isEditing) return;
+                setDraggedCode(sub.code);
+                e.dataTransfer.effectAllowed = 'move';
+                e.dataTransfer.setData('text/plain', sub.code);
+              }}
+              onDragOver={(e) => {
+                if (!isAdmin || !draggedCode) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+                if (dragOverCode !== sub.code) {
+                  setDragOverCode(sub.code);
+                }
+              }}
+              onDragLeave={() => {
+                if (dragOverCode === sub.code) {
+                  setDragOverCode(null);
+                }
+              }}
+              onDrop={(e) => {
+                if (!isAdmin) return;
+                e.preventDefault();
+                handleDropSubject(sub.code);
+              }}
+              onDragEnd={() => {
+                setDraggedCode(null);
+                setDragOverCode(null);
+              }}
               className={`bg-white rounded-2xl border transition-all p-5 flex flex-col justify-between ${
-                isEditing ? 'border-indigo-500 ring-2 ring-indigo-100 shadow-md' : 'border-slate-200 shadow-sm hover:border-indigo-300'
-              }`}
+                isDragging
+                  ? 'opacity-55 border-indigo-400 scale-[0.98]'
+                  : isDragOver
+                  ? 'border-indigo-600 ring-2 ring-indigo-300 bg-indigo-50/30 shadow-md'
+                  : isEditing
+                  ? 'border-indigo-500 ring-2 ring-indigo-100 shadow-md'
+                  : 'border-slate-200 shadow-sm hover:border-indigo-300'
+              } ${isAdmin && !isEditing ? 'cursor-grab active:cursor-grabbing' : ''}`}
             >
               <div>
                 {/* Header */}
-                <div className="flex items-start justify-between">
+                <div className="flex items-start justify-between gap-2">
                   <div className="flex items-center gap-2.5">
-                    <div className="w-9 h-9 rounded-xl bg-indigo-50 text-indigo-700 font-black text-sm flex items-center justify-center font-mono">
+                    {isAdmin && !isEditing && (
+                      <span
+                        title="Drag to reorder subject"
+                        className="p-1 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 shrink-0"
+                      >
+                        <GripVertical className="w-4 h-4" />
+                      </span>
+                    )}
+                    <div className="w-9 h-9 rounded-xl bg-indigo-50 text-indigo-700 font-black text-sm flex items-center justify-center font-mono tabular-nums shrink-0">
                       {idx + 1}
                     </div>
                     <div>
@@ -135,9 +249,35 @@ export const SubjectManagement: React.FC<SubjectManagementProps> = ({
                     </div>
                   </div>
 
-                  <span className="px-2 py-0.5 rounded font-mono text-[11px] font-bold bg-slate-100 text-slate-700">
-                    {sub.code}
-                  </span>
+                  <div className="flex items-center gap-1 shrink-0">
+                    {isAdmin && !isEditing && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => handleMoveSubject(idx, -1)}
+                          disabled={idx === 0}
+                          title="Move earlier"
+                          aria-label={`Move ${sub.name} up`}
+                          className="p-1 rounded-lg bg-slate-100 hover:bg-indigo-50 text-slate-600 hover:text-indigo-700 disabled:opacity-35 disabled:cursor-not-allowed"
+                        >
+                          <ArrowUp className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleMoveSubject(idx, 1)}
+                          disabled={idx === subjects.length - 1}
+                          title="Move later"
+                          aria-label={`Move ${sub.name} down`}
+                          className="p-1 rounded-lg bg-slate-100 hover:bg-indigo-50 text-slate-600 hover:text-indigo-700 disabled:opacity-35 disabled:cursor-not-allowed"
+                        >
+                          <ArrowDown className="w-3.5 h-3.5" />
+                        </button>
+                      </>
+                    )}
+                    <span className="px-2 py-0.5 rounded font-mono text-[11px] font-bold bg-slate-100 text-slate-700">
+                      {sub.code}
+                    </span>
+                  </div>
                 </div>
 
                 {/* Subject Details & Edit Mode */}

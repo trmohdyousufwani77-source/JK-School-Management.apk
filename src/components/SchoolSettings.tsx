@@ -26,12 +26,18 @@ import {
   Image as ImageIcon,
   FileSignature,
   Stamp,
+  Bell,
 } from 'lucide-react';
 import { GradeBoundary, Holiday, SchoolProfile } from '../types';
 import { Language, translations } from '../utils/translations';
 
 import { translateSchoolNameToUrdu } from '../utils/urduTransliteration';
 import { AdminAccessControl } from './AdminAccessControl';
+import {
+  loadPushPreferences,
+  savePushPreferences,
+  PUSH_PREFS_UPDATED_EVENT,
+} from '../utils/pushNotifications';
 
 interface SchoolSettingsProps {
   school: SchoolProfile;
@@ -109,6 +115,27 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
   const [holidays, setHolidays] = useState<Holiday[]>(school.holidays);
 
   const [saveSuccess, setSaveSuccess] = useState<boolean>(false);
+  const [parentLowAttendancePush, setParentLowAttendancePush] = useState<boolean>(
+    () => loadPushPreferences().parentLowAttendanceAlerts
+  );
+
+  useEffect(() => {
+    const syncPrefs = () => {
+      setParentLowAttendancePush(loadPushPreferences().parentLowAttendanceAlerts);
+    };
+    window.addEventListener(PUSH_PREFS_UPDATED_EVENT, syncPrefs);
+    return () => window.removeEventListener(PUSH_PREFS_UPDATED_EVENT, syncPrefs);
+  }, []);
+
+  const handleToggleParentLowAttendancePush = () => {
+    const prefs = loadPushPreferences();
+    const next = !prefs.parentLowAttendanceAlerts;
+    savePushPreferences({
+      ...prefs,
+      parentLowAttendanceAlerts: next,
+    });
+    setParentLowAttendancePush(next);
+  };
 
   useEffect(() => {
     setActiveTab(initialSubTab);
@@ -947,6 +974,45 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
               onChange={(e) => setReportFooter(e.target.value)}
               className="w-full px-3 py-2 border rounded-xl text-xs font-mono"
             />
+          </div>
+
+          {/* Automated Parent Low-Attendance Push Notifications Toggle */}
+          <div className="p-4 rounded-2xl border border-indigo-200 bg-indigo-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start gap-3">
+              <div className="w-9 h-9 rounded-xl bg-indigo-100 text-indigo-700 flex items-center justify-center shrink-0">
+                <Bell className="w-4 h-4" />
+              </div>
+              <div>
+                <h3 className="text-xs font-extrabold text-slate-900">
+                  Automated Parent Low-Attendance Push Notifications (&lt;75% Threshold)
+                </h3>
+                <p className="text-[11px] text-slate-600 mt-0.5">
+                  Automatically sends push alerts to parents when a student&apos;s cumulative attendance falls below the configured 75% threshold. Synced with Daily Attendance Settings.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2.5 shrink-0">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={parentLowAttendancePush}
+                aria-label="Automated Parent Low-Attendance Push Notifications"
+                onClick={handleToggleParentLowAttendancePush}
+                className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ${
+                  parentLowAttendancePush ? 'bg-indigo-600' : 'bg-slate-300'
+                }`}
+              >
+                <span
+                  className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition duration-200 ${
+                    parentLowAttendancePush ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+              <span className="text-xs font-bold text-slate-700 w-16">
+                {parentLowAttendancePush ? 'Enabled' : 'Disabled'}
+              </span>
+            </div>
           </div>
 
           <div className="pt-4 border-t flex justify-end">

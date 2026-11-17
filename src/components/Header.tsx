@@ -180,6 +180,7 @@ export const Header: React.FC<HeaderProps> = ({
   const [isNotifOpen, setIsNotifOpen] = useState<boolean>(false);
   const [showNotifPrefs, setShowNotifPrefs] = useState<boolean>(false);
   const [pushPrefs, setPushPrefs] = useState<PushNotificationPreferences>(() => loadPushPreferences());
+  const [activePushToast, setActivePushToast] = useState<NotificationItem | null>(null);
   const [browserPermStatus, setBrowserPermStatus] = useState<string>(() =>
     typeof window !== 'undefined' && 'Notification' in window ? Notification.permission : 'unsupported'
   );
@@ -194,11 +195,22 @@ export const Header: React.FC<HeaderProps> = ({
       const custom = evt as CustomEvent<NotificationItem>;
       if (custom.detail) {
         setNotifications((prev) => [custom.detail, ...prev.filter((n) => n.id !== custom.detail.id)].slice(0, 40));
+        if (custom.detail.priority === 'high' || custom.detail.category === 'Attendance') {
+          setActivePushToast(custom.detail);
+        }
       }
     };
     window.addEventListener(PUSH_NOTIFICATION_EVENT, handlePushEvent);
     return () => window.removeEventListener(PUSH_NOTIFICATION_EVENT, handlePushEvent);
   }, []);
+
+  useEffect(() => {
+    if (!activePushToast) return;
+    const timer = window.setTimeout(() => {
+      setActivePushToast(null);
+    }, 6000);
+    return () => window.clearTimeout(timer);
+  }, [activePushToast]);
 
   const updatePushPref = <K extends keyof PushNotificationPreferences>(key: K, val: PushNotificationPreferences[K]) => {
     setPushPrefs((prev) => {
@@ -266,6 +278,7 @@ export const Header: React.FC<HeaderProps> = ({
   };
 
   return (
+    <>
     <header className="bg-slate-900 text-white border-b border-slate-800 sticky top-0 z-40 shadow-sm no-print">
       <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16 sm:h-20 gap-2">
@@ -715,5 +728,39 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
     </header>
+
+    {activePushToast && (
+      <div
+        role="alert"
+        data-testid="global-attendance-alert-toast"
+        className="fixed bottom-5 left-5 z-[85] max-w-sm w-[calc(100vw-2.5rem)] rounded-2xl bg-slate-950 text-white border border-rose-500/60 shadow-2xl p-3.5 flex items-start gap-3 no-print"
+      >
+        <div className="w-8 h-8 rounded-xl bg-rose-500/20 text-rose-400 border border-rose-500/40 flex items-center justify-center shrink-0">
+          <AlertTriangle className="w-4 h-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-extrabold text-rose-300 uppercase tracking-wider">
+              {activePushToast.category} Alert
+            </span>
+            <button
+              type="button"
+              onClick={() => setActivePushToast(null)}
+              className="text-slate-400 hover:text-white"
+              aria-label="Dismiss alert notification"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+          <p className="text-xs font-bold text-white mt-0.5 truncate">
+            {language === 'ur' && activePushToast.titleUrdu ? activePushToast.titleUrdu : activePushToast.title}
+          </p>
+          <p className="text-[11px] text-slate-300 mt-0.5 leading-snug">
+            {language === 'ur' && activePushToast.messageUrdu ? activePushToast.messageUrdu : activePushToast.message}
+          </p>
+        </div>
+      </div>
+    )}
+    </>
   );
 };

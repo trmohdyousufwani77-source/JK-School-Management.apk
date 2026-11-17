@@ -28,6 +28,7 @@ import {
   QrCode,
   ArrowRightLeft,
   History,
+  GraduationCap,
 } from 'lucide-react';
 import { AadhaarStatus, SchoolProfile, Student, StudentHistoryEvent, StudentStatus, User } from '../types';
 import { Language, translations } from '../utils/translations';
@@ -44,6 +45,19 @@ import {
 import QRCode from 'qrcode';
 import * as XLSX from 'xlsx';
 
+function suggestNextGradeLevel(currentClass: string, classesOffered: string[]): string {
+  const normalized = currentClass.trim();
+  if (/^nursery$/i.test(normalized)) return 'KG';
+  if (/^kg$/i.test(normalized)) return '1';
+  const num = parseInt(normalized, 10);
+  if (!isNaN(num)) {
+    const nextStr = String(num + 1);
+    if (classesOffered.includes(nextStr)) return nextStr;
+    if (num < 12) return nextStr;
+  }
+  return 'GRADUATED';
+}
+
 interface StudentManagementProps {
   students: Student[];
   school: SchoolProfile;
@@ -52,6 +66,13 @@ interface StudentManagementProps {
   onUpdateStudent: (updatedStudent: Student) => void;
   onDeleteStudent?: (studentId: string) => void;
   onBulkDeleteStudents?: (studentIds: string[]) => void;
+  onBulkPromoteStudents?: (
+    studentIds: string[],
+    targetClass: string,
+    targetSection: string,
+    targetSession: string,
+    isGraduated?: boolean
+  ) => void;
   language: Language;
 }
 
@@ -63,9 +84,24 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({
   onUpdateStudent,
   onDeleteStudent,
   onBulkDeleteStudents,
+  onBulkPromoteStudents,
   language,
 }) => {
   const t = translations[language];
+
+  // View Mode: Student Register vs Promote Students
+  const [activeMode, setActiveMode] = useState<'register' | 'promote'>('register');
+
+  // Promote Students workflow state
+  const defaultPromoteClass = school.classesOffered?.[0] || '5';
+  const [promoteSourceClass, setPromoteSourceClass] = useState<string>('5');
+  const [promoteSourceSection, setPromoteSourceSection] = useState<string>('all');
+  const [promoteTargetClass, setPromoteTargetClass] = useState<string>(() =>
+    suggestNextGradeLevel('5', school.classesOffered || ['1', '2', '3', '4', '5', '6', '7', '8'])
+  );
+  const [promoteTargetSection, setPromoteTargetSection] = useState<string>('KEEP');
+  const [promoteTargetSession, setPromoteTargetSession] = useState<string>('2027-2028');
+  const [promoteSelectedIds, setPromoteSelectedIds] = useState<string[]>([]);
 
   // Multi-student selection & bulk actions
   const [selectedStudentIds, setSelectedStudentIds] = useState<string[]>([]);
@@ -110,6 +146,91 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({
   const showNotification = (msg: string) => {
     setToastNotice(msg);
     setTimeout(() => setToastNotice(null), 4000);
+  };
+
+  // Promote Students derived list & handlers
+  const promoteEligibleStudents = React.useMemo(() => {
+    const classToUse = promoteSourceClass || defaultPromoteClass;
+    return deduplicateStudentsByAdmissionNumber(students)
+      .filter(
+        (s) =>
+          s.status === 'Active' &&
+          s.classNumber === classToUse &&
+          (promoteSourceSection === 'all' || s.section === promoteSourceSection)
+      )
+      .sort((a, b) => a.section.localeCompare(b.section) || a.rollNumber - b.rollNumber);
+  }, [students, promoteSourceClass, promoteSourceSection, defaultPromoteClass]);
+
+  const isAllPromoteSelected =
+    promoteEligibleStudents.length > 0 &&
+    promoteEligibleStudents.every((s) => promoteSelectedIds.includes(s.id));
+
+  const handleSelectPromoteSourceClass = (nextSource: string) => {
+    setPromoteSourceClass(nextSource);
+    setPromoteSelectedIds([]);
+    setPromoteTargetClass(suggestNextGradeLevel(nextSource, school.classesOffered || []));
+  };
+
+  const handleTogglePromoteAll = () => {
+    if (isAllPromoteSelected) {
+      setPromoteSelectedIds([]);
+    } else {
+      setPromoteSelectedIds(promoteEligibleStudents.map((s) => s.id));
+    }
+  };
+
+  const handleExecutePromotion = () => {
+    if (promoteSelectedIds.length === 0) {
+      showNotification('Select at least one student to promote.');
+      return;
+    }
+    const isGraduated = promoteTargetClass === 'GRADUATED';
+    const sessionClean = promoteTargetSession.trim() || school.academicSession || '2027-2028';
+
+    if (onBulkPromoteStudents) {
+      onBulkPromoteStudents(
+        promoteSelectedIds,
+        promoteTargetClass,
+        promoteTargetSection,
+        sessionClean,
+        isGraduated
+      );
+    } else {
+      const selectedSet = new Set(promoteSelectedIds);
+      const nowIso = new Date().toISOString();
+      students.forEach((st) => {
+        if (!selectedSet.has(st.id)) return;
+        const nextSection = promoteTargetSection === 'KEEP' ? st.section : promoteTargetSection;
+        const nextClass = isGraduated ? st.classNumber : promoteTargetClass;
+        const nextStatus: StudentStatus = isGraduated ? 'Archived' : st.status;
+        const histEvent: StudentHistoryEvent = {
+          id: `hist-${Date.now()}-${st.id.slice(-4)}`,
+          date: nowIso,
+          type: 'CLASS_CHANGE',
+          title: isGraduated ? 'Completed & Graduated' : `Promoted to Class ${nextClass}`,
+          details: isGraduated
+            ? `Promoted from Class ${st.classNumber}-${st.section} to Alumni / Graduated Archive (Session ${sessionClean})`
+            : `Promoted from Class ${st.classNumber}-${st.section} (${st.academicSession}) to Class ${nextClass}-${nextSection} (${sessionClean})`,
+          actorName: currentUser.name,
+        };
+        onUpdateStudent({
+          ...st,
+          classNumber: nextClass,
+          section: nextSection,
+          academicSession: sessionClean,
+          status: nextStatus,
+          history: [histEvent, ...(st.history || [])],
+        });
+      });
+    }
+
+    const count = promoteSelectedIds.length;
+    setPromoteSelectedIds([]);
+    showNotification(
+      isGraduated
+        ? `Graduated & archived ${count} student(s) with class history updated.`
+        : `Promoted ${count} student(s) from Class ${promoteSourceClass} to Class ${promoteTargetClass} (${sessionClean}) and updated class history!`
+    );
   };
 
   const handleOpenTransferModal = (s: Student) => {
@@ -570,14 +691,298 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({
         </div>
       </div>
 
-      {/* Upcoming Birthdays Card */}
-      <UpcomingBirthdaysCard
-        students={students}
-        school={school}
-        currentUser={currentUser}
-        language={language}
-        onViewStudent={(st) => setViewingProfile(st)}
-      />
+      {/* View Switcher: Student Register vs Promote Students */}
+      <div className="bg-white p-2 rounded-2xl border border-slate-200/80 shadow-sm flex flex-wrap items-center justify-between gap-3">
+        <div className="inline-flex rounded-xl bg-slate-100 p-1 text-xs font-bold">
+          <button
+            type="button"
+            onClick={() => setActiveMode('register')}
+            className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-lg transition-all whitespace-nowrap ${
+              activeMode === 'register'
+                ? 'bg-white text-indigo-700 shadow-sm'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <Users className="w-3.5 h-3.5" />
+            <span>{language === 'ur' ? 'طلباء رجسٹر' : 'Student Register'}</span>
+          </button>
+          {(currentUser.role === 'admin' || currentUser.role === 'head_teacher') && (
+            <button
+              type="button"
+              onClick={() => setActiveMode('promote')}
+              className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-lg transition-all whitespace-nowrap ${
+                activeMode === 'promote'
+                  ? 'bg-white text-indigo-700 shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <GraduationCap className="w-4 h-4" />
+              <span>{language === 'ur' ? 'طلباء کی ترقی (اگلی جماعت)' : 'Promote Students'}</span>
+            </button>
+          )}
+        </div>
+
+        <p className="text-[11px] text-slate-500 px-2">
+          {activeMode === 'promote'
+            ? 'Multi-select students from any class and promote them in one click while keeping marks, attendance, and class history.'
+            : 'Manage student profiles, unique attendance QR passes, UIDAI Aadhaar verification, and transfer certificates.'}
+        </p>
+      </div>
+
+      {activeMode === 'promote' ? (
+        <div className="space-y-5">
+          {/* Promotion Controls & Target Configuration Bar */}
+          <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
+              <div>
+                <h2 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
+                  <GraduationCap className="w-5 h-5 text-indigo-600" />
+                  <span>Promote Students to Next Grade Level</span>
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Automatically appends promotion records to each student&apos;s Class History log.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleExecutePromotion}
+                disabled={promoteSelectedIds.length === 0}
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 disabled:text-slate-500 text-white text-xs font-extrabold shadow-sm transition-colors whitespace-nowrap shrink-0"
+              >
+                <GraduationCap className="w-4 h-4" />
+                <span>
+                  {promoteTargetClass === 'GRADUATED'
+                    ? `Graduate Selected (${promoteSelectedIds.length})`
+                    : `Promote ${promoteSelectedIds.length} Student${promoteSelectedIds.length === 1 ? '' : 's'} to Class ${promoteTargetClass}`}
+                </span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs">
+              <div>
+                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                  Source Class *
+                </label>
+                <select
+                  value={promoteSourceClass}
+                  onChange={(e) => handleSelectPromoteSourceClass(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl bg-slate-50 font-bold text-slate-900"
+                >
+                  {(school.classesOffered || ['1', '2', '3', '4', '5', '6', '7', '8']).map((c) => (
+                    <option key={c} value={c}>Class {c}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                  Source Section
+                </label>
+                <select
+                  value={promoteSourceSection}
+                  onChange={(e) => {
+                    setPromoteSourceSection(e.target.value);
+                    setPromoteSelectedIds([]);
+                  }}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl bg-slate-50 font-semibold text-slate-800"
+                >
+                  <option value="all">All Sections</option>
+                  <option value="A">Section A</option>
+                  <option value="B">Section B</option>
+                  <option value="C">Section C</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-indigo-700 uppercase tracking-wider mb-1">
+                  Target Next Grade *
+                </label>
+                <select
+                  value={promoteTargetClass}
+                  onChange={(e) => setPromoteTargetClass(e.target.value)}
+                  className="w-full px-3 py-2 border border-indigo-300 rounded-xl bg-indigo-50/70 font-extrabold text-indigo-900"
+                >
+                  {(school.classesOffered || ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12']).map((c) => (
+                    <option key={c} value={c}>Class {c}</option>
+                  ))}
+                  <option value="GRADUATED">Graduated / Alumni (Archive)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                  Target Section
+                </label>
+                <select
+                  value={promoteTargetSection}
+                  onChange={(e) => setPromoteTargetSection(e.target.value)}
+                  disabled={promoteTargetClass === 'GRADUATED'}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl bg-white font-semibold text-slate-800 disabled:opacity-50"
+                >
+                  <option value="KEEP">Keep Current Section</option>
+                  <option value="A">Move All to Section A</option>
+                  <option value="B">Move All to Section B</option>
+                  <option value="C">Move All to Section C</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                  New Academic Session
+                </label>
+                <input
+                  type="text"
+                  value={promoteTargetSession}
+                  onChange={(e) => setPromoteTargetSession(e.target.value)}
+                  placeholder="2027-2028"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl font-mono font-bold text-slate-900"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Promotion Roster Multi-Select Table */}
+          <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden">
+            <div className="p-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="flex items-center gap-2">
+                <span className="font-bold text-slate-900">
+                  Class {promoteSourceClass} Active Students ({promoteEligibleStudents.length})
+                </span>
+                <span className="text-slate-500 font-mono tabular-nums">
+                  • {promoteSelectedIds.length} selected
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleTogglePromoteAll}
+                  disabled={promoteEligibleStudents.length === 0}
+                  className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-indigo-50 text-slate-700 hover:text-indigo-700 font-bold text-xs disabled:opacity-40"
+                >
+                  {isAllPromoteSelected ? 'Clear Selection' : 'Select All Class Students'}
+                </button>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="bg-slate-50/80 border-b border-slate-200 text-slate-600 font-semibold uppercase tracking-wider text-[11px]">
+                    <th className="py-3 px-4 w-10 text-center">
+                      <input
+                        type="checkbox"
+                        checked={isAllPromoteSelected}
+                        onChange={handleTogglePromoteAll}
+                        aria-label="Select all students for promotion"
+                        className="w-4 h-4 rounded text-indigo-600 border-slate-300 cursor-pointer"
+                      />
+                    </th>
+                    <th className="py-3 px-3 w-16">Roll</th>
+                    <th className="py-3 px-3">Student Name</th>
+                    <th className="py-3 px-3">Admission No</th>
+                    <th className="py-3 px-3">Current Class &amp; Session</th>
+                    <th className="py-3 px-3">Target Promotion</th>
+                    <th className="py-3 px-3 text-right">History</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {promoteEligibleStudents.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="py-12 text-center text-slate-400">
+                        No active students found in Class {promoteSourceClass}
+                        {promoteSourceSection !== 'all' ? ` Section ${promoteSourceSection}` : ''}.
+                      </td>
+                    </tr>
+                  ) : (
+                    promoteEligibleStudents.map((st) => {
+                      const isChecked = promoteSelectedIds.includes(st.id);
+                      const nextSec = promoteTargetSection === 'KEEP' ? st.section : promoteTargetSection;
+                      return (
+                        <tr
+                          key={st.id}
+                          onClick={() =>
+                            setPromoteSelectedIds((prev) =>
+                              prev.includes(st.id) ? prev.filter((id) => id !== st.id) : [...prev, st.id]
+                            )
+                          }
+                          className={`cursor-pointer transition-colors ${
+                            isChecked ? 'bg-indigo-50/60' : 'hover:bg-slate-50/70'
+                          }`}
+                        >
+                          <td className="py-3 px-4 text-center" onClick={(e) => e.stopPropagation()}>
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() =>
+                                setPromoteSelectedIds((prev) =>
+                                  prev.includes(st.id) ? prev.filter((id) => id !== st.id) : [...prev, st.id]
+                                )
+                              }
+                              aria-label={`Select ${st.fullName} for promotion`}
+                              className="w-4 h-4 rounded text-indigo-600 border-slate-300 cursor-pointer"
+                            />
+                          </td>
+                          <td className="py-3 px-3 font-mono tabular-nums font-bold text-slate-800">
+                            #{st.rollNumber}
+                          </td>
+                          <td className="py-3 px-3">
+                            <p className="font-bold text-slate-900">{st.fullName}</p>
+                            <p className="text-[11px] text-slate-500">Father: {st.fatherName}</p>
+                          </td>
+                          <td className="py-3 px-3 font-mono text-slate-700 font-semibold">
+                            {st.admissionNumber}
+                          </td>
+                          <td className="py-3 px-3">
+                            <span className="font-bold text-slate-800">
+                              Class {st.classNumber}-{st.section}
+                            </span>
+                            <span className="block text-[10px] font-mono text-slate-500">
+                              Session {st.academicSession}
+                            </span>
+                          </td>
+                          <td className="py-3 px-3">
+                            <span
+                              className={`inline-flex items-center px-2 py-0.5 rounded font-bold text-[11px] ${
+                                promoteTargetClass === 'GRADUATED'
+                                  ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                                  : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                              }`}
+                            >
+                              {promoteTargetClass === 'GRADUATED'
+                                ? 'Alumni / Archived'
+                                : `Class ${promoteTargetClass}-${nextSec} (${promoteTargetSession})`}
+                            </span>
+                          </td>
+                          <td className="py-3 px-3 text-right" onClick={(e) => e.stopPropagation()}>
+                            <button
+                              type="button"
+                              onClick={() => setHistoryStudent(st)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-indigo-50 text-slate-700 hover:text-indigo-700 font-semibold text-[11px]"
+                            >
+                              <History className="w-3.5 h-3.5" />
+                              <span>{st.history?.length || 0} Log(s)</span>
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <>
+          {/* Upcoming Birthdays Card */}
+          <UpcomingBirthdaysCard
+            students={students}
+            school={school}
+            currentUser={currentUser}
+            language={language}
+            onViewStudent={(st) => setViewingProfile(st)}
+          />
 
       {/* Bulk Delete Bar */}
       {selectedStudentIds.length > 0 && (currentUser.role === 'admin' || currentUser.role === 'head_teacher') && (
@@ -944,6 +1349,8 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({
           </table>
         </div>
       </div>
+        </>
+      )}
 
       {/* Aadhaar Verification Modal */}
       {verifyingStudent && (

@@ -19,6 +19,7 @@ export interface PushNotificationPreferences {
   browserPushEnabled: boolean;
   teacherLeaveAlerts: boolean;
   attendanceThresholdAlerts: boolean;
+  parentLowAttendanceAlerts: boolean;
   attendanceThresholdPercent: number;
   examRemindersEnabled: boolean;
   examReminderDaysBefore: number;
@@ -28,6 +29,7 @@ export const DEFAULT_PUSH_PREFS: PushNotificationPreferences = {
   browserPushEnabled: true,
   teacherLeaveAlerts: true,
   attendanceThresholdAlerts: true,
+  parentLowAttendanceAlerts: true,
   attendanceThresholdPercent: 75,
   examRemindersEnabled: true,
   examReminderDaysBefore: 3,
@@ -36,6 +38,7 @@ export const DEFAULT_PUSH_PREFS: PushNotificationPreferences = {
 export const PUSH_NOTIFS_STORAGE_KEY = 'school_master_notifications';
 export const PUSH_PREFS_STORAGE_KEY = 'sm_push_notif_prefs_v1';
 export const PUSH_NOTIFICATION_EVENT = 'sm-push-notification';
+export const PUSH_PREFS_UPDATED_EVENT = 'sm-push-prefs-updated';
 const SCHEDULER_SENT_CACHE_KEY = 'sm_exam_scheduler_sent_v1';
 
 export function loadPushPreferences(): PushNotificationPreferences {
@@ -52,6 +55,9 @@ export function loadPushPreferences(): PushNotificationPreferences {
 
 export function savePushPreferences(prefs: PushNotificationPreferences): void {
   localStorage.setItem(PUSH_PREFS_STORAGE_KEY, JSON.stringify(prefs));
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(PUSH_PREFS_UPDATED_EVENT, { detail: prefs }));
+  }
 }
 
 export async function requestBrowserNotificationPermission(): Promise<'granted' | 'denied' | 'default' | 'unsupported'> {
@@ -238,6 +244,67 @@ export function evaluateAttendanceThresholdNotification(
   thresholdPct?: number
 ): PushNotificationItem | null {
   return monitorAttendanceAndNotifyPrincipal(records, students, thresholdPct, { force: true }).notification;
+}
+
+/**
+ * Evaluates student attendance rates and automatically dispatches parent-facing
+ * push notifications when automated parent low-attendance alerts are enabled
+ * and a student's attendance falls below the configured threshold (default 75%).
+ */
+export function dispatchParentLowAttendanceNotifications(
+  records: AttendanceRecord[],
+  students: Student[],
+  thresholdPct?: number
+): { enabled: boolean; flaggedStudents: LowAttendanceStudentAlert[]; notificationsSent: PushNotificationItem[] } {
+  const prefs = loadPushPreferences();
+  const limit = thresholdPct ?? prefs.attendanceThresholdPercent ?? 75;
+  const report = monitorAttendanceAndNotifyPrincipal(records, students, limit, { silent: true });
+
+  if (!prefs.parentLowAttendanceAlerts || report.flaggedStudents.length === 0) {
+    return {
+      enabled: prefs.parentLowAttendanceAlerts,
+      flaggedStudents: report.flaggedStudents,
+      notificationsSent: [],
+    };
+  }
+
+  const notificationsSent: PushNotificationItem[] = [];
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const dedupKey = `sm_parent_low_att_sent_${todayKey}_${limit}_${report.flaggedStudents.map((s) => s.studentId).join(',')}`;
+
+  if (sessionStorage.getItem(dedupKey)) {
+    return {
+      enabled: true,
+      flaggedStudents: report.flaggedStudents,
+      notificationsSent: [],
+    };
+  }
+  sessionStorage.setItem(dedupKey, '1');
+
+  const topList = report.flaggedStudents
+    .slice(0, 4)
+    .map((s) => `${s.name} (Class ${s.classSection}: ${s.percentage}%)`)
+    .join(', ');
+
+  notificationsSent.push(
+    emitPushNotification({
+      title: `Parent Push Alerts Sent (${report.flaggedStudents.length} below ${limit}%)`,
+      titleUrdu: `والدین کو حاضری الرٹ بھیجا گیا (${report.flaggedStudents.length} طلباء ${limit}% سے کم)`,
+      message: `Automated parent push notifications dispatched for students below ${limit}% threshold: ${topList}${
+        report.flaggedStudents.length > 4 ? ` +${report.flaggedStudents.length - 4} more` : ''
+      }.`,
+      messageUrdu: `${limit}% سے کم حاضری والے طلباء کے والدین کو خودکار اطلاع بھیج دی گئی ہے۔`,
+      category: 'Attendance',
+      targetRole: 'all',
+      priority: 'high',
+    })
+  );
+
+  return {
+    enabled: true,
+    flaggedStudents: report.flaggedStudents,
+    notificationsSent,
+  };
 }
 
 export interface UpcomingExamCountdown {

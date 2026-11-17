@@ -9,6 +9,18 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '32mb' }));
 
+  app.get(/\.apk$/i, (req, res, next) => {
+    const requestedName = path.basename(req.path);
+    res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${requestedName === 'SchoolMaster-release.apk' ? 'SchoolMaster-v1.0.4-release.apk' : requestedName}"`
+    );
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    next();
+  });
+
   app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
   });

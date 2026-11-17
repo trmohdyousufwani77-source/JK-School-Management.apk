@@ -27,6 +27,7 @@ import {
   CartesianGrid,
 } from 'recharts';
 import {
+  Holiday,
   LeaveStatus,
   LeaveType,
   SchoolProfile,
@@ -46,6 +47,121 @@ interface TeacherLeaveProps {
   onApproveLeave: (leaveId: string, remarks: string) => void;
   onRejectLeave: (leaveId: string, remarks: string) => void;
   language: Language;
+}
+
+interface LeaveBalancePreview {
+  balanceLabel: string;
+  currentBalance: number;
+  requestedDays: number;
+  overlappingHolidays: Holiday[];
+  sundayCount: number;
+  deductibleDays: number;
+  remainingAfterApproval: number;
+  suggestion: 'Approve Recommended' | 'Holiday Overlap — Adjusted Deduction' | 'Insufficient Balance — Review';
+  suggestedRemark: string;
+}
+
+function calculateLeaveBalancePreview(
+  leave: TeacherLeaveApplication,
+  teachers: TeacherProfile[],
+  holidays: Holiday[]
+): LeaveBalancePreview {
+  const teacher =
+    teachers.find((tc) => tc.employeeId === leave.employeeId || tc.name === leave.teacherName) || teachers[0];
+
+  const start = new Date(`${leave.startDate}T00:00:00`);
+  const end = new Date(`${leave.endDate}T00:00:00`);
+  const holidayMap = new Map<string, Holiday>();
+  holidays.forEach((h) => holidayMap.set(h.date, h));
+
+  const overlappingHolidays: Holiday[] = [];
+  let sundayCount = 0;
+  let calendarDays = 0;
+
+  if (!isNaN(start.getTime()) && !isNaN(end.getTime()) && end >= start) {
+    const cursor = new Date(start);
+    while (cursor <= end && calendarDays < 180) {
+      calendarDays += 1;
+      const iso = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}-${String(
+        cursor.getDate()
+      ).padStart(2, '0')}`;
+      const matchedHoliday = holidayMap.get(iso);
+      if (matchedHoliday) {
+        overlappingHolidays.push(matchedHoliday);
+      } else if (cursor.getDay() === 0) {
+        sundayCount += 1;
+      }
+      cursor.setDate(cursor.getDate() + 1);
+    }
+  }
+
+  const requestedDays = calendarDays > 0 ? calendarDays : leave.totalDays;
+  const nonWorkingOverlap = overlappingHolidays.length + sundayCount;
+  const deductibleDays = Math.max(0, requestedDays - nonWorkingOverlap);
+
+  let balanceLabel = 'Casual Leave (CL)';
+  let currentBalance = teacher ? teacher.casualLeaveBalance : 10;
+
+  if (leave.leaveType === 'Medical_Leave') {
+    balanceLabel = 'Medical Leave (ML)';
+    currentBalance = teacher ? teacher.medicalLeaveBalance : 10;
+  } else if (leave.leaveType === 'Earned_Leave') {
+    balanceLabel = 'Earned Leave (EL)';
+    currentBalance = teacher ? teacher.earnedLeaveBalance : 20;
+  } else if (leave.leaveType === 'Special_Duty') {
+    balanceLabel = 'Official Duty (Non-Deductible)';
+    currentBalance = 99;
+  } else if (leave.leaveType === 'Maternity_Paternity') {
+    balanceLabel = 'Special Statutory Leave';
+    currentBalance = 30;
+  }
+
+  const effectiveDeduction = leave.leaveType === 'Special_Duty' ? 0 : deductibleDays;
+  const remainingAfterApproval =
+    leave.leaveType === 'Special_Duty' ? currentBalance : currentBalance - effectiveDeduction;
+
+  if (remainingAfterApproval < 0) {
+    return {
+      balanceLabel,
+      currentBalance,
+      requestedDays,
+      overlappingHolidays,
+      sundayCount,
+      deductibleDays: effectiveDeduction,
+      remainingAfterApproval,
+      suggestion: 'Insufficient Balance — Review',
+      suggestedRemark: `Insufficient ${balanceLabel} balance (${currentBalance}d available vs ${effectiveDeduction}d required). Consider converting excess days to Leave Without Pay or adjusting dates.`,
+    };
+  }
+
+  if (nonWorkingOverlap > 0) {
+    const holidayNames = overlappingHolidays.map((h) => h.name).join(', ');
+    return {
+      balanceLabel,
+      currentBalance,
+      requestedDays,
+      overlappingHolidays,
+      sundayCount,
+      deductibleDays: effectiveDeduction,
+      remainingAfterApproval,
+      suggestion: 'Holiday Overlap — Adjusted Deduction',
+      suggestedRemark: `Approved with adjusted deduction of ${effectiveDeduction} working day(s) (${
+        overlappingHolidays.length > 0 ? `excludes ${holidayNames}` : 'excludes Sunday'
+      }). Projected remaining ${balanceLabel}: ${remainingAfterApproval} day(s).`,
+    };
+  }
+
+  return {
+    balanceLabel,
+    currentBalance,
+    requestedDays,
+    overlappingHolidays,
+    sundayCount,
+    deductibleDays: effectiveDeduction,
+    remainingAfterApproval,
+    suggestion: 'Approve Recommended',
+    suggestedRemark: `Approved (${effectiveDeduction} working day(s) deducted from ${balanceLabel}). Remaining balance: ${remainingAfterApproval} day(s).`,
+  };
 }
 
 export const TeacherLeave: React.FC<TeacherLeaveProps> = ({
@@ -420,67 +536,164 @@ export const TeacherLeave: React.FC<TeacherLeaveProps> = ({
       )}
 
       {/* Review Approval Modal for Head Teacher */}
-      {reviewingLeave && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-sm no-print">
-          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl p-6 border border-slate-200 animate-in fade-in zoom-in-95 duration-150">
-            <h3 className="text-base font-bold text-slate-900 mb-2">Review Leave Application</h3>
-            <p className="text-xs text-slate-600">
-              Teacher: <strong className="text-slate-900">{reviewingLeave.teacherName}</strong> ({reviewingLeave.employeeId})
-            </p>
-            <p className="text-xs text-slate-600 mt-1">
-              Duration: <strong className="text-indigo-600">{reviewingLeave.startDate} to {reviewingLeave.endDate}</strong> ({reviewingLeave.totalDays} days)
-            </p>
-            <p className="text-xs text-slate-600 mt-1">
-              Type: <strong className="text-slate-900">{reviewingLeave.leaveType.replace('_', ' ')}</strong>
-            </p>
-            <p className="text-xs text-slate-700 bg-slate-50 p-2.5 rounded-xl border border-slate-200 mt-3 italic">
-              "{reviewingLeave.reason}"
-            </p>
+      {reviewingLeave && (() => {
+        const preview = calculateLeaveBalancePreview(reviewingLeave, teachers, school.holidays || []);
+        const isInsufficient = preview.suggestion === 'Insufficient Balance — Review';
+        const isAdjusted = preview.suggestion === 'Holiday Overlap — Adjusted Deduction';
 
-            <div className="mt-4">
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Official Sanction Remarks:
-              </label>
-              <textarea
-                rows={2}
-                placeholder="e.g. Sanctioned with casual leave balance deducted. Syllabus backup arranged."
-                value={reviewRemarks}
-                onChange={(e) => setReviewRemarks(e.target.value)}
-                className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs"
-              />
-            </div>
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-sm no-print">
+            <div className="bg-white rounded-3xl max-w-lg w-full shadow-2xl p-6 border border-slate-200 animate-in fade-in zoom-in-95 duration-150 max-h-[90vh] overflow-y-auto">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-base font-bold text-slate-900">Review Leave Application</h3>
+                <button
+                  type="button"
+                  onClick={() => setReviewingLeave(null)}
+                  className="p-1 text-slate-400 hover:text-slate-700"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <p className="text-xs text-slate-600">
+                Teacher: <strong className="text-slate-900">{reviewingLeave.teacherName}</strong> ({reviewingLeave.employeeId})
+              </p>
+              <p className="text-xs text-slate-600 mt-1">
+                Duration: <strong className="text-indigo-600">{reviewingLeave.startDate} to {reviewingLeave.endDate}</strong> ({reviewingLeave.totalDays} days)
+              </p>
+              <p className="text-xs text-slate-600 mt-1">
+                Type: <strong className="text-slate-900">{reviewingLeave.leaveType.replace('_', ' ')}</strong>
+              </p>
+              <p className="text-xs text-slate-700 bg-slate-50 p-2.5 rounded-xl border border-slate-200 mt-3 italic">
+                "{reviewingLeave.reason}"
+              </p>
 
-            <div className="mt-5 flex items-center justify-between gap-2">
-              <button
-                onClick={() => setReviewingLeave(null)}
-                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100"
+              {/* Remaining Balance Preview & Holiday-Aware Suggestion */}
+              <div
+                className={`mt-4 rounded-2xl border p-3.5 space-y-2.5 text-xs ${
+                  isInsufficient
+                    ? 'bg-rose-50/70 border-rose-200'
+                    : isAdjusted
+                    ? 'bg-amber-50/70 border-amber-200'
+                    : 'bg-emerald-50/70 border-emerald-200'
+                }`}
               >
-                {t.cancel}
-              </button>
-              <div className="flex gap-2">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="font-extrabold text-slate-900 flex items-center gap-1.5">
+                    <Sparkles
+                      className={`w-4 h-4 ${
+                        isInsufficient ? 'text-rose-600' : isAdjusted ? 'text-amber-600' : 'text-emerald-600'
+                      }`}
+                    />
+                    <span>Remaining Balance Preview</span>
+                  </span>
+                  <span
+                    className={`px-2 py-0.5 rounded font-bold text-[11px] ${
+                      isInsufficient
+                        ? 'bg-rose-100 text-rose-800'
+                        : isAdjusted
+                        ? 'bg-amber-100 text-amber-800'
+                        : 'bg-emerald-100 text-emerald-800'
+                    }`}
+                  >
+                    {preview.suggestion}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  <div className="bg-white rounded-xl p-2 border border-slate-200/80">
+                    <span className="block text-[10px] text-slate-500">Current Balance</span>
+                    <strong className="font-mono tabular-nums text-sm text-slate-900">
+                      {reviewingLeave.leaveType === 'Special_Duty' ? 'Exempt' : `${preview.currentBalance}d`}
+                    </strong>
+                  </div>
+                  <div className="bg-white rounded-xl p-2 border border-slate-200/80">
+                    <span className="block text-[10px] text-slate-500">Net Deduction</span>
+                    <strong className="font-mono tabular-nums text-sm text-indigo-700">
+                      -{preview.deductibleDays}d
+                    </strong>
+                  </div>
+                  <div className="bg-white rounded-xl p-2 border border-slate-200/80">
+                    <span className="block text-[10px] text-slate-500">After Approval</span>
+                    <strong
+                      className={`font-mono tabular-nums text-sm ${
+                        isInsufficient ? 'text-rose-700' : 'text-emerald-700'
+                      }`}
+                    >
+                      {reviewingLeave.leaveType === 'Special_Duty' ? 'Unchanged' : `${preview.remainingAfterApproval}d`}
+                    </strong>
+                  </div>
+                </div>
+
+                {(preview.overlappingHolidays.length > 0 || preview.sundayCount > 0) && (
+                  <p className="text-[11px] text-slate-700 bg-white/80 rounded-lg px-2.5 py-1.5 border border-slate-200/60">
+                    <strong>Holiday Schedule Check:</strong> Excluded{' '}
+                    {preview.overlappingHolidays.length > 0
+                      ? `${preview.overlappingHolidays.map((h) => `${h.name} (${h.date})`).join(', ')}`
+                      : ''}
+                    {preview.overlappingHolidays.length > 0 && preview.sundayCount > 0 ? ' + ' : ''}
+                    {preview.sundayCount > 0 ? `${preview.sundayCount} Sunday` : ''} from leave deduction.
+                  </p>
+                )}
+
+                <div className="flex items-center justify-between gap-2 pt-0.5">
+                  <span className="text-[11px] text-slate-600 line-clamp-2 flex-1">
+                    {preview.suggestedRemark}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setReviewRemarks(preview.suggestedRemark)}
+                    className="px-2.5 py-1 rounded-lg bg-white border border-slate-300 hover:border-indigo-400 text-[11px] font-bold text-indigo-700 shrink-0 whitespace-nowrap"
+                  >
+                    Apply Remark
+                  </button>
+                </div>
+              </div>
+
+              <div className="mt-4">
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Official Sanction Remarks:
+                </label>
+                <textarea
+                  rows={2}
+                  placeholder="e.g. Sanctioned with casual leave balance deducted. Syllabus backup arranged."
+                  value={reviewRemarks}
+                  onChange={(e) => setReviewRemarks(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs"
+                />
+              </div>
+
+              <div className="mt-5 flex items-center justify-between gap-2">
                 <button
-                  onClick={() => {
-                    onRejectLeave(reviewingLeave.id, reviewRemarks || 'Administrative requirements prevent leave grant on requested dates.');
-                    setReviewingLeave(null);
-                  }}
-                  className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-300"
+                  onClick={() => setReviewingLeave(null)}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100"
                 >
-                  {t.reject}
+                  {t.cancel}
                 </button>
-                <button
-                  onClick={() => {
-                    onApproveLeave(reviewingLeave.id, reviewRemarks || 'Approved as per standard leave entitlement rules.');
-                    setReviewingLeave(null);
-                  }}
-                  className="px-4 py-2 rounded-xl text-xs font-bold bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm"
-                >
-                  {t.approve}
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      onRejectLeave(reviewingLeave.id, reviewRemarks || 'Administrative requirements prevent leave grant on requested dates.');
+                      setReviewingLeave(null);
+                    }}
+                    className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-300"
+                  >
+                    {t.reject}
+                  </button>
+                  <button
+                    onClick={() => {
+                      onApproveLeave(reviewingLeave.id, reviewRemarks || preview.suggestedRemark);
+                      setReviewingLeave(null);
+                    }}
+                    className="px-4 py-2 rounded-xl text-xs font-bold bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm"
+                  >
+                    {t.approve}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Apply Leave Modal */}
       {isApplyModalOpen && (

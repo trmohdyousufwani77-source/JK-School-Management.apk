@@ -23,6 +23,7 @@ import {
   Student,
   StudentExamSummary,
   StudentMarkEntry,
+  SubjectConfig,
   User,
 } from '../types';
 import { Language, translations } from '../utils/translations';
@@ -64,6 +65,7 @@ interface EvaluationRegisterProps {
   school: SchoolProfile;
   currentUser: User;
   language: Language;
+  subjectConfigs?: SubjectConfig[];
   onSaveMarks?: (updated: StudentMarkEntry[]) => void;
   onNavigateToMarks?: () => void;
   onNavigateToHpc?: () => void;
@@ -76,6 +78,7 @@ export const EvaluationRegister: React.FC<EvaluationRegisterProps> = ({
   school,
   currentUser,
   language,
+  subjectConfigs,
   onSaveMarks,
   onNavigateToMarks,
   onNavigateToHpc,
@@ -142,7 +145,7 @@ export const EvaluationRegister: React.FC<EvaluationRegisterProps> = ({
   };
 
   const currentExam = examinations.find((e) => e.id === selectedExamId) || examinations[0];
-  const coreSubjects = sampleSubjectConfigs;
+  const coreSubjects = subjectConfigs && subjectConfigs.length > 0 ? subjectConfigs : sampleSubjectConfigs;
 
   // Filter students (deduplicated by Admission Number primary key)
   const classStudents = useMemo(() => {

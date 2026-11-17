@@ -1,17 +1,17 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import * as d3 from 'd3';
 import {
   CalendarDays,
   FileSpreadsheet,
   Printer,
-  ChevronLeft,
-  ChevronRight,
-  Filter,
-  CheckCircle,
-  XCircle,
-  Clock,
-  Sparkles,
+  Download,
+  UserCheck,
+  Layers,
+  FileText,
+  X,
+  CheckCircle2,
 } from 'lucide-react';
-import { AttendanceRecord, SchoolProfile, Student } from '../types';
+import { AttendanceRecord, AttendanceStatus, SchoolProfile, Student } from '../types';
 import { Language, translations } from '../utils/translations';
 import {
   calculateAttendancePercentage,
@@ -19,7 +19,12 @@ import {
   formatSchoolAddressOnce,
   getMonthlyWorkingDays,
 } from '../utils/calculations';
-import { exportMonthlyAttendanceToExcel } from '../utils/excelExport';
+import {
+  exportAttendanceStatisticsCsv,
+  exportBatchMonthlyClassCsv,
+  exportBatchMonthlyClassPdf,
+  exportMonthlyAttendanceToExcel,
+} from '../utils/excelExport';
 
 interface MonthlyAttendanceProps {
   students: Student[];
@@ -27,6 +32,16 @@ interface MonthlyAttendanceProps {
   attendanceRecords: AttendanceRecord[];
   language: Language;
 }
+
+type HeatmapCellData = {
+  dateStr: string;
+  dayOfMonth: number;
+  weekdayIndexMon0: number; // 0=Mon .. 6=Sun
+  weekdayLabel: string;
+  weekRow: number;
+  status: AttendanceStatus | 'Holiday' | 'Unrecorded';
+  holidayName?: string;
+};
 
 export const MonthlyAttendance: React.FC<MonthlyAttendanceProps> = ({
   students,
@@ -41,7 +56,17 @@ export const MonthlyAttendance: React.FC<MonthlyAttendanceProps> = ({
   const [selectedMonth, setSelectedMonth] = useState<number>(9); // 0-indexed: 9 = October
   const [selectedClass, setSelectedClass] = useState<string>('5');
   const [selectedSection, setSelectedSection] = useState<string>('A');
-  const [searchTerm, setSearchTerm] = useState<string>('');
+  const [selectedHeatmapStudentId, setSelectedHeatmapStudentId] = useState<string>('');
+  const [hoveredHeatmapCell, setHoveredHeatmapCell] = useState<HeatmapCellData | null>(null);
+  const [showBatchExportModal, setShowBatchExportModal] = useState<boolean>(false);
+  const [batchClassNumber, setBatchClassNumber] = useState<string>('5');
+  const [batchSectionScope, setBatchSectionScope] = useState<'all' | string>('all');
+  const [batchMonthIndex, setBatchMonthIndex] = useState<number>(9);
+  const [batchYear, setBatchYear] = useState<number>(2026);
+  const [batchExportStatus, setBatchExportStatus] = useState<string | null>(null);
+  const [isExportingBatchPdf, setIsExportingBatchPdf] = useState<boolean>(false);
+
+  const d3HeatmapSvgRef = useRef<SVGSVGElement | null>(null);
 
   const months = [
     { name: 'January', nameUrdu: 'جنوری', days: 31 },
@@ -62,21 +87,254 @@ export const MonthlyAttendance: React.FC<MonthlyAttendanceProps> = ({
   const { workingDays, dates } = getMonthlyWorkingDays(selectedYear, selectedMonth, school.holidays);
 
   // Filter students (deduplicated by Admission Number)
-  const uniqueStudents = React.useMemo(
+  const uniqueStudents = useMemo(
     () => deduplicateStudentsByAdmissionNumber(students),
     [students]
   );
-  const classStudents = uniqueStudents
-    .filter(
-      (s) =>
-        s.classNumber === selectedClass &&
-        s.section === selectedSection &&
-        s.status === 'Active' &&
-        (s.fullName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          s.admissionNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          s.rollNumber.toString().includes(searchTerm))
-    )
-    .sort((a, b) => a.rollNumber - b.rollNumber);
+
+  const classStudents = useMemo(
+    () =>
+      uniqueStudents
+        .filter(
+          (s) =>
+            s.classNumber === selectedClass &&
+            s.section === selectedSection &&
+            s.status === 'Active'
+        )
+        .sort((a, b) => a.rollNumber - b.rollNumber),
+    [uniqueStudents, selectedClass, selectedSection]
+  );
+
+  // Sync selected student for the D3 heatmap when class/section changes
+  useEffect(() => {
+    if (classStudents.length === 0) {
+      setSelectedHeatmapStudentId('');
+      return;
+    }
+    const stillExists = classStudents.some((s) => s.id === selectedHeatmapStudentId);
+    if (!stillExists) {
+      setSelectedHeatmapStudentId(classStudents[0].id);
+    }
+  }, [classStudents, selectedHeatmapStudentId]);
+
+  const heatmapStudent = useMemo(
+    () => classStudents.find((s) => s.id === selectedHeatmapStudentId) || classStudents[0] || null,
+    [classStudents, selectedHeatmapStudentId]
+  );
+
+  // Build individual student calendar cells & monthly metrics for D3 heatmap
+  const studentHeatmapData = useMemo(() => {
+    if (!heatmapStudent) {
+      return {
+        cells: [] as HeatmapCellData[],
+        present: 0,
+        late: 0,
+        absent: 0,
+        leave: 0,
+        monthPct: 0,
+        longestPresentStreak: 0,
+        weeksCount: 5,
+      };
+    }
+
+    const firstDayOfMonth = new Date(selectedYear, selectedMonth, 1).getDay(); // 0=Sun..6=Sat
+    const firstMon0 = (firstDayOfMonth + 6) % 7;
+
+    let present = 0;
+    let late = 0;
+    let absent = 0;
+    let leave = 0;
+    let streak = 0;
+    let longestPresentStreak = 0;
+
+    const cells: HeatmapCellData[] = dates.map((d) => {
+      const dt = new Date(`${d.dateStr}T00:00:00`);
+      const mon0 = (dt.getDay() + 6) % 7;
+      const weekRow = Math.floor((firstMon0 + d.dayOfMonth - 1) / 7);
+      const weekdayLabel = dt.toLocaleDateString('en-IN', { weekday: 'short' });
+
+      if (d.isHoliday) {
+        return {
+          dateStr: d.dateStr,
+          dayOfMonth: d.dayOfMonth,
+          weekdayIndexMon0: mon0,
+          weekdayLabel,
+          weekRow,
+          status: 'Holiday',
+          holidayName: d.holidayName,
+        };
+      }
+
+      const rec = attendanceRecords.find(
+        (r) => r.studentId === heatmapStudent.id && r.date === d.dateStr
+      );
+      const status: AttendanceStatus | 'Unrecorded' = rec ? rec.status : 'Unrecorded';
+
+      if (status === 'Present') {
+        present += 1;
+        streak += 1;
+        if (streak > longestPresentStreak) longestPresentStreak = streak;
+      } else if (status === 'Late') {
+        late += 1;
+        streak += 1;
+        if (streak > longestPresentStreak) longestPresentStreak = streak;
+      } else if (status === 'Absent') {
+        absent += 1;
+        streak = 0;
+      } else if (status === 'Approved_Leave') {
+        leave += 1;
+        streak = 0;
+      }
+
+      return {
+        dateStr: d.dateStr,
+        dayOfMonth: d.dayOfMonth,
+        weekdayIndexMon0: mon0,
+        weekdayLabel,
+        weekRow,
+        status,
+      };
+    });
+
+    const weeksCount =
+      cells.length > 0 ? Math.max(...cells.map((c) => c.weekRow)) + 1 : 5;
+    const monthPct = calculateAttendancePercentage(present + late, workingDays);
+
+    return {
+      cells,
+      present,
+      late,
+      absent,
+      leave,
+      monthPct,
+      longestPresentStreak,
+      weeksCount,
+    };
+  }, [heatmapStudent, selectedYear, selectedMonth, dates, attendanceRecords, workingDays]);
+
+  // Render Individual Student Monthly Attendance Heatmap via D3
+  useEffect(() => {
+    const svgEl = d3HeatmapSvgRef.current;
+    if (!svgEl) return;
+
+    const svg = d3.select(svgEl);
+    svg.selectAll('*').remove();
+
+    const { cells, weeksCount } = studentHeatmapData;
+    if (cells.length === 0) return;
+
+    const cellW = 74;
+    const cellH = 44;
+    const cellGap = 6;
+    const margin = { top: 28, right: 16, bottom: 12, left: 66 };
+    const width = margin.left + 7 * (cellW + cellGap) - cellGap + margin.right;
+    const height = margin.top + weeksCount * (cellH + cellGap) - cellGap + margin.bottom;
+
+    svg
+      .attr('viewBox', `0 0 ${width} ${height}`)
+      .attr('role', 'img')
+      .attr('aria-label', 'Individual student monthly attendance D3 heatmap');
+
+    const root = svg.append('g').attr('transform', `translate(${margin.left}, ${margin.top})`);
+
+    const weekdayHeaders = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    root
+      .selectAll('text.weekday-header')
+      .data(weekdayHeaders)
+      .enter()
+      .append('text')
+      .attr('class', 'weekday-header')
+      .attr('x', (_d, idx) => idx * (cellW + cellGap) + cellW / 2)
+      .attr('y', -10)
+      .attr('text-anchor', 'middle')
+      .attr('fill', '#475569')
+      .attr('font-size', '11px')
+      .attr('font-weight', '700')
+      .text((d) => d);
+
+    const weekIndices = d3.range(weeksCount);
+    root
+      .selectAll('text.week-label')
+      .data(weekIndices)
+      .enter()
+      .append('text')
+      .attr('class', 'week-label')
+      .attr('x', -12)
+      .attr('y', (w) => w * (cellH + cellGap) + cellH / 2 + 4)
+      .attr('text-anchor', 'end')
+      .attr('fill', '#64748B')
+      .attr('font-size', '11px')
+      .attr('font-weight', '600')
+      .text((w) => `Week ${w + 1}`);
+
+    const statusColorScale = d3
+      .scaleOrdinal<string, string>()
+      .domain(['Present', 'Late', 'Absent', 'Approved_Leave', 'Holiday', 'Unrecorded'])
+      .range(['#10B981', '#F59E0B', '#F43F5E', '#3B82F6', '#E2E8F0', '#F8FAFC']);
+
+    const statusTextColor = (status: HeatmapCellData['status']): string => {
+      if (status === 'Present' || status === 'Absent' || status === 'Approved_Leave') return '#FFFFFF';
+      if (status === 'Late') return '#0F172A';
+      if (status === 'Holiday') return '#64748B';
+      return '#94A3B8';
+    };
+
+    const statusShortCode = (status: HeatmapCellData['status']): string => {
+      if (status === 'Present') return 'P';
+      if (status === 'Late') return 'L';
+      if (status === 'Absent') return 'A';
+      if (status === 'Approved_Leave') return 'AL';
+      if (status === 'Holiday') return 'H';
+      return '—';
+    };
+
+    const cellGroups = root
+      .selectAll<SVGGElement, HeatmapCellData>('g.heatmap-day')
+      .data(cells, (d) => d.dateStr)
+      .enter()
+      .append('g')
+      .attr('class', 'heatmap-day')
+      .attr(
+        'transform',
+        (d) =>
+          `translate(${d.weekdayIndexMon0 * (cellW + cellGap)}, ${d.weekRow * (cellH + cellGap)})`
+      )
+      .style('cursor', 'pointer')
+      .on('mouseenter', (_event, d) => setHoveredHeatmapCell(d))
+      .on('click', (_event, d) => setHoveredHeatmapCell(d));
+
+    cellGroups
+      .append('rect')
+      .attr('width', cellW)
+      .attr('height', cellH)
+      .attr('rx', 8)
+      .attr('fill', (d) => statusColorScale(d.status))
+      .attr('stroke', (d) => (d.status === 'Unrecorded' ? '#CBD5E1' : 'rgba(15, 23, 42, 0.08)'))
+      .attr('stroke-width', 1)
+      .attr('stroke-dasharray', (d) => (d.status === 'Unrecorded' ? '3 2' : null));
+
+    cellGroups
+      .append('text')
+      .attr('x', 8)
+      .attr('y', 16)
+      .attr('font-size', '10px')
+      .attr('font-weight', '700')
+      .attr('font-family', 'ui-monospace, SFMono-Regular, Menlo, monospace')
+      .attr('fill', (d) => statusTextColor(d.status))
+      .attr('opacity', 0.9)
+      .text((d) => String(d.dayOfMonth).padStart(2, '0'));
+
+    cellGroups
+      .append('text')
+      .attr('x', cellW - 8)
+      .attr('y', cellH - 10)
+      .attr('text-anchor', 'end')
+      .attr('font-size', '12px')
+      .attr('font-weight', '800')
+      .attr('font-family', 'ui-monospace, SFMono-Regular, Menlo, monospace')
+      .attr('fill', (d) => statusTextColor(d.status))
+      .text((d) => statusShortCode(d.status));
+  }, [studentHeatmapData]);
 
   // Month name display
   const currentMonthName = language === 'ur' ? months[selectedMonth].nameUrdu : months[selectedMonth].name;
@@ -100,6 +358,43 @@ export const MonthlyAttendance: React.FC<MonthlyAttendanceProps> = ({
 
         <div className="flex flex-wrap items-center gap-2">
           <button
+            type="button"
+            onClick={() => {
+              setBatchClassNumber(selectedClass);
+              setBatchSectionScope('all');
+              setBatchMonthIndex(selectedMonth);
+              setBatchYear(selectedYear);
+              setBatchExportStatus(null);
+              setShowBatchExportModal(true);
+            }}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-indigo-600 text-white hover:bg-indigo-700 transition-colors shadow-sm whitespace-nowrap shrink-0"
+          >
+            <Layers className="w-4 h-4" />
+            <span>Batch Export</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() =>
+              exportAttendanceStatisticsCsv({
+                students: uniqueStudents,
+                records: attendanceRecords,
+                school,
+                classNumber: selectedClass,
+                section: selectedSection,
+                monthName: months[selectedMonth].name,
+                year: selectedYear,
+                daysList: dates,
+                workingDaysTotal: workingDays,
+              })
+            }
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors shadow-sm whitespace-nowrap shrink-0"
+          >
+            <Download className="w-4 h-4" />
+            <span>Export Attendance Statistics</span>
+          </button>
+
+          <button
             onClick={() =>
               exportMonthlyAttendanceToExcel(
                 uniqueStudents,
@@ -113,7 +408,7 @@ export const MonthlyAttendance: React.FC<MonthlyAttendanceProps> = ({
                 workingDays
               )
             }
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-300 hover:bg-emerald-100 transition-colors shadow-sm"
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-300 hover:bg-emerald-100 transition-colors shadow-sm whitespace-nowrap shrink-0"
           >
             <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
             <span>{t.exportExcel}</span>
@@ -121,13 +416,32 @@ export const MonthlyAttendance: React.FC<MonthlyAttendanceProps> = ({
 
           <button
             onClick={() => window.print()}
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 transition-colors shadow-sm"
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 transition-colors shadow-sm whitespace-nowrap shrink-0"
           >
             <Printer className="w-4 h-4 text-indigo-600" />
             <span>{t.exportPdf}</span>
           </button>
         </div>
       </div>
+
+      {batchExportStatus && (
+        <div
+          role="status"
+          className="px-4 py-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs font-semibold flex items-center justify-between gap-3 no-print"
+        >
+          <span className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>{batchExportStatus}</span>
+          </span>
+          <button
+            type="button"
+            onClick={() => setBatchExportStatus(null)}
+            className="text-emerald-700 hover:text-emerald-950 font-bold"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* Filter Selector Bar */}
       <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-sm flex flex-wrap items-center justify-between gap-3 no-print">
@@ -208,6 +522,109 @@ export const MonthlyAttendance: React.FC<MonthlyAttendanceProps> = ({
         </div>
       </div>
 
+      {/* Individual Student Monthly Attendance Heatmap Visualizer (D3 Chart) */}
+      <section
+        aria-label="Individual Student Monthly Attendance Heatmap"
+        className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm space-y-4 no-print"
+      >
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-100 pb-4">
+          <div>
+            <h2 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
+              <UserCheck className="w-5 h-5 text-indigo-600" />
+              <span>Individual Student Attendance Heatmap</span>
+            </h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              D3 calendar pattern view for {currentMonthName} {selectedYear} · Select a student below or click any row in the monthly ledger
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="text-xs font-semibold text-slate-600 flex items-center gap-2">
+              <span>Student:</span>
+              <select
+                value={heatmapStudent?.id || ''}
+                onChange={(e) => {
+                  setSelectedHeatmapStudentId(e.target.value);
+                  setHoveredHeatmapCell(null);
+                }}
+                aria-label="Select student for attendance heatmap"
+                className="px-3 py-1.5 border border-slate-300 rounded-xl text-xs font-bold text-slate-800 bg-slate-50 focus:ring-2 focus:ring-indigo-500"
+              >
+                {classStudents.length === 0 ? (
+                  <option value="">No active students</option>
+                ) : (
+                  classStudents.map((st) => (
+                    <option key={st.id} value={st.id}>
+                      #{st.rollNumber} — {st.fullName}
+                    </option>
+                  ))
+                )}
+              </select>
+            </label>
+
+            {heatmapStudent && (
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600 font-mono tabular-nums">
+                <span>Present: <strong className="text-emerald-700">{studentHeatmapData.present + studentHeatmapData.late}</strong></span>
+                <span aria-hidden="true">·</span>
+                <span>Absent: <strong className="text-rose-700">{studentHeatmapData.absent}</strong></span>
+                <span aria-hidden="true">·</span>
+                <span>Leave: <strong className="text-blue-700">{studentHeatmapData.leave}</strong></span>
+                <span aria-hidden="true">·</span>
+                <span>Rate: <strong className="text-indigo-700">{studentHeatmapData.monthPct}%</strong></span>
+                <span aria-hidden="true">·</span>
+                <span>Best Streak: <strong className="text-slate-900">{studentHeatmapData.longestPresentStreak}d</strong></span>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {!heatmapStudent ? (
+          <p className="text-xs text-slate-400 py-6 text-center">
+            Select a class with enrolled active students to inspect individual D3 monthly attendance patterns.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            <div className="overflow-x-auto">
+              <svg ref={d3HeatmapSvgRef} className="w-full max-w-[660px] h-auto block" />
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-100 text-xs">
+              <div className="text-slate-600">
+                {hoveredHeatmapCell ? (
+                  <span>
+                    <strong>{hoveredHeatmapCell.dateStr} ({hoveredHeatmapCell.weekdayLabel})</strong>
+                    <span className="mx-1.5" aria-hidden="true">·</span>
+                    <span>
+                      Status:{' '}
+                      <strong className="text-slate-900">
+                        {hoveredHeatmapCell.status === 'Approved_Leave'
+                          ? 'Approved Leave'
+                          : hoveredHeatmapCell.status === 'Holiday'
+                          ? `Holiday (${hoveredHeatmapCell.holidayName || 'Scheduled Off'})`
+                          : hoveredHeatmapCell.status}
+                      </strong>
+                    </span>
+                  </span>
+                ) : (
+                  <span className="text-slate-400">
+                    Hover or click any calendar day above to inspect daily attendance status.
+                  </span>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
+                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-emerald-500 inline-block" /> Present</span>
+                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-amber-500 inline-block" /> Late</span>
+                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-rose-500 inline-block" /> Absent</span>
+                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-blue-500 inline-block" /> Leave</span>
+                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-slate-200 inline-block" /> Holiday</span>
+                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-slate-50 border border-dashed border-slate-300 inline-block" /> Unrecorded</span>
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
+
       {/* Official Printable Statement Container */}
       <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden printable-card">
         
@@ -268,9 +685,19 @@ export const MonthlyAttendance: React.FC<MonthlyAttendanceProps> = ({
                   let studentPresent = 0;
                   let studentAbsent = 0;
                   let studentLeave = 0;
+                  const isHeatmapTarget = heatmapStudent?.id === s.id;
 
                   return (
-                    <tr key={s.id} className="hover:bg-slate-50/60 transition-colors text-center">
+                    <tr
+                      key={s.id}
+                      onClick={() => {
+                        setSelectedHeatmapStudentId(s.id);
+                        setHoveredHeatmapCell(null);
+                      }}
+                      className={`cursor-pointer transition-colors text-center ${
+                        isHeatmapTarget ? 'bg-indigo-50/50' : 'hover:bg-slate-50/60'
+                      }`}
+                    >
                       <td className="py-2 px-2 text-left font-mono font-bold text-slate-800 sticky left-0 bg-white z-10 border-r border-slate-100">
                         #{s.rollNumber}
                       </td>
@@ -389,6 +816,173 @@ export const MonthlyAttendance: React.FC<MonthlyAttendanceProps> = ({
 
       </div>
 
+      {/* Batch Export Modal for Entire Class Monthly Attendance (Single PDF or CSV) */}
+      {showBatchExportModal && (() => {
+        const batchTiming = getMonthlyWorkingDays(batchYear, batchMonthIndex, school.holidays);
+        const batchMonthName = months[batchMonthIndex]?.name || 'October';
+        const matchingStudentsCount = uniqueStudents.filter(
+          (s) =>
+            s.status === 'Active' &&
+            s.classNumber === batchClassNumber &&
+            (batchSectionScope === 'all' || s.section === batchSectionScope)
+        ).length;
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/65 backdrop-blur-sm no-print">
+            <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
+              <div className="px-5 py-4 bg-slate-900 text-white flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <Layers className="w-5 h-5 text-indigo-400" />
+                  <div>
+                    <h3 className="text-sm font-bold">Batch Export Monthly Attendance</h3>
+                    <p className="text-[11px] text-slate-400">
+                      Generate a single PDF or CSV report for an entire class at once
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowBatchExportModal(false)}
+                  className="p-1 rounded-lg text-slate-400 hover:text-white"
+                  aria-label="Close batch export modal"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="p-5 space-y-4 text-xs">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                      Target Class
+                    </label>
+                    <select
+                      value={batchClassNumber}
+                      onChange={(e) => setBatchClassNumber(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-slate-50 font-semibold text-slate-800"
+                    >
+                      {school.classesOffered.map((c) => (
+                        <option key={c} value={c}>Class {c}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                      Section Scope
+                    </label>
+                    <select
+                      value={batchSectionScope}
+                      onChange={(e) => setBatchSectionScope(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-slate-50 font-semibold text-slate-800"
+                    >
+                      <option value="all">Entire Class (All Sections)</option>
+                      <option value="A">Section A Only</option>
+                      <option value="B">Section B Only</option>
+                      <option value="C">Section C Only</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                      Month
+                    </label>
+                    <select
+                      value={batchMonthIndex}
+                      onChange={(e) => setBatchMonthIndex(Number(e.target.value))}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-slate-50 font-semibold text-slate-800"
+                    >
+                      {months.map((m, idx) => (
+                        <option key={m.name} value={idx}>{m.name}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                      Year
+                    </label>
+                    <select
+                      value={batchYear}
+                      onChange={(e) => setBatchYear(Number(e.target.value))}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-slate-50 font-semibold text-slate-800"
+                    >
+                      <option value={2026}>2026</option>
+                      <option value={2027}>2027</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between text-[11px] text-slate-600 font-mono tabular-nums">
+                  <span>Matched Students: <strong className="text-slate-900">{matchingStudentsCount}</strong></span>
+                  <span>Working Days: <strong className="text-indigo-700">{batchTiming.workingDays}</strong></span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                  <button
+                    type="button"
+                    disabled={isExportingBatchPdf || matchingStudentsCount === 0}
+                    onClick={async () => {
+                      setIsExportingBatchPdf(true);
+                      try {
+                        const res = await exportBatchMonthlyClassPdf({
+                          students: uniqueStudents,
+                          records: attendanceRecords,
+                          school,
+                          classNumber: batchClassNumber,
+                          sectionScope: batchSectionScope,
+                          monthName: batchMonthName,
+                          year: batchYear,
+                          daysList: batchTiming.dates,
+                          workingDaysTotal: batchTiming.workingDays,
+                        });
+                        setBatchExportStatus(
+                          `Exported single PDF (${res.filename}) with ${res.studentCount} student(s).`
+                        );
+                        setShowBatchExportModal(false);
+                      } finally {
+                        setIsExportingBatchPdf(false);
+                      }
+                    }}
+                    className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold transition-colors disabled:opacity-50 whitespace-nowrap"
+                  >
+                    <FileText className="w-4 h-4" />
+                    <span>{isExportingBatchPdf ? 'Generating PDF...' : 'Download Single PDF'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={matchingStudentsCount === 0}
+                    onClick={() => {
+                      const res = exportBatchMonthlyClassCsv({
+                        students: uniqueStudents,
+                        records: attendanceRecords,
+                        school,
+                        classNumber: batchClassNumber,
+                        sectionScope: batchSectionScope,
+                        monthName: batchMonthName,
+                        year: batchYear,
+                        daysList: batchTiming.dates,
+                        workingDaysTotal: batchTiming.workingDays,
+                      });
+                      setBatchExportStatus(
+                        `Exported single CSV (${res.filename}) with ${res.studentCount} student(s).`
+                      );
+                      setShowBatchExportModal(false);
+                    }}
+                    className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold transition-colors disabled:opacity-50 whitespace-nowrap"
+                  >
+                    <FileSpreadsheet className="w-4 h-4" />
+                    <span>Download Single CSV</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
     </div>
   );
 };
+

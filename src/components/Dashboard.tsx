@@ -244,8 +244,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
     (r) => r.status === 'Not_Received_By_Student' || r.status === 'Pending_Distribution'
   ).length;
 
-  // Today's attendance calculation (Default today is 2026-10-28)
-  const todayStr = '2026-10-28';
+  // Today's attendance calculation (Defaults to 2026-10-28, or picks latest recorded date if marked on another date)
+  const defaultTodayStr = '2026-10-28';
+  const latestAttendanceDate = React.useMemo(() => {
+    if (attendanceRecords.some((r) => r.date === defaultTodayStr)) return defaultTodayStr;
+    const dates = attendanceRecords.map((r) => r.date).filter(Boolean).sort();
+    return dates[dates.length - 1] || defaultTodayStr;
+  }, [attendanceRecords]);
+  const todayStr = latestAttendanceDate;
   const todayRecords = attendanceRecords.filter((r) => r.date === todayStr);
 
   const presentCount = todayRecords.filter((r) => r.status === 'Present' || r.status === 'Late').length;
@@ -260,19 +266,27 @@ export const Dashboard: React.FC<DashboardProps> = ({
   // Pending leaves
   const pendingLeaves = leaveApplications.filter((l) => l.status === 'Pending');
 
-  // Class breakdown
-  const classesList = ['1', '2', '3', '4', '5', '6', '7', '8'];
+  // Class breakdown (real-time Present, Absent, Leave-Approved counts per class)
+  const classesList = school.classesOffered && school.classesOffered.length > 0
+    ? school.classesOffered.slice(0, 8)
+    : ['1', '2', '3', '4', '5', '6', '7', '8'];
   const classBreakdown = classesList.map((cls) => {
     const clsStudents = activeStudents.filter((s) => s.classNumber === cls);
     const clsMarkedToday = todayRecords.filter((r) => r.classNumber === cls);
     const clsPresent = clsMarkedToday.filter((r) => r.status === 'Present' || r.status === 'Late').length;
+    const clsAbsent = clsMarkedToday.filter((r) => r.status === 'Absent').length;
+    const clsLeave = clsMarkedToday.filter((r) => r.status === 'Approved_Leave').length;
     const clsPct = clsMarkedToday.length > 0
       ? Math.round((clsPresent / clsMarkedToday.length) * 100)
-      : clsStudents.length > 0 ? 88 : 0;
+      : clsStudents.length > 0 ? 0 : 0;
 
     return {
       cls,
       count: clsStudents.length,
+      present: clsPresent,
+      absent: clsAbsent,
+      leave: clsLeave,
+      markedTotal: clsMarkedToday.length,
       pct: clsPct,
     };
   });
@@ -2842,30 +2856,54 @@ export const Dashboard: React.FC<DashboardProps> = ({
         
         {/* Class-wise Attendance Overview (2 cols) */}
         <div className="lg:col-span-2 bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm">
-          <div className="flex items-center justify-between mb-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
             <div>
               <h2 className="text-base font-bold text-slate-900">{t.attendanceOverview}</h2>
-              <p className="text-xs text-slate-500">Date: 28 October 2026 (Wednesday)</p>
+              <p className="text-xs text-slate-500 font-mono tabular-nums">
+                Date: {todayStr} • {totalMarkedToday} / {activeStudents.length} Students Marked
+              </p>
             </div>
-            <button
-              onClick={() => onNavigateTab('monthly-attendance')}
-              className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 flex items-center gap-1"
-            >
-              <span>{t.monthlyAttendance}</span>
-              <ArrowRight className="w-3.5 h-3.5" />
-            </button>
+
+            <div className="flex flex-wrap items-center gap-2 text-[11px]">
+              <span className="px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold font-mono tabular-nums">
+                Present: {presentCount}
+              </span>
+              <span className="px-2.5 py-1 rounded-lg bg-rose-50 text-rose-700 border border-rose-200 font-bold font-mono tabular-nums">
+                Absent: {absentCount}
+              </span>
+              <span className="px-2.5 py-1 rounded-lg bg-amber-50 text-amber-800 border border-amber-200 font-bold font-mono tabular-nums">
+                Leave: {leaveCount}
+              </span>
+              <button
+                onClick={() => onNavigateTab('monthly-attendance')}
+                className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 flex items-center gap-1 ml-1"
+              >
+                <span>{t.monthlyAttendance}</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             {classBreakdown.map((item) => (
-              <div key={item.cls} className="bg-slate-50/80 border border-slate-200/70 rounded-xl p-3">
+              <div key={item.cls} className="bg-slate-50/80 border border-slate-200/70 rounded-xl p-3 space-y-2">
                 <div className="flex items-center justify-between text-xs font-semibold text-slate-700">
                   <span>Class {item.cls}</span>
-                  <span className={`font-mono font-bold ${item.pct >= 85 ? 'text-emerald-600' : item.pct >= 75 ? 'text-amber-600' : 'text-rose-600'}`}>
-                    {item.pct}%
+                  <span
+                    className={`font-mono tabular-nums font-bold ${
+                      item.markedTotal === 0
+                        ? 'text-slate-400'
+                        : item.pct >= 85
+                        ? 'text-emerald-600'
+                        : item.pct >= 75
+                        ? 'text-amber-600'
+                        : 'text-rose-600'
+                    }`}
+                  >
+                    {item.markedTotal > 0 ? `${item.pct}%` : '—'}
                   </span>
                 </div>
-                <div className="w-full bg-slate-200 h-2 rounded-full mt-2 overflow-hidden">
+                <div className="w-full bg-slate-200 h-2 rounded-full overflow-hidden">
                   <div
                     className={`h-full rounded-full transition-all ${
                       item.pct >= 85 ? 'bg-emerald-500' : item.pct >= 75 ? 'bg-amber-500' : 'bg-rose-500'
@@ -2873,8 +2911,22 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     style={{ width: `${item.pct}%` }}
                   />
                 </div>
-                <p className="text-[11px] text-slate-500 mt-2">
-                  {item.count} {language === 'ur' ? 'طلباء درج ہیں' : 'Students enrolled'}
+                <div className="grid grid-cols-3 gap-1 text-center text-[10px] pt-0.5">
+                  <div className="bg-white rounded-md py-1 border border-slate-200/60">
+                    <span className="block text-slate-400">Pres</span>
+                    <strong className="font-mono tabular-nums text-emerald-700">{item.present}</strong>
+                  </div>
+                  <div className="bg-white rounded-md py-1 border border-slate-200/60">
+                    <span className="block text-slate-400">Abs</span>
+                    <strong className="font-mono tabular-nums text-rose-700">{item.absent}</strong>
+                  </div>
+                  <div className="bg-white rounded-md py-1 border border-slate-200/60">
+                    <span className="block text-slate-400">Lve</span>
+                    <strong className="font-mono tabular-nums text-amber-700">{item.leave}</strong>
+                  </div>
+                </div>
+                <p className="text-[10px] text-slate-500 font-mono tabular-nums">
+                  {item.count} {language === 'ur' ? 'طلباء درج ہیں' : 'Enrolled'}
                 </p>
               </div>
             ))}

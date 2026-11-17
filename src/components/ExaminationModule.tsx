@@ -32,6 +32,7 @@ interface ExaminationModuleProps {
   marksEntries: StudentMarkEntry[];
   school: SchoolProfile;
   currentUser: User;
+  subjectConfigs?: SubjectConfig[];
   onSaveMarks: (updatedMarks: StudentMarkEntry[]) => void;
   onAddExamination: (newExam: Examination) => void;
   onUpdateExamination?: (updatedExam: Examination) => void;
@@ -44,6 +45,7 @@ export const ExaminationModule: React.FC<ExaminationModuleProps> = ({
   marksEntries,
   school,
   currentUser,
+  subjectConfigs,
   onSaveMarks,
   onAddExamination,
   onUpdateExamination,
@@ -65,7 +67,14 @@ export const ExaminationModule: React.FC<ExaminationModuleProps> = ({
   const [saveSuccessNotice, setSaveSuccessNotice] = useState<string>('');
 
   const currentExam = examinations.find((e) => e.id === selectedExamId) || examinations[0];
-  const classSubjects = currentExam ? (currentExam.subjects[selectedClass] || []) : [];
+  const rawClassSubjects = currentExam ? (currentExam.subjects[selectedClass] || []) : [];
+  const classSubjects = React.useMemo(() => {
+    if (!subjectConfigs || subjectConfigs.length === 0) return rawClassSubjects;
+    const orderMap = new Map(subjectConfigs.map((s, idx) => [s.code, idx]));
+    return [...rawClassSubjects].sort(
+      (a, b) => (orderMap.get(a.code) ?? 999) - (orderMap.get(b.code) ?? 999)
+    );
+  }, [rawClassSubjects, subjectConfigs]);
   const currentSubject = classSubjects.find((s) => s.code === selectedSubjectCode) || classSubjects[0];
 
   // Active students in selected class/section (deduplicated by Admission Number)

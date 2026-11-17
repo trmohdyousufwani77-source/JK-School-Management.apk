@@ -52,6 +52,7 @@ import {
   StudentExamSummary,
   StudentHolisticRecord,
   StudentMarkEntry,
+  SubjectConfig,
   User,
 } from '../types';
 import { Language, translations } from '../utils/translations';
@@ -82,6 +83,7 @@ interface ReportCardGeneratorProps {
   marksEntries: StudentMarkEntry[];
   school: SchoolProfile;
   language: Language;
+  subjectConfigs?: SubjectConfig[];
   currentUser?: User | { id: string; name: string; role: string; assignedClasses?: string[] };
   effectiveRole?: AdminRoleType;
   holisticRecords?: Record<string, StudentHolisticRecord>;
@@ -96,6 +98,7 @@ export const ReportCardGenerator: React.FC<ReportCardGeneratorProps> = ({
   marksEntries,
   school,
   language,
+  subjectConfigs,
   currentUser = { id: 'EMP-001', name: 'Farooq Ahmad Wani', role: 'head_teacher' },
   effectiveRole = 'primary_admin',
   holisticRecords,
@@ -136,7 +139,7 @@ export const ReportCardGenerator: React.FC<ReportCardGeneratorProps> = ({
   };
 
   const currentExam = examinations.find((e) => e.id === selectedExamId) || examinations[0];
-  const classSubjects = sampleSubjectConfigs;
+  const classSubjects = subjectConfigs && subjectConfigs.length > 0 ? subjectConfigs : sampleSubjectConfigs;
 
   // Filter students strictly deduplicated by admissionNumber primary key
   const classStudents = React.useMemo(() => {
@@ -195,7 +198,7 @@ export const ReportCardGenerator: React.FC<ReportCardGeneratorProps> = ({
     classStudents.forEach((st) => {
       const newTotal = bulkHpcDraftMarks[st.id] ?? 480;
       const perSubject = Math.round(newTotal / 6);
-      sampleSubjectConfigs.forEach((cfg) => {
+      classSubjects.forEach((cfg) => {
         const existing = marksEntries.find(
           (m) => m.examId === currentExam.id && m.studentId === st.id && m.subjectCode === cfg.code
         );
@@ -274,7 +277,7 @@ export const ReportCardGenerator: React.FC<ReportCardGeneratorProps> = ({
 
     classStudents.forEach((st) => {
       let regTotal = 0;
-      sampleSubjectConfigs.forEach((cfg) => {
+      classSubjects.forEach((cfg) => {
         const existing = marksEntries.find(
           (m) => m.examId === currentExam.id && m.studentId === st.id && m.subjectCode === cfg.code
         );
@@ -1347,6 +1350,7 @@ export const ReportCardGenerator: React.FC<ReportCardGeneratorProps> = ({
           school={school}
           marksEntries={marksEntries}
           holisticRecord={holisticRecords?.[selectedStudentSummary.studentId]}
+          subjectConfigs={classSubjects}
           language={language}
           currentUser={currentUser}
           effectiveRole={effectiveRole}
@@ -1372,6 +1376,7 @@ export const ReportCardGenerator: React.FC<ReportCardGeneratorProps> = ({
           examination={currentExam}
           marksEntries={marksEntries}
           holisticRecords={holisticRecords}
+          subjectConfigs={classSubjects}
           classNumber={selectedClass}
           section={selectedSection}
           language={language}
@@ -1531,6 +1536,7 @@ export const ReportCardGenerator: React.FC<ReportCardGeneratorProps> = ({
                   school={school}
                   marksEntries={marksEntries}
                   holisticRecord={holisticRecords?.[summary.studentId]}
+                  subjectConfigs={classSubjects}
                   pageIndex={idx}
                   totalPages={arr.length}
                 />
@@ -1552,6 +1558,7 @@ interface SingleStudentProgressCardViewProps {
   school: SchoolProfile;
   marksEntries: StudentMarkEntry[];
   holisticRecord?: StudentHolisticRecord;
+  subjectConfigs?: SubjectConfig[];
   pageIndex?: number;
   totalPages?: number;
 }
@@ -1562,9 +1569,11 @@ const SingleStudentProgressCardView: React.FC<SingleStudentProgressCardViewProps
   school,
   marksEntries,
   holisticRecord,
+  subjectConfigs,
   pageIndex,
   totalPages,
 }) => {
+  const orderedSubjects = subjectConfigs && subjectConfigs.length > 0 ? subjectConfigs : sampleSubjectConfigs;
   const hol = holisticRecord || sampleHolisticRecords[summary.studentId] || {
     ratings: {
       comm: 'Very Good',
@@ -1694,7 +1703,7 @@ const SingleStudentProgressCardView: React.FC<SingleStudentProgressCardViewProps
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-200">
-            {sampleSubjectConfigs.map((cfg, idx) => {
+            {orderedSubjects.map((cfg, idx) => {
               const entry = marksEntries.find(
                 (m) => m.studentId === summary.studentId && m.subjectCode === cfg.code
               );
@@ -1928,6 +1937,7 @@ interface HolisticProgressCardModalProps {
   school: SchoolProfile;
   marksEntries: StudentMarkEntry[];
   holisticRecord?: StudentHolisticRecord;
+  subjectConfigs?: SubjectConfig[];
   language: Language;
   currentUser: User | { id: string; name: string; role: string; assignedClasses?: string[] };
   effectiveRole?: AdminRoleType;
@@ -1952,6 +1962,7 @@ const HolisticProgressCardModal: React.FC<HolisticProgressCardModalProps> = ({
   school,
   marksEntries,
   holisticRecord,
+  subjectConfigs,
   language,
   currentUser,
   effectiveRole = 'primary_admin',
@@ -1962,6 +1973,7 @@ const HolisticProgressCardModal: React.FC<HolisticProgressCardModalProps> = ({
   onShareWhatsApp,
 }) => {
   void language;
+  const activeSubjectConfigs = subjectConfigs && subjectConfigs.length > 0 ? subjectConfigs : sampleSubjectConfigs;
   const classKey = `${summary.classNumber}-${summary.section}`;
   const isTeacherAssigned =
     !(currentUser as User).assignedClasses?.length ||
@@ -2119,7 +2131,7 @@ const HolisticProgressCardModal: React.FC<HolisticProgressCardModalProps> = ({
   // Live marks state per subject (supporting numbers, decimals, and absent status)
   const [subjectMarks, setSubjectMarks] = useState<Record<string, { marksObtained: number | null; isAbsent: boolean; remarks: string }>>(() => {
     const map: Record<string, { marksObtained: number | null; isAbsent: boolean; remarks: string }> = {};
-    sampleSubjectConfigs.forEach((cfg) => {
+    activeSubjectConfigs.forEach((cfg) => {
       const entry = marksEntries.find(
         (m) => m.examId === summary.examId && m.studentId === summary.studentId && m.subjectCode === cfg.code
       );
@@ -2171,7 +2183,7 @@ const HolisticProgressCardModal: React.FC<HolisticProgressCardModalProps> = ({
     let totalMarksObtained = 0;
     let anySubjectFailed = false;
 
-    sampleSubjectConfigs.forEach((cfg) => {
+    activeSubjectConfigs.forEach((cfg) => {
       totalMaxMarks += cfg.maxMarks;
       const sub = subjectMarks[cfg.code] || { marksObtained: 80, isAbsent: false, remarks: '' };
       if (!sub.isAbsent && sub.marksObtained !== null) {
@@ -2199,7 +2211,7 @@ const HolisticProgressCardModal: React.FC<HolisticProgressCardModalProps> = ({
   // Check discrepancies between current HPC marks and Marks Entry Register
   const discrepancies = useMemo(() => {
     const list: Array<{ code: string; name: string; hpcValue: string | number; regValue: string | number }> = [];
-    sampleSubjectConfigs.forEach((cfg) => {
+    activeSubjectConfigs.forEach((cfg) => {
       const reg = marksEntries.find(
         (m) => m.examId === summary.examId && m.studentId === summary.studentId && m.subjectCode === cfg.code
       );
@@ -2327,7 +2339,7 @@ const HolisticProgressCardModal: React.FC<HolisticProgressCardModalProps> = ({
 
     // Update parent database / marks entries
     if (onSaveMarks) {
-      const cfg = sampleSubjectConfigs.find((c) => c.code === subjectCode);
+      const cfg = activeSubjectConfigs.find((c) => c.code === subjectCode);
       const maxMarks = cfg?.maxMarks || 100;
       const subPct = newMarks !== null ? Math.round(((newMarks / maxMarks) * 100) * 10) / 10 : 0;
       const grade = newAbsent ? 'AB' : getGradeFromPercentage(subPct, school.gradingScale).grade;
@@ -2372,7 +2384,7 @@ const HolisticProgressCardModal: React.FC<HolisticProgressCardModalProps> = ({
 
   const executeRegisterSync = () => {
     const map: Record<string, { marksObtained: number | null; isAbsent: boolean; remarks: string }> = {};
-    sampleSubjectConfigs.forEach((cfg) => {
+    activeSubjectConfigs.forEach((cfg) => {
       const entry = marksEntries.find(
         (m) => m.examId === summary.examId && m.studentId === summary.studentId && m.subjectCode === cfg.code
       );
@@ -2835,7 +2847,7 @@ const HolisticProgressCardModal: React.FC<HolisticProgressCardModalProps> = ({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200">
-                    {sampleSubjectConfigs.map((cfg, idx) => {
+                    {activeSubjectConfigs.map((cfg, idx) => {
                       const isEditing = editingSubjectCode === cfg.code;
                       const sub = subjectMarks[cfg.code] || { marksObtained: 80, isAbsent: false, remarks: '' };
                       const maxMarks = cfg.maxMarks;
@@ -3552,6 +3564,7 @@ interface ConsolidatedClassProgressCardsModalProps {
   examination: Examination;
   marksEntries: StudentMarkEntry[];
   holisticRecords?: Record<string, StudentHolisticRecord>;
+  subjectConfigs?: SubjectConfig[];
   classNumber: string;
   section: string;
   language: Language;
@@ -3568,6 +3581,7 @@ const ConsolidatedClassProgressCardsModal: React.FC<ConsolidatedClassProgressCar
   examination,
   marksEntries,
   holisticRecords,
+  subjectConfigs,
   classNumber,
   section,
   language,
@@ -3645,6 +3659,7 @@ const ConsolidatedClassProgressCardsModal: React.FC<ConsolidatedClassProgressCar
                   school={school}
                   marksEntries={marksEntries}
                   holisticRecord={holisticRecords?.[summary.studentId]}
+                  subjectConfigs={subjectConfigs}
                   pageIndex={idx}
                   totalPages={studentSummaries.length}
                 />

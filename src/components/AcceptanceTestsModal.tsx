@@ -24,10 +24,16 @@ import {
 import {
   initialSchoolProfile,
   sampleSubjectConfigs,
+  sampleStudents,
   resolveUserPermissions,
   JUNIOR_ADMIN_BASE_PERMISSIONS,
   SENIOR_ADMIN_ADDITIONAL_PERMISSIONS,
 } from '../utils/sampleData';
+import {
+  parseScannedStudentQr,
+  evaluateScanDispatch,
+  requestCameraScannerPermission,
+} from './AttendanceScanner';
 
 interface TestResult {
   id: string;
@@ -53,7 +59,7 @@ export const AcceptanceTestsModal: React.FC<AcceptanceTestsModalProps> = ({
 
   if (!isOpen) return null;
 
-  const runAllTests = () => {
+  const runAllTests = async () => {
     setIsRunning(true);
     const testList: TestResult[] = [];
 
@@ -489,6 +495,119 @@ export const AcceptanceTestsModal: React.FC<AcceptanceTestsModalProps> = ({
       durationMs: Math.round((performance.now() - t22Start) * 100) / 100,
     });
 
+    // Test 23: AttendanceScanner Camera Permission Handling (Granted / Denied / Unavailable)
+    const t23Start = performance.now();
+    const grantedPerm = await requestCameraScannerPermission(async () => [
+      { id: 'cam-back', label: 'Back Environment Camera' },
+    ]);
+    const deniedPerm = await requestCameraScannerPermission(async () => {
+      const err = new Error('Permission denied by user');
+      err.name = 'NotAllowedError';
+      throw err;
+    });
+    const noHardwarePerm = await requestCameraScannerPermission(async () => []);
+    const camPermPassed =
+      grantedPerm.granted === true &&
+      grantedPerm.status === 'granted' &&
+      deniedPerm.granted === false &&
+      deniedPerm.status === 'denied' &&
+      noHardwarePerm.granted === false &&
+      noHardwarePerm.status === 'unavailable';
+    testList.push({
+      id: 'test-scanner-cam-perm',
+      name: 'AttendanceScanner: Camera Permission Handling (Granted, NotAllowedError Denied, No Hardware)',
+      category: 'AttendanceScanner Unit',
+      passed: camPermPassed,
+      expected: 'granted -> true, NotAllowedError -> denied, empty camera list -> unavailable',
+      actual: `Granted: ${grantedPerm.status}, Denied: ${deniedPerm.status}, Empty: ${noHardwarePerm.status}`,
+      durationMs: Math.round((performance.now() - t23Start) * 100) / 100,
+    });
+
+    // Test 24: AttendanceScanner QR Detection & Multi-Format Student Resolution
+    const t24Start = performance.now();
+    const activeSampleStudent = sampleStudents.find((s) => s.status === 'Active') || sampleStudents[0];
+    const multiLineQr = `Name: ${activeSampleStudent.fullName}\nFather: ${activeSampleStudent.fatherName}\nClass: ${activeSampleStudent.classNumber}-${activeSampleStudent.section}\nRoll No: ${activeSampleStudent.rollNumber}\nAdmission No: ${activeSampleStudent.admissionNumber}\nPhone: ${activeSampleStudent.mobileNumber}\nDOB: ${activeSampleStudent.dob}`;
+    const jsonQr = JSON.stringify({ id: activeSampleStudent.id, admissionNumber: activeSampleStudent.admissionNumber, rollNumber: activeSampleStudent.rollNumber });
+    const parsedMultiLine = parseScannedStudentQr(multiLineQr, sampleStudents, activeSampleStudent.classNumber, activeSampleStudent.section);
+    const parsedJson = parseScannedStudentQr(jsonQr, sampleStudents);
+    const parsedInvalid = parseScannedStudentQr('INVALID-QR-999999', sampleStudents);
+    const qrParsePassed =
+      parsedMultiLine.matchedStudent?.id === activeSampleStudent.id &&
+      parsedJson.matchedStudent?.id === activeSampleStudent.id &&
+      parsedInvalid.matchedStudent === null;
+    testList.push({
+      id: 'test-scanner-qr-parse',
+      name: 'AttendanceScanner: Successful QR Code Detection & Unrecognized Rejection',
+      category: 'AttendanceScanner Unit',
+      passed: qrParsePassed,
+      expected: `Match ${activeSampleStudent.fullName} from 7-field text & JSON; null for unknown payload`,
+      actual: `7-field: ${parsedMultiLine.matchedStudent?.admissionNumber || 'none'}, JSON: ${parsedJson.matchedStudent?.admissionNumber || 'none'}, Unknown: ${String(parsedInvalid.matchedStudent)}`,
+      durationMs: Math.round((performance.now() - t24Start) * 100) / 100,
+    });
+
+    // Test 25: AttendanceScanner Database Update Dispatch & Continuous Scanning Mode
+    const t25Start = performance.now();
+    const dispatchedIds: string[] = [];
+    const singleShotRes = evaluateScanDispatch(activeSampleStudent.admissionNumber, sampleStudents, {
+      selectedClass: activeSampleStudent.classNumber,
+      selectedSection: activeSampleStudent.section,
+      continuousScanning: false,
+      lastScanMap: new Map(),
+      onMarkPresent: (st) => dispatchedIds.push(st.id),
+    });
+    const continuousRes = evaluateScanDispatch(activeSampleStudent.id, sampleStudents, {
+      selectedClass: activeSampleStudent.classNumber,
+      selectedSection: activeSampleStudent.section,
+      continuousScanning: true,
+      lastScanMap: new Map(),
+      onMarkPresent: (st) => dispatchedIds.push(st.id),
+    });
+    const dispatchPassed =
+      singleShotRes.ok === true &&
+      singleShotRes.dispatchedStatus === 'Present' &&
+      singleShotRes.shouldPauseCamera === true &&
+      continuousRes.ok === true &&
+      continuousRes.dispatchedStatus === 'Present' &&
+      continuousRes.shouldPauseCamera === false &&
+      dispatchedIds.length === 2;
+    testList.push({
+      id: 'test-scanner-db-dispatch',
+      name: 'AttendanceScanner: Database Present Update Dispatch & Continuous vs Single-Shot Pause',
+      category: 'AttendanceScanner Unit',
+      passed: dispatchPassed,
+      expected: 'Dispatch Present status; pause camera in Single-Shot, keep camera active in Continuous mode',
+      actual: `Dispatched: ${dispatchedIds.length}, SingleShotPause: ${singleShotRes.shouldPauseCamera}, ContinuousPause: ${continuousRes.shouldPauseCamera}`,
+      durationMs: Math.round((performance.now() - t25Start) * 100) / 100,
+    });
+
+    // Test 26: AttendanceScanner Duplicate Cooldown Suppression
+    const t26Start = performance.now();
+    const cooldownMap = new Map<string, number>();
+    let cooldownDispatchCount = 0;
+    const baseNow = 1_700_000_000_000;
+    evaluateScanDispatch(activeSampleStudent.admissionNumber, sampleStudents, {
+      continuousScanning: true,
+      lastScanMap: cooldownMap,
+      now: baseNow,
+      onMarkPresent: () => { cooldownDispatchCount += 1; },
+    });
+    const dupRes = evaluateScanDispatch(activeSampleStudent.admissionNumber, sampleStudents, {
+      continuousScanning: true,
+      lastScanMap: cooldownMap,
+      now: baseNow + 1500,
+      onMarkPresent: () => { cooldownDispatchCount += 1; },
+    });
+    const dupPassed = dupRes.ok === false && dupRes.duplicate === true && cooldownDispatchCount === 1;
+    testList.push({
+      id: 'test-scanner-dup-cooldown',
+      name: 'AttendanceScanner: Rapid-Fire Duplicate Scan Suppression Window (4.5s Cooldown)',
+      category: 'AttendanceScanner Unit',
+      passed: dupPassed,
+      expected: 'Suppress duplicate re-dispatch within 4.5s cooldown; total callbacks = 1',
+      actual: `Duplicate Flag: ${dupRes.duplicate}, Dispatches: ${cooldownDispatchCount}`,
+      durationMs: Math.round((performance.now() - t26Start) * 100) / 100,
+    });
+
     setTimeout(() => {
       setResults(testList);
       setIsRunning(false);
@@ -496,7 +615,7 @@ export const AcceptanceTestsModal: React.FC<AcceptanceTestsModalProps> = ({
   };
 
   React.useEffect(() => {
-    runAllTests();
+    void runAllTests();
   }, []);
 
   const passedCount = results.filter((r) => r.passed).length;

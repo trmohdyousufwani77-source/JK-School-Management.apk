@@ -440,3 +440,523 @@ export function exportTextbookDistributionToExcel(
   triggerDownload(wb, `Textbook_Distribution_${school.code}_${new Date().toISOString().slice(0, 10)}.xlsx`);
 }
 
+function escapeCsvCell(value: string | number): string {
+  const str = String(value ?? '');
+  if (/[",\n\r]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+/**
+ * Export Monthly Attendance Percentage Statistics for the selected class as CSV
+ */
+export function exportAttendanceStatisticsCsv(options: {
+  students: Student[];
+  records: AttendanceRecord[];
+  school: SchoolProfile;
+  classNumber: string;
+  section: string;
+  monthName: string;
+  year: number;
+  daysList: { dateStr: string; dayOfMonth: number; isHoliday: boolean }[];
+  workingDaysTotal: number;
+}) {
+  const {
+    students,
+    records,
+    school,
+    classNumber,
+    section,
+    monthName,
+    year,
+    daysList,
+    workingDaysTotal,
+  } = options;
+
+  const classStudents = students
+    .filter((s) => s.classNumber === classNumber && s.section === section && s.status === 'Active')
+    .sort((a, b) => a.rollNumber - b.rollNumber);
+
+  const workingDateSet = new Set(daysList.filter((d) => !d.isHoliday).map((d) => d.dateStr));
+  const recordByStudentDate = new Map<string, AttendanceRecord>();
+  records.forEach((r) => {
+    if (workingDateSet.has(r.date)) {
+      recordByStudentDate.set(`${r.studentId}::${r.date}`, r);
+    }
+  });
+
+  const headers = [
+    'Roll Number',
+    'Admission Number',
+    'Student Name',
+    "Father's Name",
+    'Class',
+    'Section',
+    'Month',
+    'Scheduled Working Days',
+    'Present Days',
+    'Late Days',
+    'Absent Days',
+    'Approved Leave Days',
+    'Attendance Percentage (%)',
+    'Compliance Status',
+  ];
+
+  let totalPresentAll = 0;
+
+  const rows = classStudents.map((st) => {
+    let present = 0;
+    let late = 0;
+    let absent = 0;
+    let leave = 0;
+
+    daysList.forEach((d) => {
+      if (d.isHoliday) return;
+      const rec = recordByStudentDate.get(`${st.id}::${d.dateStr}`);
+      if (!rec) return;
+      if (rec.status === 'Present') present += 1;
+      else if (rec.status === 'Late') late += 1;
+      else if (rec.status === 'Absent') absent += 1;
+      else if (rec.status === 'Approved_Leave') leave += 1;
+    });
+
+    const effectivePresent = present + late;
+    totalPresentAll += effectivePresent;
+    const pct = workingDaysTotal > 0 ? Math.min(100, Math.round((effectivePresent / workingDaysTotal) * 10000) / 100) : 0;
+    const statusLabel = pct < 75 ? 'Below 75% Threshold' : 'Satisfactory (>=75%)';
+
+    return [
+      st.rollNumber,
+      st.admissionNumber,
+      st.fullName,
+      st.fatherName,
+      classNumber,
+      section,
+      `${monthName} ${year}`,
+      workingDaysTotal,
+      present,
+      late,
+      absent,
+      leave,
+      pct.toFixed(2),
+      statusLabel,
+    ];
+  });
+
+  const maxPossibleAll = classStudents.length * workingDaysTotal;
+  const classPct = maxPossibleAll > 0 ? Math.min(100, Math.round((totalPresentAll / maxPossibleAll) * 10000) / 100) : 0;
+
+  const summaryRow = [
+    'TOTAL',
+    `${classStudents.length} Students`,
+    `Class ${classNumber}-${section} Monthly Summary`,
+    school.name,
+    classNumber,
+    section,
+    `${monthName} ${year}`,
+    workingDaysTotal,
+    totalPresentAll,
+    '',
+    '',
+    '',
+    classPct.toFixed(2),
+    classPct < 75 ? 'Class Below 75%' : 'Class Satisfactory',
+  ];
+
+  const csvContent = [headers, ...rows, summaryRow]
+    .map((row) => row.map((cell) => escapeCsvCell(cell)).join(','))
+    .join('\r\n');
+
+  const blob = new Blob([`\uFEFF${csvContent}`], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `Attendance_Statistics_Class_${classNumber}${section}_${monthName}_${year}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+export interface BatchMonthlyAttendanceExportOptions {
+  students: Student[];
+  records: AttendanceRecord[];
+  school: SchoolProfile;
+  classNumber: string;
+  sectionScope: 'all' | string; // 'all' exports all sections in the class together
+  monthName: string;
+  year: number;
+  daysList: { dateStr: string; dayOfMonth: number; isHoliday: boolean; holidayName?: string }[];
+  workingDaysTotal: number;
+}
+
+function getBatchClassStudents(
+  students: Student[],
+  classNumber: string,
+  sectionScope: 'all' | string
+): Student[] {
+  return students
+    .filter(
+      (s) =>
+        s.status === 'Active' &&
+        s.classNumber === classNumber &&
+        (sectionScope === 'all' || s.section === sectionScope)
+    )
+    .sort((a, b) => {
+      const secCmp = (a.section || '').localeCompare(b.section || '');
+      if (secCmp !== 0) return secCmp;
+      return a.rollNumber - b.rollNumber;
+    });
+}
+
+/**
+ * Batch Export: Generates a single consolidated CSV containing full monthly attendance matrix
+ * & metrics for an entire class (all sections or selected section) at once.
+ */
+export function exportBatchMonthlyClassCsv(options: BatchMonthlyAttendanceExportOptions): {
+  filename: string;
+  studentCount: number;
+} {
+  const {
+    students,
+    records,
+    school,
+    classNumber,
+    sectionScope,
+    monthName,
+    year,
+    daysList,
+    workingDaysTotal,
+  } = options;
+
+  const classStudents = getBatchClassStudents(students, classNumber, sectionScope);
+  const recordByStudentDate = new Map<string, AttendanceRecord>();
+  records.forEach((r) => {
+    recordByStudentDate.set(`${r.studentId}::${r.date}`, r);
+  });
+
+  const scopeLabel = sectionScope === 'all' ? 'All Sections' : `Section ${sectionScope}`;
+  const titleRow = [`${school.name} - BATCH MONTHLY ATTENDANCE REPORT`];
+  const metaRow = [
+    `Class ${classNumber} (${scopeLabel})`,
+    `Month: ${monthName} ${year}`,
+    `Working Days: ${workingDaysTotal}`,
+    `Total Students: ${classStudents.length}`,
+    `U-DISE: ${school.code}`,
+  ];
+  const blankRow: string[] = [];
+
+  const headers = [
+    'Section',
+    'Roll No',
+    'Admission No',
+    'Student Name',
+    "Father's Name",
+    ...daysList.map((d) => `${String(d.dayOfMonth).padStart(2, '0')}`),
+    'Working Days',
+    'Present',
+    'Late',
+    'Absent',
+    'Approved Leave',
+    'Attendance %',
+    'Threshold Status',
+  ];
+
+  let totalPresentAll = 0;
+  let totalAbsentAll = 0;
+  let totalLeaveAll = 0;
+
+  const dataRows = classStudents.map((st) => {
+    let present = 0;
+    let late = 0;
+    let absent = 0;
+    let leave = 0;
+
+    const dayCells = daysList.map((d) => {
+      if (d.isHoliday) return 'H';
+      const rec = recordByStudentDate.get(`${st.id}::${d.dateStr}`);
+      if (!rec) return '-';
+      if (rec.status === 'Present') {
+        present += 1;
+        return 'P';
+      }
+      if (rec.status === 'Late') {
+        late += 1;
+        return 'L';
+      }
+      if (rec.status === 'Absent') {
+        absent += 1;
+        return 'A';
+      }
+      if (rec.status === 'Approved_Leave') {
+        leave += 1;
+        return 'AL';
+      }
+      return '-';
+    });
+
+    const effectivePresent = present + late;
+    totalPresentAll += effectivePresent;
+    totalAbsentAll += absent;
+    totalLeaveAll += leave;
+
+    const pct =
+      workingDaysTotal > 0
+        ? Math.min(100, Math.round((effectivePresent / workingDaysTotal) * 10000) / 100)
+        : 0;
+
+    return [
+      st.section,
+      st.rollNumber,
+      st.admissionNumber,
+      st.fullName,
+      st.fatherName,
+      ...dayCells,
+      workingDaysTotal,
+      present,
+      late,
+      absent,
+      leave,
+      `${pct.toFixed(2)}%`,
+      pct < 75 ? 'Below 75%' : 'Satisfactory',
+    ];
+  });
+
+  const maxPossible = classStudents.length * workingDaysTotal;
+  const classPct =
+    maxPossible > 0 ? Math.min(100, Math.round((totalPresentAll / maxPossible) * 10000) / 100) : 0;
+
+  const totalRow = [
+    scopeLabel,
+    'TOTAL',
+    `${classStudents.length} Students`,
+    `Class ${classNumber} Summary`,
+    school.name,
+    ...daysList.map(() => ''),
+    workingDaysTotal,
+    totalPresentAll,
+    '',
+    totalAbsentAll,
+    totalLeaveAll,
+    `${classPct.toFixed(2)}%`,
+    classPct < 75 ? 'Class Below 75%' : 'Class Satisfactory',
+  ];
+
+  const csvContent = [titleRow, metaRow, blankRow, headers, ...dataRows, totalRow]
+    .map((row) => row.map((cell) => escapeCsvCell(cell)).join(','))
+    .join('\r\n');
+
+  const fileSuffix = sectionScope === 'all' ? 'AllSections' : `Sec${sectionScope}`;
+  const filename = `Batch_Monthly_Attendance_Class_${classNumber}_${fileSuffix}_${monthName}_${year}.csv`;
+
+  const blob = new Blob([`\uFEFF${csvContent}`], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+
+  return { filename, studentCount: classStudents.length };
+}
+
+/**
+ * Batch Export: Generates a single consolidated multi-page Landscape A4 PDF containing
+ * full monthly attendance registers for an entire class at once.
+ */
+export async function exportBatchMonthlyClassPdf(
+  options: BatchMonthlyAttendanceExportOptions
+): Promise<{ filename: string; studentCount: number }> {
+  const { jsPDF } = await import('jspdf');
+  const {
+    students,
+    records,
+    school,
+    classNumber,
+    sectionScope,
+    monthName,
+    year,
+    daysList,
+    workingDaysTotal,
+  } = options;
+
+  const classStudents = getBatchClassStudents(students, classNumber, sectionScope);
+  const recordByStudentDate = new Map<string, AttendanceRecord>();
+  records.forEach((r) => {
+    recordByStudentDate.set(`${r.studentId}::${r.date}`, r);
+  });
+
+  const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+  const pageWidth = 297;
+  const pageHeight = 210;
+  const marginX = 10;
+
+  const scopeLabel = sectionScope === 'all' ? 'All Sections' : `Section ${sectionScope}`;
+  const dayCount = daysList.length;
+  const fixedLeftW = 58; // Sec/Roll + Student Name
+  const fixedRightW = 42; // W + P + A + AL + %
+  const gridWidth = pageWidth - marginX * 2 - fixedLeftW - fixedRightW;
+  const dayColW = Math.max(4.5, gridWidth / Math.max(1, dayCount));
+
+  const drawHeader = (pageNum: number) => {
+    doc.setFillColor(15, 23, 42);
+    doc.rect(marginX, 8, pageWidth - marginX * 2, 16, 'F');
+
+    doc.setTextColor(255, 255, 255);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11);
+    doc.text(`${school.name} — Batch Monthly Attendance Register`, marginX + 4, 14.5);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.text(
+      `Class ${classNumber} (${scopeLabel})  |  ${monthName} ${year}  |  Working Days: ${workingDaysTotal}  |  Students: ${classStudents.length}  |  U-DISE: ${school.code}`,
+      marginX + 4,
+      20.5
+    );
+    doc.text(`Page ${pageNum}`, pageWidth - marginX - 18, 14.5);
+
+    // Table header row
+    const headerY = 27;
+    doc.setFillColor(241, 245, 249);
+    doc.rect(marginX, headerY, pageWidth - marginX * 2, 7, 'F');
+    doc.setDrawColor(203, 213, 225);
+    doc.rect(marginX, headerY, pageWidth - marginX * 2, 7, 'S');
+
+    doc.setTextColor(30, 41, 59);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7);
+    doc.text('Sec/Roll', marginX + 2, headerY + 4.7);
+    doc.text('Student Name', marginX + 16, headerY + 4.7);
+
+    let xCursor = marginX + fixedLeftW;
+    daysList.forEach((d) => {
+      if (d.isHoliday) {
+        doc.setTextColor(148, 163, 184);
+      } else {
+        doc.setTextColor(51, 65, 85);
+      }
+      doc.text(String(d.dayOfMonth), xCursor + dayColW / 2, headerY + 4.7, { align: 'center' });
+      xCursor += dayColW;
+    });
+
+    doc.setTextColor(15, 23, 42);
+    const rightStart = marginX + fixedLeftW + dayCount * dayColW;
+    doc.text('W', rightStart + 4, headerY + 4.7, { align: 'center' });
+    doc.text('P', rightStart + 12, headerY + 4.7, { align: 'center' });
+    doc.text('A', rightStart + 20, headerY + 4.7, { align: 'center' });
+    doc.text('AL', rightStart + 28, headerY + 4.7, { align: 'center' });
+    doc.text('%', rightStart + 37, headerY + 4.7, { align: 'center' });
+  };
+
+  let pageNum = 1;
+  drawHeader(pageNum);
+
+  let yCursor = 34;
+  const rowHeight = 6.2;
+
+  if (classStudents.length === 0) {
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(100, 116, 139);
+    doc.text('No active students enrolled for the selected class scope.', marginX + 4, 44);
+  } else {
+    classStudents.forEach((st, idx) => {
+      if (yCursor + rowHeight > pageHeight - 16) {
+        doc.addPage();
+        pageNum += 1;
+        drawHeader(pageNum);
+        yCursor = 34;
+      }
+
+      if (idx % 2 === 1) {
+        doc.setFillColor(248, 250, 252);
+        doc.rect(marginX, yCursor, pageWidth - marginX * 2, rowHeight, 'F');
+      }
+      doc.setDrawColor(226, 232, 240);
+      doc.line(marginX, yCursor + rowHeight, pageWidth - marginX, yCursor + rowHeight);
+
+      let present = 0;
+      let absent = 0;
+      let leave = 0;
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(6.8);
+      doc.setTextColor(30, 41, 59);
+      doc.text(`${st.section}-${st.rollNumber}`, marginX + 2, yCursor + 4.3);
+
+      doc.setFont('helvetica', 'normal');
+      doc.text((st.fullName || '').slice(0, 22), marginX + 16, yCursor + 4.3);
+
+      let xCursor = marginX + fixedLeftW;
+      daysList.forEach((d) => {
+        let code = '-';
+        if (d.isHoliday) {
+          code = 'H';
+          doc.setTextColor(148, 163, 184);
+        } else {
+          const rec = recordByStudentDate.get(`${st.id}::${d.dateStr}`);
+          if (rec?.status === 'Present') {
+            present += 1;
+            code = 'P';
+            doc.setTextColor(5, 150, 105);
+          } else if (rec?.status === 'Late') {
+            present += 1;
+            code = 'L';
+            doc.setTextColor(217, 119, 6);
+          } else if (rec?.status === 'Absent') {
+            absent += 1;
+            code = 'A';
+            doc.setTextColor(225, 29, 72);
+          } else if (rec?.status === 'Approved_Leave') {
+            leave += 1;
+            code = 'AL';
+            doc.setTextColor(37, 99, 235);
+          } else {
+            doc.setTextColor(203, 213, 225);
+          }
+        }
+        doc.text(code, xCursor + dayColW / 2, yCursor + 4.3, { align: 'center' });
+        xCursor += dayColW;
+      });
+
+      const pct =
+        workingDaysTotal > 0 ? Math.min(100, Math.round((present / workingDaysTotal) * 1000) / 10) : 0;
+
+      const rightStart = marginX + fixedLeftW + dayCount * dayColW;
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(51, 65, 85);
+      doc.text(String(workingDaysTotal), rightStart + 4, yCursor + 4.3, { align: 'center' });
+      doc.setTextColor(5, 150, 105);
+      doc.text(String(present), rightStart + 12, yCursor + 4.3, { align: 'center' });
+      doc.setTextColor(225, 29, 72);
+      doc.text(String(absent), rightStart + 20, yCursor + 4.3, { align: 'center' });
+      doc.setTextColor(37, 99, 235);
+      doc.text(String(leave), rightStart + 28, yCursor + 4.3, { align: 'center' });
+      doc.setTextColor(pct < 75 ? 225 : 30, pct < 75 ? 29 : 41, pct < 75 ? 72 : 59);
+      doc.text(`${pct.toFixed(1)}%`, rightStart + 37, yCursor + 4.3, { align: 'center' });
+
+      yCursor += rowHeight;
+    });
+  }
+
+  // Footer Legend
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7);
+  doc.setTextColor(100, 116, 139);
+  doc.text(
+    'Legend: P = Present, L = Late, A = Absent, AL = Approved Leave, H = Holiday  |  Generated via School Master Batch Export',
+    marginX,
+    pageHeight - 7
+  );
+
+  const fileSuffix = sectionScope === 'all' ? 'AllSections' : `Sec${sectionScope}`;
+  const filename = `Batch_Monthly_Attendance_Class_${classNumber}_${fileSuffix}_${monthName}_${year}.pdf`;
+  doc.save(filename);
+
+  return { filename, studentCount: classStudents.length };
+}
+
