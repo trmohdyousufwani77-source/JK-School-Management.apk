@@ -39,7 +39,13 @@ import { TeacherSubjectResultCard } from './components/TeacherSubjectResultCard'
 import { AboutUsAppInfo } from './components/AboutUsAppInfo';
 import { SmartIdCardMaker } from './components/SmartIdCardMaker';
 import { PrincipalManagement } from './components/PrincipalManagement';
+import { JkepmAppraisalPortal } from './components/JkepmAppraisalPortal';
 import { SchoolEmblem } from './components/SchoolEmblem';
+import {
+  NEW_CPIS_CODE_OFFICIAL,
+  OLD_CPIS_CODE_LEGACY,
+  normalizeCpisCode,
+} from './utils/jkepmReportExport';
 import {
   deleteExcelMappingSchemaFromFirestore,
   deletePrincipalFromFirestore,
@@ -50,6 +56,8 @@ import {
   syncPrincipalToFirestore,
   syncSchoolProfileToFirestore,
   syncStudentsBatchToFirestore,
+  syncTeacherAttendanceToFirestore,
+  syncTeacherLeaveToFirestore,
   testFirestoreConnection,
   subscribeFcmForegroundMessages,
 } from './firebase';
@@ -98,6 +106,7 @@ import {
   OfflineSyncProgress,
 } from './types';
 import { loadExcelMappingSchemas, saveExcelMappingSchemas } from './utils/ocrStudentExtractor';
+import { isLegacySchoolAddress } from './utils/calculations';
 import { Language, translations } from './utils/translations';
 import {
   generateSampleAttendance,
@@ -189,11 +198,21 @@ function SchoolMasterApp() {
           parsed.nameHi = 'राजकीय मध्य विद्यालय पम्पोष कॉलोनी';
           parsed.state = 'Jammu and Kashmir';
           parsed.district = 'Srinagar';
-          parsed.villageTown = 'Pamposh Colony, Palpora';
-          parsed.blockTehsil = 'Iddgah';
-          parsed.pinCode = '190017';
+          parsed.villageTown = 'Pamposh Colony';
+          parsed.blockTehsil = 'Palapora Zone, Iddgah';
+          parsed.pinCode = '';
           parsed.address = STANDARDIZED_ADDRESS;
-          parsed.locationAddress = 'Campus Main Gate, Pamposh Colony, Palpora, Tehsil Iddgah, Srinagar – 190017';
+          parsed.locationAddress = 'Campus Main Gate, Pamposh Colony, Palapora Zone, Iddgah';
+        }
+        // Always migrate legacy Palpora/Tehsil Iddgah/190017 address to the updated official address
+        if (!parsed.address || isLegacySchoolAddress(parsed.address)) {
+          parsed.address = STANDARDIZED_ADDRESS;
+          parsed.villageTown = 'Pamposh Colony';
+          parsed.blockTehsil = 'Palapora Zone, Iddgah';
+          if (parsed.pinCode === '190017') parsed.pinCode = '';
+        }
+        if (!parsed.locationAddress || isLegacySchoolAddress(parsed.locationAddress)) {
+          parsed.locationAddress = 'Campus Main Gate, Pamposh Colony, Palapora Zone, Iddgah';
         }
         return parsed;
       } catch (e) { /* ignore */ }
@@ -414,9 +433,10 @@ function SchoolMasterApp() {
       try {
         let parsed: Student[] = JSON.parse(saved);
         parsed = parsed.map((s) => {
-          // Standardize address to Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.
+          // Standardize legacy addresses to Pamposh Colony, Palapora Zone, Iddgah
           if (
             !s.address ||
+            isLegacySchoolAddress(s.address) ||
             s.address.includes('Pattan') ||
             s.district === 'Baramulla' ||
             s.address.includes('Bhojipura') ||
@@ -429,11 +449,11 @@ function SchoolMasterApp() {
             return {
               ...s,
               address: STANDARDIZED_ADDRESS,
-              villageTown: 'Palpora',
-              blockTehsil: 'Iddgah',
+              villageTown: 'Pamposh Colony',
+              blockTehsil: 'Palapora Zone, Iddgah',
               district: 'Srinagar',
               state: 'Jammu and Kashmir',
-              pinCode: '190017',
+              pinCode: s.pinCode === '190017' ? '' : s.pinCode || '',
             };
           }
           return s;
@@ -468,7 +488,12 @@ function SchoolMasterApp() {
         }
         parsed = parsed.map((tc) => {
           let updated = { ...tc };
-          if (!tc.residentialAddress || tc.residentialAddress.includes('Pattan') || tc.district === 'Baramulla') {
+          if (
+            !tc.residentialAddress ||
+            isLegacySchoolAddress(tc.residentialAddress) ||
+            tc.residentialAddress.includes('Pattan') ||
+            tc.district === 'Baramulla'
+          ) {
             updated.residentialAddress = STANDARDIZED_ADDRESS;
             updated.district = 'Srinagar';
           }
@@ -486,6 +511,13 @@ function SchoolMasterApp() {
               return s;
             });
           }
+          if (
+            normalizeCpisCode(updated.employeeId || '') === normalizeCpisCode(OLD_CPIS_CODE_LEGACY) ||
+            (updated.id === 'tch-2' && updated.employeeId === 'TCH-101')
+          ) {
+            updated.previousCpisCode = updated.previousCpisCode || OLD_CPIS_CODE_LEGACY;
+            updated.employeeId = NEW_CPIS_CODE_OFFICIAL;
+          }
           return updated;
         });
         return parsed;
@@ -499,6 +531,7 @@ function SchoolMasterApp() {
   }, [teachers]);
 
   // 8. Attendance Records & Audit Logs
+  const [focusedStudentId, setFocusedStudentId] = useState<string | null>(null);
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>(() => {
     const saved = localStorage.getItem(`${STORAGE_KEY_PREFIX}attendance`);
     if (saved) {
@@ -527,7 +560,14 @@ function SchoolMasterApp() {
   const [leaveApplications, setLeaveApplications] = useState<TeacherLeaveApplication[]>(() => {
     const saved = localStorage.getItem(`${STORAGE_KEY_PREFIX}leaves`);
     if (saved) {
-      try { return JSON.parse(saved); } catch (e) { /* ignore */ }
+      try {
+        const parsed: TeacherLeaveApplication[] = JSON.parse(saved);
+        return parsed.map((l) =>
+          normalizeCpisCode(l.employeeId || '') === normalizeCpisCode(OLD_CPIS_CODE_LEGACY)
+            ? { ...l, employeeId: NEW_CPIS_CODE_OFFICIAL }
+            : l
+        );
+      } catch (e) { /* ignore */ }
     }
     return sampleTeacherLeaveApplications;
   });
@@ -665,7 +705,14 @@ function SchoolMasterApp() {
   const [teacherAttendance, setTeacherAttendance] = useState<TeacherAttendanceRecord[]>(() => {
     const saved = localStorage.getItem(`${STORAGE_KEY_PREFIX}teacher_attendance`);
     if (saved) {
-      try { return JSON.parse(saved); } catch (e) { /* ignore */ }
+      try {
+        const parsed: TeacherAttendanceRecord[] = JSON.parse(saved);
+        return parsed.map((rec) =>
+          normalizeCpisCode(rec.employeeId || '') === normalizeCpisCode(OLD_CPIS_CODE_LEGACY)
+            ? { ...rec, employeeId: NEW_CPIS_CODE_OFFICIAL }
+            : rec
+        );
+      } catch (e) { /* ignore */ }
     }
     return sampleTeacherAttendanceRecords;
   });
@@ -675,15 +722,30 @@ function SchoolMasterApp() {
   }, [teacherAttendance]);
 
   const handleSaveTeacherAttendance = (record: TeacherAttendanceRecord) => {
+    const existingRecord = teacherAttendance.find(
+      (r) => r.teacherId === record.teacherId && r.date === record.date
+    );
+    const enrichedRecord: TeacherAttendanceRecord = {
+      ...record,
+      id: existingRecord?.id || record.id || `att-${record.teacherId}-${record.date}`,
+      updatedAt: new Date().toISOString(),
+      updatedBy: record.updatedBy || currentUser.name,
+    };
     setTeacherAttendance((prev) => {
-      const idx = prev.findIndex((r) => r.teacherId === record.teacherId && r.date === record.date);
+      const idx = prev.findIndex((r) => r.teacherId === enrichedRecord.teacherId && r.date === enrichedRecord.date);
       if (idx >= 0) {
         const copy = [...prev];
-        copy[idx] = record;
+        copy[idx] = enrichedRecord;
         return copy;
       }
-      return [record, ...prev];
+      return [enrichedRecord, ...prev];
     });
+    fetch('/api/teacher-attendance', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(enrichedRecord),
+    }).catch(() => {});
+    syncTeacherAttendanceToFirestore(enrichedRecord, !existingRecord).catch(() => {});
   };
 
   // 12. Offline Mode & Sync Queue
@@ -1043,7 +1105,30 @@ function SchoolMasterApp() {
   };
 
   const handleUpdateTeacher = (updatedTeacher: TeacherProfile) => {
+    const existingTeacher = teachers.find((t) => t.id === updatedTeacher.id);
+    const prevEmpCode = normalizeCpisCode(
+      existingTeacher?.employeeId || updatedTeacher.previousCpisCode || ''
+    );
     setTeachers((prev) => prev.map((t) => (t.id === updatedTeacher.id ? updatedTeacher : t)));
+    // Keep linked leave applications and attendance records synchronized with updated CPIS Code
+    if (updatedTeacher.employeeId) {
+      setLeaveApplications((prev) =>
+        prev.map((l) => {
+          const matchesPrevCode =
+            prevEmpCode.length > 0 && normalizeCpisCode(l.employeeId || '') === prevEmpCode;
+          const matchesTeacherName =
+            l.teacherName.trim().toLowerCase() === updatedTeacher.name.trim().toLowerCase();
+          return matchesPrevCode || matchesTeacherName
+            ? { ...l, employeeId: updatedTeacher.employeeId }
+            : l;
+        })
+      );
+      setTeacherAttendance((prev) =>
+        prev.map((rec) =>
+          rec.teacherId === updatedTeacher.id ? { ...rec, employeeId: updatedTeacher.employeeId } : rec
+        )
+      );
+    }
   };
 
   const handleDeleteTeacher = (teacherId: string) => {
@@ -1166,67 +1251,196 @@ function SchoolMasterApp() {
     }, stepDurationMs);
   };
 
-  // Handlers for Leaves
+  // Handlers for Leaves (Full CRUD + Review / Approve / Reject + Soft-Delete Audit + API & Firestore Sync)
   const handleApplyLeave = (newLeave: TeacherLeaveApplication) => {
     setLeaveApplications((prev) => [newLeave, ...prev]);
+    fetch('/api/leaves', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newLeave),
+    }).catch(() => {});
+    syncTeacherLeaveToFirestore(newLeave, true).catch(() => {});
+  };
+
+  const handleUpdateLeave = (updatedLeave: TeacherLeaveApplication) => {
+    setLeaveApplications((prev) => prev.map((l) => (l.id === updatedLeave.id ? updatedLeave : l)));
+    fetch(`/api/leaves/${encodeURIComponent(updatedLeave.id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedLeave),
+    }).catch(() => {});
+    syncTeacherLeaveToFirestore(updatedLeave, false).catch(() => {});
+  };
+
+  const handleDeleteLeave = (leaveId: string, deletionReason: string) => {
+    const nowIso = new Date().toISOString();
+    const target = leaveApplications.find((l) => l.id === leaveId);
+    if (!target || target.status === 'Approved' || target.status === 'Rejected') return;
+    const archived: TeacherLeaveApplication = {
+      ...target,
+      deletedStatus: 'Deleted',
+      deletedAt: nowIso,
+      deletedBy: currentUser.name,
+      deletionReason,
+      updatedAt: nowIso,
+      auditHistory: [
+        {
+          id: `LAUD-${Date.now()}`,
+          applicationId: leaveId,
+          action: 'DELETE',
+          actorName: currentUser.name,
+          actorRole: currentUser.role,
+          timestamp: nowIso,
+          summary: `Deleted pending application (${deletionReason || 'Withdrawn by applicant'}). Preserved in audit trail.`,
+        },
+        ...(target.auditHistory || []),
+      ],
+    };
+    setLeaveApplications((prev) => prev.map((l) => (l.id === leaveId ? archived : l)));
+    fetch(`/api/leaves/${encodeURIComponent(leaveId)}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deletedBy: currentUser.name, reason: deletionReason }),
+    }).catch(() => {});
+    syncTeacherLeaveToFirestore(archived, false).catch(() => {});
+  };
+
+  const handleMarkLeaveUnderReview = (leaveId: string, remarks: string) => {
+    const nowIso = new Date().toISOString();
+    const today = nowIso.slice(0, 10);
+    const target = leaveApplications.find((l) => l.id === leaveId);
+    if (!target) return;
+    const updated: TeacherLeaveApplication = {
+      ...target,
+      status: 'Under_Review',
+      reviewedBy: currentUser.name,
+      reviewDate: today,
+      headmasterRemarks: remarks,
+      remarks,
+      updatedAt: nowIso,
+      auditHistory: [
+        {
+          id: `LAUD-${Date.now()}`,
+          applicationId: leaveId,
+          action: 'REVIEW',
+          actorName: currentUser.name,
+          actorRole: currentUser.role,
+          timestamp: nowIso,
+          summary: `Marked Under Review by ${currentUser.name}: ${remarks}`,
+        },
+        ...(target.auditHistory || []),
+      ],
+    };
+    setLeaveApplications((prev) => prev.map((l) => (l.id === leaveId ? updated : l)));
+    fetch(`/api/leaves/${encodeURIComponent(leaveId)}/decision`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'Under_Review', actorName: currentUser.name, headmasterRemarks: remarks }),
+    }).catch(() => {});
+    syncTeacherLeaveToFirestore(updated, false).catch(() => {});
   };
 
   const handleApproveLeave = (leaveId: string, remarks: string) => {
     const targetLeave = leaveApplications.find((l) => l.id === leaveId);
     if (!targetLeave) return;
 
-    // Deduct leave balance
-    setTeachers((prev) =>
-      prev.map((tc) => {
-        if (tc.employeeId === targetLeave.employeeId) {
-          if (targetLeave.leaveType === 'Casual_Leave') {
-            return { ...tc, casualLeaveBalance: Math.max(0, tc.casualLeaveBalance - targetLeave.totalDays) };
-          }
-          if (targetLeave.leaveType === 'Medical_Leave') {
-            return { ...tc, medicalLeaveBalance: Math.max(0, tc.medicalLeaveBalance - targetLeave.totalDays) };
-          }
-          if (targetLeave.leaveType === 'Earned_Leave') {
-            return { ...tc, earnedLeaveBalance: Math.max(0, tc.earnedLeaveBalance - targetLeave.totalDays) };
-          }
-        }
-        return tc;
-      })
-    );
-
-    setLeaveApplications((prev) =>
-      prev.map((l) =>
-        l.id === leaveId
-          ? {
-              ...l,
-              status: 'Approved',
-              approvedBy: currentUser.name,
-              approvalDate: new Date().toISOString().slice(0, 10),
-              remarks,
+    // Deduct leave balance only when transitioning from non-approved state
+    if (targetLeave.status !== 'Approved') {
+      setTeachers((prev) =>
+        prev.map((tc) => {
+          if (tc.employeeId === targetLeave.employeeId || tc.id === targetLeave.teacherId) {
+            if (targetLeave.leaveType === 'Casual_Leave') {
+              return { ...tc, casualLeaveBalance: Math.max(0, tc.casualLeaveBalance - targetLeave.totalDays) };
             }
-          : l
-      )
-    );
-    dispatchLeaveDecisionNotification(targetLeave, 'Approved', remarks);
+            if (targetLeave.leaveType === 'Medical_Leave') {
+              return { ...tc, medicalLeaveBalance: Math.max(0, tc.medicalLeaveBalance - targetLeave.totalDays) };
+            }
+            if (targetLeave.leaveType === 'Earned_Leave') {
+              return { ...tc, earnedLeaveBalance: Math.max(0, tc.earnedLeaveBalance - targetLeave.totalDays) };
+            }
+          }
+          return tc;
+        })
+      );
+    }
+
+    const nowIso = new Date().toISOString();
+    const today = nowIso.slice(0, 10);
+    const updated: TeacherLeaveApplication = {
+      ...targetLeave,
+      status: 'Approved',
+      approvedBy: currentUser.name,
+      approvalDate: today,
+      decisionDate: today,
+      headmasterRemarks: remarks,
+      remarks,
+      updatedAt: nowIso,
+      auditHistory: [
+        {
+          id: `LAUD-${Date.now()}`,
+          applicationId: leaveId,
+          action: 'APPROVE',
+          actorName: currentUser.name,
+          actorRole: currentUser.role,
+          timestamp: nowIso,
+          summary: `Approved by ${currentUser.name} on ${today}. Remarks: ${remarks}`,
+        },
+        ...(targetLeave.auditHistory || []),
+      ],
+    };
+
+    setLeaveApplications((prev) => prev.map((l) => (l.id === leaveId ? updated : l)));
+    fetch(`/api/leaves/${encodeURIComponent(leaveId)}/decision`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'Approved', actorName: currentUser.name, headmasterRemarks: remarks }),
+    }).catch(() => {});
+    syncTeacherLeaveToFirestore(updated, false).catch(() => {});
+    dispatchLeaveDecisionNotification(updated, 'Approved', remarks);
   };
 
-  const handleRejectLeave = (leaveId: string, remarks: string) => {
+  const handleRejectLeave = (leaveId: string, rejectionReason: string, remarks?: string) => {
     const targetLeave = leaveApplications.find((l) => l.id === leaveId);
-    setLeaveApplications((prev) =>
-      prev.map((l) =>
-        l.id === leaveId
-          ? {
-              ...l,
-              status: 'Rejected',
-              approvedBy: currentUser.name,
-              approvalDate: new Date().toISOString().slice(0, 10),
-              remarks,
-            }
-          : l
-      )
-    );
-    if (targetLeave) {
-      dispatchLeaveDecisionNotification(targetLeave, 'Rejected', remarks);
-    }
+    if (!targetLeave) return;
+    const nowIso = new Date().toISOString();
+    const today = nowIso.slice(0, 10);
+    const combinedRemarks = remarks ? `${rejectionReason} — ${remarks}` : rejectionReason;
+    const updated: TeacherLeaveApplication = {
+      ...targetLeave,
+      status: 'Rejected',
+      approvedBy: currentUser.name,
+      approvalDate: today,
+      decisionDate: today,
+      rejectionReason,
+      headmasterRemarks: remarks || rejectionReason,
+      remarks: combinedRemarks,
+      updatedAt: nowIso,
+      auditHistory: [
+        {
+          id: `LAUD-${Date.now()}`,
+          applicationId: leaveId,
+          action: 'REJECT',
+          actorName: currentUser.name,
+          actorRole: currentUser.role,
+          timestamp: nowIso,
+          summary: `Rejected by ${currentUser.name} on ${today}. Reason: ${rejectionReason}`,
+        },
+        ...(targetLeave.auditHistory || []),
+      ],
+    };
+    setLeaveApplications((prev) => prev.map((l) => (l.id === leaveId ? updated : l)));
+    fetch(`/api/leaves/${encodeURIComponent(leaveId)}/decision`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        status: 'Rejected',
+        actorName: currentUser.name,
+        rejectionReason,
+        headmasterRemarks: remarks || '',
+      }),
+    }).catch(() => {});
+    syncTeacherLeaveToFirestore(updated, false).catch(() => {});
+    dispatchLeaveDecisionNotification(updated, 'Rejected', combinedRemarks);
   };
 
   // Handlers for Marks
@@ -1346,7 +1560,9 @@ function SchoolMasterApp() {
     if (data.qrPrivacySettings) setQrPrivacySettings(data.qrPrivacySettings);
   };
 
-  const pendingLeavesCount = leaveApplications.filter((l) => l.status === 'Pending').length;
+  const pendingLeavesCount = leaveApplications.filter(
+    (l) => l.deletedStatus !== 'Deleted' && (l.status === 'Pending' || l.status === 'Under_Review')
+  ).length;
 
   // Active view renderer
   const renderTabContent = () => {
@@ -1447,6 +1663,7 @@ function SchoolMasterApp() {
         return (
           <StudentManagement
             students={students}
+            attendanceRecords={attendanceRecords}
             school={school}
             currentUser={currentUser}
             onAddStudent={handleAddStudent}
@@ -1455,6 +1672,8 @@ function SchoolMasterApp() {
             onBulkDeleteStudents={handleBulkDeleteStudents}
             onBulkPromoteStudents={handleBulkPromoteStudents}
             language={language}
+            initialSelectedStudentId={focusedStudentId}
+            onClearInitialSelectedStudent={() => setFocusedStudentId(null)}
           />
         );
       case 'excel-import':
@@ -1662,6 +1881,17 @@ function SchoolMasterApp() {
             onNavigateToLocationSettings={() => setCurrentTab('settings')}
           />
         );
+      case 'jkepm-appraisal':
+        return (
+          <JkepmAppraisalPortal
+            school={school}
+            teachers={teachers}
+            currentUser={currentUser}
+            effectiveRole={effectiveRole}
+            language={language}
+            onUpdateTeacher={handleUpdateTeacher}
+          />
+        );
       case 'teacher-leave':
         return (
           <TeacherLeave
@@ -1670,6 +1900,9 @@ function SchoolMasterApp() {
             school={school}
             currentUser={currentUser}
             onApplyLeave={handleApplyLeave}
+            onUpdateLeave={handleUpdateLeave}
+            onDeleteLeave={handleDeleteLeave}
+            onMarkUnderReview={handleMarkLeaveUnderReview}
             onApproveLeave={handleApproveLeave}
             onRejectLeave={handleRejectLeave}
             language={language}
@@ -1818,6 +2051,11 @@ function SchoolMasterApp() {
         onRunNotificationChecks={() => {
           monitorAttendanceAndNotifyPrincipal(attendanceRecords, students, 75, { force: true });
           evaluateUpcomingExamNotifications(examinations);
+        }}
+        students={students}
+        onNavigateToStudent={(student) => {
+          setFocusedStudentId(student.id);
+          setCurrentTab('students');
         }}
       />
 
@@ -2092,10 +2330,20 @@ function SchoolMasterApp() {
       {isSessionLocked && (
         <div className="fixed inset-0 z-[100] bg-gradient-to-br from-[#0f294a] via-[#172554] to-[#0f172a] text-white flex items-center justify-center p-6">
           <div className="max-w-md w-full bg-white text-slate-900 rounded-3xl p-8 shadow-2xl border-2 border-amber-400 text-center space-y-5">
-            <SchoolEmblem size={88} showMotto />
+            {school.logoDataUrl ? (
+              <div className="w-24 h-24 mx-auto rounded-2xl bg-slate-50 border border-slate-200 p-2 flex items-center justify-center shadow-sm">
+                <img
+                  src={school.logoDataUrl}
+                  alt={school.name}
+                  className="w-full h-full object-contain"
+                />
+              </div>
+            ) : (
+              <SchoolEmblem size={88} showMotto />
+            )}
             <div>
               <p className="text-[11px] font-extrabold uppercase tracking-wider text-amber-700">
-                Government Middle School Pamposh Colony
+                {school.name}
               </p>
               <h2 className="text-xl font-black text-[#0f294a] mt-1">Administrator Session Locked</h2>
               <p className="text-xs text-slate-600 mt-1">

@@ -32,7 +32,17 @@ import {
   MessagePayload,
 } from 'firebase/messaging';
 import firebaseConfig from '../firebase-applet-config.json';
-import { ExcelMappingSchema, OcrImportBatchHistory, PrincipalRecord, SchoolProfile, Student } from './types';
+import {
+  CpisCodeMigrationRecord,
+  ExcelMappingSchema,
+  JkepmQuarterlyAppraisalReport,
+  OcrImportBatchHistory,
+  PrincipalRecord,
+  SchoolProfile,
+  Student,
+  TeacherAttendanceRecord,
+  TeacherLeaveApplication,
+} from './types';
 import { MissingLigatureReport } from './utils/urduTypography';
 
 const app = initializeApp(firebaseConfig);
@@ -545,4 +555,186 @@ export function subscribeFirestoreNotifications(
     }
   );
 }
+
+export async function syncJkepmSubmissionToFirestore(
+  report: JkepmQuarterlyAppraisalReport,
+  isNew: boolean
+): Promise<void> {
+  if (!auth.currentUser || !auth.currentUser.emailVerified) return;
+  const safeId = sanitizeDocId(report.id, 'jkepm');
+  const path = `jkepmSubmissions/${safeId}`;
+  try {
+    const basePayload: Record<string, any> = {
+      id: safeId,
+      teacherId: (report.teacherId || 'tch').slice(0, 80),
+      teacherName: (report.teacherName || 'Teacher').slice(0, 140),
+      employeeId: (report.employeeId || 'EMP').slice(0, 64),
+      cpisCode: (report.cpisCode || 'KHYEDU 00220000').slice(0, 40),
+      designation: (report.designation || '').slice(0, 140),
+      schoolName: (report.schoolName || '').slice(0, 180),
+      schoolUdiseCode: (report.schoolUdiseCode || '09240104502').slice(0, 32),
+      academicSession: (report.academicSession || '2026-2027').slice(0, 32),
+      quarter: report.quarter,
+      reportingPeriod: (report.reportingPeriod || '').slice(0, 80),
+      status: report.status,
+      totalWorkingDays: Math.max(0, Math.min(366, Math.round(report.attendanceAndLeave.totalWorkingDays || 0))),
+      totalDaysAttended: Math.max(0, Math.min(366, Math.round(report.attendanceAndLeave.totalDaysAttended || 0))),
+      totalLeaveDays: Math.max(0, Math.min(366, Math.round(report.attendanceAndLeave.totalLeaveDays || 0))),
+      attendancePercentage: Math.max(0, Math.min(100, Number(report.attendanceAndLeave.attendancePercentage || 0))),
+      selfAssessmentScore: Math.max(0, Math.min(10, Number(report.selfAssessmentScore || 0))),
+      updatedAt: serverTimestamp(),
+    };
+    if (report.previousCpisCode) basePayload.previousCpisCode = report.previousCpisCode.slice(0, 40);
+    if (report.hoiRemarks) basePayload.hoiRemarks = report.hoiRemarks.slice(0, 1000);
+    if (report.districtRemarks) basePayload.districtRemarks = report.districtRemarks.slice(0, 1000);
+
+    if (isNew) {
+      basePayload.createdByUid = auth.currentUser.uid;
+      basePayload.createdAt = serverTimestamp();
+      await setDoc(doc(db, 'jkepmSubmissions', safeId), basePayload);
+    } else {
+      await setDoc(doc(db, 'jkepmSubmissions', safeId), basePayload, { merge: true });
+    }
+  } catch (error) {
+    handleFirestoreError(error, isNew ? OperationType.CREATE : OperationType.UPDATE, path);
+  }
+}
+
+export async function deleteJkepmSubmissionFromFirestore(submissionId: string): Promise<void> {
+  if (!auth.currentUser || !auth.currentUser.emailVerified) return;
+  const safeId = sanitizeDocId(submissionId, 'jkepm');
+  const path = `jkepmSubmissions/${safeId}`;
+  try {
+    await deleteDoc(doc(db, 'jkepmSubmissions', safeId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+export async function syncCpisMigrationToFirestore(
+  migration: CpisCodeMigrationRecord,
+  isNew: boolean
+): Promise<void> {
+  if (!auth.currentUser || !auth.currentUser.emailVerified) return;
+  const safeId = sanitizeDocId(migration.id, 'cpis');
+  const path = `cpisMigrations/${safeId}`;
+  try {
+    const payload: Record<string, any> = {
+      id: safeId,
+      teacherId: (migration.teacherId || 'tch').slice(0, 80),
+      teacherName: (migration.teacherName || 'Teacher').slice(0, 140),
+      schoolUdiseCode: (migration.schoolUdiseCode || '09240104502').slice(0, 32),
+      oldCpisCode: (migration.oldCpisCode || 'JK-EDU-1985-0451').slice(0, 40),
+      newCpisCode: (migration.newCpisCode || 'KHYEDU 00220000').slice(0, 40),
+      status: migration.status,
+      requestedByName: (migration.requestedByName || auth.currentUser.displayName || 'Admin').slice(0, 140),
+      remarks: (migration.remarks || '').slice(0, 600),
+      updatedAt: serverTimestamp(),
+    };
+    if (migration.verifiedByName) {
+      payload.verifiedByName = migration.verifiedByName.slice(0, 140);
+    }
+    if (isNew) {
+      payload.requestedByUid = auth.currentUser.uid;
+      payload.createdAt = serverTimestamp();
+      await setDoc(doc(db, 'cpisMigrations', safeId), payload);
+    } else {
+      await setDoc(doc(db, 'cpisMigrations', safeId), payload, { merge: true });
+    }
+  } catch (error) {
+    handleFirestoreError(error, isNew ? OperationType.CREATE : OperationType.UPDATE, path);
+  }
+}
+
+export async function syncTeacherLeaveToFirestore(
+  leave: TeacherLeaveApplication,
+  isNew: boolean
+): Promise<void> {
+  if (!auth.currentUser || !auth.currentUser.emailVerified) return;
+  const safeId = sanitizeDocId(leave.id, 'leave');
+  const path = `teacherLeaves/${safeId}`;
+  try {
+    const rawDocUrl = leave.medicalDocumentUrl || '';
+    const safeDocUrl =
+      rawDocUrl.startsWith('data:')
+        ? `local-attachment://${(leave.supportingDocName || 'medical-document').slice(0, 120)}`
+        : rawDocUrl.slice(0, 500);
+
+    const payload: Record<string, any> = {
+      id: safeId,
+      teacherId: (leave.teacherId || leave.employeeId || 'tch').slice(0, 80),
+      employeeId: (leave.employeeId || 'EMP').slice(0, 64),
+      teacherName: (leave.teacherName || 'Teacher').slice(0, 140),
+      leaveType: leave.leaveType,
+      applicationDate: (leave.applicationDate || new Date().toISOString().slice(0, 10)).slice(0, 32),
+      startDate: (leave.startDate || new Date().toISOString().slice(0, 10)).slice(0, 32),
+      endDate: (leave.endDate || new Date().toISOString().slice(0, 10)).slice(0, 32),
+      totalDays: Math.max(1, Math.min(366, Math.round(leave.totalDays || 1))),
+      reason: (leave.reason || 'Leave requested').slice(0, 1000),
+      status: leave.status,
+      deletedStatus: leave.deletedStatus || 'Active',
+      updatedAt: serverTimestamp(),
+    };
+    if (leave.supportingDocName) payload.supportingDocName = leave.supportingDocName.slice(0, 200);
+    if (safeDocUrl) payload.medicalDocumentUrl = safeDocUrl;
+    if (leave.headmasterRemarks || leave.remarks) {
+      payload.headmasterRemarks = (leave.headmasterRemarks || leave.remarks || '').slice(0, 1000);
+    }
+    if (leave.rejectionReason) payload.rejectionReason = leave.rejectionReason.slice(0, 1000);
+    if (leave.approvedBy) payload.approvedBy = leave.approvedBy.slice(0, 140);
+    if (leave.approvalDate || leave.decisionDate) {
+      payload.approvalDate = (leave.approvalDate || leave.decisionDate || '').slice(0, 32);
+    }
+    if (leave.deletedBy) payload.deletedBy = leave.deletedBy.slice(0, 140);
+    if (leave.deletionReason) payload.deletionReason = leave.deletionReason.slice(0, 500);
+
+    if (isNew) {
+      payload.createdByUid = auth.currentUser.uid;
+      payload.createdAt = serverTimestamp();
+      await setDoc(doc(db, 'teacherLeaves', safeId), payload);
+    } else {
+      await setDoc(doc(db, 'teacherLeaves', safeId), payload, { merge: true });
+    }
+  } catch (error) {
+    handleFirestoreError(error, isNew ? OperationType.CREATE : OperationType.UPDATE, path);
+  }
+}
+
+export async function syncTeacherAttendanceToFirestore(
+  record: TeacherAttendanceRecord,
+  isNew: boolean
+): Promise<void> {
+  if (!auth.currentUser || !auth.currentUser.emailVerified) return;
+  const safeId = sanitizeDocId(record.id || `att-${record.teacherId}-${record.date}`, 'att');
+  const path = `teacherAttendance/${safeId}`;
+  try {
+    const payload: Record<string, any> = {
+      id: safeId,
+      date: (record.date || new Date().toISOString().slice(0, 10)).slice(0, 32),
+      teacherId: (record.teacherId || 'tch').slice(0, 80),
+      employeeId: (record.employeeId || 'EMP').slice(0, 64),
+      teacherName: (record.teacherName || 'Teacher').slice(0, 140),
+      status: record.status || 'Present',
+      updatedAt: serverTimestamp(),
+    };
+    if (record.designation) payload.designation = record.designation.slice(0, 140);
+    if (record.checkInTime) payload.checkInTime = record.checkInTime.slice(0, 32);
+    if (record.checkOutTime) payload.checkOutTime = record.checkOutTime.slice(0, 32);
+    if (record.remarks !== undefined) payload.remarks = String(record.remarks).slice(0, 1000);
+    if (record.remarksByHoi !== undefined) payload.remarksByHoi = String(record.remarksByHoi).slice(0, 1000);
+    if (record.updatedBy) payload.updatedBy = record.updatedBy.slice(0, 140);
+
+    if (isNew) {
+      payload.createdByUid = auth.currentUser.uid;
+      payload.createdAt = serverTimestamp();
+      await setDoc(doc(db, 'teacherAttendance', safeId), payload);
+    } else {
+      await setDoc(doc(db, 'teacherAttendance', safeId), payload, { merge: true });
+    }
+  } catch (error) {
+    handleFirestoreError(error, isNew ? OperationType.CREATE : OperationType.UPDATE, path);
+  }
+}
+
+
 

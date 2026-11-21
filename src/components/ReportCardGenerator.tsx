@@ -66,6 +66,7 @@ import {
 } from '../utils/calculations';
 import { exportExaminationMarksToExcel } from '../utils/excelExport';
 import { WhatsAppShareModal } from './WhatsAppShareModal';
+import { SchoolEmblem } from './SchoolEmblem';
 import {
   HOLISTIC_ASSESSMENT_CATEGORIES,
   sampleHolisticRecords,
@@ -584,7 +585,7 @@ export const ReportCardGenerator: React.FC<ReportCardGeneratorProps> = ({
         .sort((a, b) => {
           const clsDiff = parseInt(a.classNumber, 10) - parseInt(b.classNumber, 10);
           if (clsDiff !== 0) return clsDiff;
-          return (parseInt(a.rollNumber, 10) || 0) - (parseInt(b.rollNumber, 10) || 0);
+          return (Number(a.rollNumber) || 0) - (Number(b.rollNumber) || 0);
         }),
     [students]
   );
@@ -2062,32 +2063,40 @@ const SingleStudentProgressCardView: React.FC<SingleStudentProgressCardViewProps
     <div className="printable-card page-break-always bg-white border border-slate-300 rounded-2xl p-6 md:p-8 space-y-4 text-slate-900 shadow-sm print:shadow-none print:border-none print:p-0">
       
       {/* Section A: Header & Identity */}
-      <div className="text-center border-b-2 border-slate-900 pb-3">
-        <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono mb-1">
+      <div className="text-center border-b-2 border-slate-900 pb-4">
+        <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono mb-3">
           <span>GOVT. OF JAMMU & KASHMIR • SCHOOL EDUCATION DEPT.</span>
           {pageIndex !== undefined && totalPages !== undefined && (
             <span className="font-bold text-slate-700">PAGE {pageIndex + 1} OF {totalPages}</span>
           )}
         </div>
-        <div className="w-12 h-12 mx-auto mb-1 rounded-2xl bg-indigo-950 text-white flex items-center justify-center font-black text-xl shadow-xs overflow-hidden border border-slate-200">
-          {school.logoDataUrl ? (
-            <img src={school.logoDataUrl} alt={`${school.name} Logo`} className="w-full h-full object-contain bg-white p-0.5" />
-          ) : (
-            <School className="w-5 h-5 text-amber-400" />
-          )}
+        <div className="flex flex-col sm:flex-row items-center justify-center gap-4 px-2">
+          <div className="w-20 h-20 sm:w-24 sm:h-24 shrink-0 rounded-2xl bg-white border-2 border-slate-200 shadow-xs p-2 flex items-center justify-center overflow-hidden">
+            {school.logoDataUrl ? (
+              <img
+                src={school.logoDataUrl}
+                alt={`${school.name} Official Logo`}
+                className="max-w-full max-h-full w-auto h-auto object-contain"
+              />
+            ) : (
+              <SchoolEmblem size={72} />
+            )}
+          </div>
+          <div className="text-center sm:text-left space-y-1 min-w-0">
+            <h2 className="text-base sm:text-xl font-black text-slate-900 uppercase tracking-tight leading-snug">
+              {school.name}
+            </h2>
+            <h3 className="text-base sm:text-lg font-bold text-slate-800 font-noori font-urdu leading-relaxed" dir="rtl">
+              {school.nameUrdu || 'گورنمنٹ مڈل اسکول پامپوش کالونی'}
+            </h3>
+            <p className="text-xs font-semibold text-slate-700">
+              {formatSchoolAddressOnce(school)}
+            </p>
+            <p className="text-[11px] text-indigo-900 font-extrabold">
+              U-DISE+: {school.code} • Academic Session: {school.academicSession}
+            </p>
+          </div>
         </div>
-        <h2 className="text-base sm:text-lg font-black text-slate-900 uppercase tracking-tight">
-          {school.name}
-        </h2>
-        <h3 className="text-base sm:text-lg font-bold text-slate-800 font-noori font-urdu" dir="rtl">
-          {school.nameUrdu || 'گورنمنٹ مڈل اسکول پامپوش کالونی'}
-        </h3>
-        <p className="text-[11px] text-slate-600">
-          {formatSchoolAddressOnce(school)}
-        </p>
-        <p className="text-[11px] text-indigo-900 font-extrabold mt-0.5">
-          U-DISE+: {school.code} • Academic Session: {school.academicSession}
-        </p>
         <div className="mt-1.5 inline-flex flex-wrap items-center justify-center gap-2 px-3 py-1 rounded bg-slate-100 border border-slate-400 font-black text-[10px] text-slate-900 uppercase tracking-wider">
           <span>HOLISTIC STUDENT PROGRESS CARD (HPC)</span>
           <span>—</span>
@@ -2325,10 +2334,16 @@ const SingleStudentProgressCardView: React.FC<SingleStudentProgressCardViewProps
           </div>
         </div>
 
-        <div className="p-2 bg-slate-50 rounded-lg border border-slate-200">
-          <strong className="text-slate-800 block text-[10px] uppercase font-bold">Teacher&apos;s General Remarks &amp; Overall Development:</strong>
-          <p className="text-slate-600 text-[11px] mt-0.5">
-            {hol.teacherRemarks}{hol.overallStudentDevelopment ? ` — ${hol.overallStudentDevelopment}` : ''}
+        <div className="p-2 bg-slate-50 rounded-lg border border-slate-200 overflow-hidden">
+          <p className="text-slate-600 text-[clamp(7px,1.35vw,11px)] print:text-[9.5px] leading-tight whitespace-nowrap tracking-tight">
+            <strong className="text-slate-800 font-bold">Teacher Remarks:</strong>{' '}
+            {(
+              hol.teacherRemarks ||
+              'Diligent learner demonstrating steady holistic growth across academic and Co-Scholastic activities.'
+            )
+              .replace(/^teacher remarks:\s*/i, '')
+              .replace(/\s+/g, ' ')
+              .trim()}
           </p>
         </div>
 
@@ -3099,30 +3114,38 @@ const HolisticProgressCardModal: React.FC<HolisticProgressCardModalProps> = ({
           <div className="printable-card page-break-always bg-white border border-slate-300 rounded-2xl p-6 md:p-8 space-y-4 text-slate-900 shadow-sm print:shadow-none print:border-none print:p-0">
             
             {/* Section A: Header & School Identity */}
-            <div className="text-center border-b-2 border-slate-900 pb-3">
-              <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono mb-1">
+            <div className="text-center border-b-2 border-slate-900 pb-4">
+              <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono mb-3">
                 <span>GOVT. OF JAMMU & KASHMIR • SCHOOL EDUCATION DEPT.</span>
                 <span className="font-bold text-slate-700">OFFICIAL STUDENT PROGRESS CARD</span>
               </div>
-              <div className="w-12 h-12 mx-auto mb-1 rounded-2xl bg-indigo-950 text-white flex items-center justify-center font-black text-xl shadow-xs overflow-hidden border border-slate-200">
-                {school.logoDataUrl ? (
-                  <img src={school.logoDataUrl} alt={`${school.name} Logo`} className="w-full h-full object-contain bg-white p-0.5" />
-                ) : (
-                  <School className="w-5 h-5 text-amber-400" />
-                )}
+              <div className="flex flex-col sm:flex-row items-center justify-center gap-4 px-2">
+                <div className="w-20 h-20 sm:w-24 sm:h-24 shrink-0 rounded-2xl bg-white border-2 border-slate-200 shadow-xs p-2 flex items-center justify-center overflow-hidden">
+                  {school.logoDataUrl ? (
+                    <img
+                      src={school.logoDataUrl}
+                      alt={`${school.name} Official Logo`}
+                      className="max-w-full max-h-full w-auto h-auto object-contain"
+                    />
+                  ) : (
+                    <SchoolEmblem size={72} />
+                  )}
+                </div>
+                <div className="text-center sm:text-left space-y-1 min-w-0">
+                  <h2 className="text-base sm:text-xl font-black text-slate-900 uppercase tracking-tight leading-snug">
+                    {school.name}
+                  </h2>
+                  <h3 className="text-base sm:text-lg font-bold text-slate-800 font-noori font-urdu leading-relaxed" dir="rtl">
+                    {school.nameUrdu || 'گورنمنٹ مڈل اسکول پامپوش کالونی'}
+                  </h3>
+                  <p className="text-xs font-semibold text-slate-700">
+                    {formatSchoolAddressOnce(school)}
+                  </p>
+                  <p className="text-[11px] text-indigo-900 font-extrabold">
+                    U-DISE+: {school.code} • Academic Session: {isEditingFullCard ? draftPersonal.academicSession : (student?.academicSession || school.academicSession)}
+                  </p>
+                </div>
               </div>
-              <h2 className="text-base sm:text-lg font-black text-slate-900 uppercase tracking-tight">
-                {school.name}
-              </h2>
-              <h3 className="text-base sm:text-lg font-bold text-slate-800 font-noori font-urdu" dir="rtl">
-                {school.nameUrdu || 'گورنمنٹ مڈل اسکول پامپوش کالونی'}
-              </h3>
-              <p className="text-[11px] text-slate-600">
-                {formatSchoolAddressOnce(school)}
-              </p>
-              <p className="text-[11px] text-indigo-900 font-extrabold mt-0.5">
-                U-DISE+: {school.code} • Academic Session: {isEditingFullCard ? draftPersonal.academicSession : (student?.academicSession || school.academicSession)}
-              </p>
               <div className="mt-1.5 inline-flex flex-wrap items-center justify-center gap-2 px-3 py-1 rounded bg-slate-100 border border-slate-400 font-black text-[10px] text-slate-900 uppercase tracking-wider">
                 <span>HOLISTIC STUDENT PROGRESS CARD (HPC)</span>
                 <span>—</span>
@@ -3700,10 +3723,18 @@ const HolisticProgressCardModal: React.FC<HolisticProgressCardModalProps> = ({
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <div className="p-2 bg-slate-50 rounded-lg border border-slate-200">
-                    <strong className="text-slate-800 block text-[10px] uppercase font-bold">Teacher Remarks:</strong>
-                    <p className="text-slate-600 text-[11px] mt-0.5">{baseHolistic.teacherRemarks}</p>
+                <div className="grid grid-cols-1 gap-2">
+                  <div className="p-2 bg-slate-50 rounded-lg border border-slate-200 overflow-hidden">
+                    <p className="text-slate-600 text-[clamp(7px,1.35vw,11px)] print:text-[9.5px] leading-tight whitespace-nowrap tracking-tight">
+                      <strong className="text-slate-800 font-bold">Teacher Remarks:</strong>{' '}
+                      {(
+                        baseHolistic.teacherRemarks ||
+                        'Diligent learner demonstrating steady holistic growth across academic and Co-Scholastic activities.'
+                      )
+                        .replace(/^teacher remarks:\s*/i, '')
+                        .replace(/\s+/g, ' ')
+                        .trim()}
+                    </p>
                   </div>
                   <div className="p-2 bg-slate-50 rounded-lg border border-slate-200">
                     <strong className="text-slate-800 block text-[10px] uppercase font-bold">Parent Remarks &amp; Suggestions:</strong>

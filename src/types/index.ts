@@ -365,7 +365,8 @@ export interface JkEpmQuarterlyRecord {
 
 export interface TeacherProfile {
   id: string;
-  employeeId: string; // CPIS / JKHRMS Code e.g. "TCH-101"
+  employeeId: string; // CPIS / JKHRMS Code e.g. "KHYEDU 00220000"
+  previousCpisCode?: string; // Legacy CPIS Code preserved in audit history e.g. "JK-EDU-1985-0451"
   name: string;
   fatherName?: string;
   motherName?: string;
@@ -414,27 +415,64 @@ export interface TeacherProfile {
   username?: string;
   passwordHash?: string;
   accountStatus?: 'Active' | 'Inactive';
+  latestHoiRemarks?: string;
+  latestHoiRemarksUpdatedAt?: string;
   updatedAt?: string;
 }
 
 export type LeaveType = 'Casual_Leave' | 'Medical_Leave' | 'Earned_Leave' | 'Special_Duty' | 'Maternity_Paternity';
-export type LeaveStatus = 'Pending' | 'Approved' | 'Rejected';
+export type LeaveStatus = 'Pending' | 'Under_Review' | 'Approved' | 'Rejected';
+
+export interface TeacherLeaveDocument {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  dataUrl: string;
+  uploadedAt: string;
+  uploadedBy: string;
+}
+
+export interface TeacherLeaveAuditEntry {
+  id: string;
+  applicationId: string;
+  action: 'CREATE' | 'EDIT' | 'UPLOAD_DOC' | 'REVIEW' | 'APPROVE' | 'REJECT' | 'DELETE';
+  actorName: string;
+  actorRole: string;
+  timestamp: string;
+  summary: string;
+}
 
 export interface TeacherLeaveApplication {
-  id: string;
-  employeeId: string;
+  id: string; // Application ID
+  teacherId?: string; // Teacher ID
+  employeeId: string; // CPIS / Employee ID
   teacherName: string;
   leaveType: LeaveType;
   applicationDate: string;
-  startDate: string;
-  endDate: string;
+  startDate: string; // From Date
+  endDate: string; // To Date
   totalDays: number;
   reason: string;
   supportingDocName?: string;
+  medicalDocumentUrl?: string; // Primary Medical Document URL / data URL
+  medicalDocuments?: TeacherLeaveDocument[]; // Uploaded PDF, JPG, PNG medical documents
   status: LeaveStatus;
-  approvedBy?: string;
-  approvalDate?: string;
-  remarks?: string;
+  approvedBy?: string; // Approved / Rejected By
+  reviewedBy?: string;
+  reviewDate?: string;
+  approvalDate?: string; // Approval / Rejection Date
+  decisionDate?: string;
+  remarks?: string; // Headmaster Remarks (backwards-compatible alias)
+  headmasterRemarks?: string;
+  rejectionReason?: string; // Mandatory on Reject
+  createdAt?: string;
+  updatedAt?: string;
+  deletedStatus?: 'Active' | 'Deleted';
+  deletedAt?: string;
+  deletedBy?: string;
+  deletionReason?: string;
+  auditHistory?: TeacherLeaveAuditEntry[];
 }
 
 // Teacher Attendance & Location Verification
@@ -450,6 +488,12 @@ export interface TeacherCheckInLocation {
 export type TeacherAttendanceStatus =
   | 'Present'
   | 'Absent'
+  | 'Casual Leave (CL)'
+  | 'Medical Leave (ML)'
+  | 'On Duty (OD)'
+  | 'Half Day'
+  | 'Late Arrival'
+  | 'Other'
   | 'Late'
   | 'On_Duty'
   | 'Leave'
@@ -457,6 +501,16 @@ export type TeacherAttendanceStatus =
   | 'Official Duty'
   | 'Holiday'
   | 'Weekly Off';
+
+export interface TeacherAttendanceChangeLogEntry {
+  id: string;
+  field: 'Arrival Time' | 'Departure Time' | 'Designation' | 'Attendance Status' | 'Remarks by HOI';
+  previousValue: string;
+  newValue: string;
+  changedBy: string;
+  changedByRole: string;
+  changedAt: string; // ISO timestamp
+}
 
 export interface TeacherAttendanceRecord {
   id: string;
@@ -466,10 +520,14 @@ export interface TeacherAttendanceRecord {
   teacherName: string;
   designation?: string;
   status: TeacherAttendanceStatus;
-  checkInTime?: string;
-  checkOutTime?: string;
+  checkInTime?: string; // Arrival Time (HH:MM AM/PM)
+  checkOutTime?: string; // Departure Time (HH:MM AM/PM)
   checkInLocation?: TeacherCheckInLocation;
   remarks?: string;
+  remarksByHoi?: string;
+  updatedAt?: string;
+  updatedBy?: string;
+  changeHistory?: TeacherAttendanceChangeLogEntry[];
 }
 
 export interface SubjectConfig {
@@ -826,3 +884,188 @@ export interface SchoolIdCardRecord {
   createdAt: string;
   updatedAt: string;
 }
+
+// =========================================================================
+// CPIS CODE CHANGE & JKEPM QUARTERLY SELF-ASSESSMENT & APPRAISAL PORTAL
+// =========================================================================
+
+export type JkepmQuarter = 'Q1 (Apr - Jun)' | 'Q2 (Jul - Sep)' | 'Q3 (Oct - Dec)' | 'Q4 (Jan - Mar)';
+
+export type JkepmAppraisalStatus =
+  | 'Draft'
+  | 'Submitted'
+  | 'Returned_For_Correction'
+  | 'Recommended_By_HOI'
+  | 'Approved'
+  | 'Rejected';
+
+export interface JkepmClassTeachingDetail {
+  id: string;
+  classNumber: string; // '1' to '12'
+  section: string;
+  subject: string;
+  periodsAllotted: number;
+  periodsConducted: number;
+  classTimetable: string;
+  teachingActivitiesCompleted: string;
+  syllabusCoveredPct: number;
+  syllabusDetails: string;
+  learningOutcomesAchieved: string;
+  studentAssessmentDetails: string;
+  remedialTeachingActivities: string;
+}
+
+export type JkepmAssignmentCategory =
+  | 'School Timetable & Teaching Schedule'
+  | 'Morning Assembly Duties'
+  | 'Examination Duties'
+  | 'Evaluation & Answer Script Checking'
+  | 'Mid-Day Meal (MDM) Duties'
+  | 'School Administrative Assignments'
+  | 'Co-Curricular Activities'
+  | 'Sports & Cultural Activities'
+  | 'Election / Official Government Duties'
+  | 'Additional Responsibility (HOI Assigned)';
+
+export interface JkepmSchoolAssignment {
+  id: string;
+  category: JkepmAssignmentCategory;
+  title: string;
+  scheduleOrPeriod: string;
+  description: string;
+  assignedBy: string;
+  completionStatus: 'Ongoing' | 'Completed' | 'Scheduled';
+}
+
+export type JkepmLeaveCategory = 'Casual_Leave' | 'Medical_Leave' | 'Earned_Leave' | 'Other_Leave';
+
+export interface JkepmSupportingDocument {
+  id: string;
+  name: string;
+  docType: 'Medical Certificate' | 'Leave Sanction Order' | 'Official Permission Letter' | 'Other';
+  mimeType: string;
+  sizeBytes: number;
+  uploadedAt: string;
+  dataUrl?: string;
+}
+
+export interface JkepmLeaveEntry {
+  id: string;
+  leaveType: JkepmLeaveCategory;
+  days: number;
+  fromDate: string; // YYYY-MM-DD
+  toDate: string; // YYYY-MM-DD
+  medicalSanctionOrderNo?: string;
+  medicalSanctionOrderDate?: string;
+  casualSanctionOrderNo?: string;
+  remarks: string;
+  supportingDocuments: JkepmSupportingDocument[];
+}
+
+export interface JkepmAttendanceLeaveSummary {
+  totalWorkingDays: number;
+  totalDaysAttended: number;
+  casualLeaves: number;
+  medicalLeaves: number;
+  earnedLeaves: number;
+  otherLeaves: number;
+  totalLeaveDays: number;
+  attendancePercentage: number;
+  leavePeriodFrom: string;
+  leavePeriodTo: string;
+  medicalSanctionOrderNumber: string;
+  medicalSanctionOrderDate: string;
+  casualSanctionOrderNumber: string;
+  remarks: string;
+  leaveRecords: JkepmLeaveEntry[];
+  supportingDocuments: JkepmSupportingDocument[];
+}
+
+export interface JkepmAuditLogEntry {
+  id: string;
+  timestamp: string;
+  userId: string;
+  userName: string;
+  userRole: string;
+  action:
+    | 'CPIS_CODE_MIGRATED'
+    | 'CPIS_CODE_APPROVED'
+    | 'CPIS_CODE_REJECTED'
+    | 'REPORT_CREATED'
+    | 'REPORT_DRAFT_SAVED'
+    | 'REPORT_EDITED'
+    | 'REPORT_SUBMITTED'
+    | 'REPORT_RETURNED'
+    | 'REPORT_RECOMMENDED'
+    | 'REPORT_APPROVED'
+    | 'REPORT_REJECTED'
+    | 'REPORT_DELETED'
+    | 'DOCUMENT_UPLOADED';
+  entityId: string;
+  summary: string;
+  previousValue?: string;
+  newValue?: string;
+}
+
+export interface CpisCodeMigrationRecord {
+  id: string;
+  teacherId: string;
+  teacherName: string;
+  designation: string;
+  schoolName: string;
+  schoolUdiseCode: string;
+  oldCpisCode: string;
+  newCpisCode: string;
+  status: 'Pending_Verification' | 'Approved' | 'Rejected';
+  requestedByUserId: string;
+  requestedByName: string;
+  requestedAt: string;
+  verifiedByUserId?: string;
+  verifiedByName?: string;
+  verifiedAt?: string;
+  remarks: string;
+}
+
+export interface JkepmQuarterlyAppraisalReport {
+  id: string;
+  // Teacher Particulars (10 fields)
+  teacherId: string;
+  teacherName: string;
+  employeeId: string;
+  designation: string;
+  schoolName: string;
+  schoolUdiseCode: string;
+  cpisCode: string; // Updated CPIS Code e.g. "KHYEDU 00220000"
+  previousCpisCode?: string; // Preserved audit reference e.g. "JK-EDU-1985-0451"
+  academicSession: string;
+  quarter: JkepmQuarter;
+  reportingPeriod: string;
+  dateOfJoining: string;
+
+  // Performance Parts
+  classTeachingDetails: JkepmClassTeachingDetail[];
+  schoolAssignments: JkepmSchoolAssignment[];
+  attendanceAndLeave: JkepmAttendanceLeaveSummary;
+
+  // Self-Assessment Score & Declaration
+  selfAssessmentScore: number; // out of 10
+  teacherDeclarationAccepted: boolean;
+  teacherDeclarationDate?: string;
+
+  // Workflow Status & HOI / District Review
+  status: JkepmAppraisalStatus;
+  submittedAt?: string;
+  hoiRemarks?: string;
+  hoiReviewerName?: string;
+  hoiReviewedAt?: string;
+  districtRemarks?: string;
+  districtOfficerName?: string;
+  districtApprovedAt?: string;
+
+  // Metadata
+  createdByUserId: string;
+  createdAt: string;
+  updatedAt: string;
+  isArchivedDeleted?: boolean;
+}
+

@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { AdminAuditChangeLog, AdminUser } from '../types';
 import { usePermissions } from '../hooks/usePermissions';
+import { AndroidAppDownloadCard } from './AndroidAppDownloadCard';
 
 interface AdminAuthModalProps {
   isOpen: boolean;
@@ -598,8 +599,11 @@ export const AdminAuthModal: React.FC<AdminAuthModalProps> = ({
           )}
         </div>
 
+        {/* Direct Android App Download Option */}
+        <AndroidAppDownloadCard variant="compact" className="mt-3 shrink-0" />
+
         {/* Footer */}
-        <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500 shrink-0">
+        <div className="pt-3 mt-2 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500 shrink-0">
           <span>Dual Administrator Access • RTE & U-DISE Compliant</span>
           <button
             onClick={onClose}

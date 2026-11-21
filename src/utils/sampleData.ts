@@ -39,12 +39,12 @@ export const initialSchoolProfile: SchoolProfile = {
   nameUrdu: 'گورنمنٹ مڈل اسکول پامپوش کالونی',
   nameHi: 'राजकीय मध्य विद्यालय पम्पोष कॉलोनी',
   code: '09240104502', // Standard U-DISE+ Code
-  address: 'Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.',
-  villageTown: 'Pamposh Colony, Palpora',
-  blockTehsil: 'Iddgah',
+  address: 'Pamposh Colony, Palapora Zone, Iddgah',
+  villageTown: 'Pamposh Colony',
+  blockTehsil: 'Palapora Zone, Iddgah',
   district: 'Srinagar',
   state: 'Jammu and Kashmir',
-  pinCode: '190017',
+  pinCode: '',
   academicSession: '2026-2027',
   headTeacherName: 'Mohd Yousuf Wani',
   headmasterName: 'Mohd Yousuf Wani',
@@ -63,7 +63,7 @@ export const initialSchoolProfile: SchoolProfile = {
   latitude: 34.0837,
   longitude: 74.7973,
   geofenceRadiusMeters: 250,
-  locationAddress: 'Campus Main Gate, Pamposh Colony, Palpora, Tehsil Iddgah, Srinagar – 190017',
+  locationAddress: 'Campus Main Gate, Pamposh Colony, Palapora Zone, Iddgah',
   requireLocationForAttendance: true,
   holidays: [
     { id: 'h1', date: '2026-01-26', name: 'Republic Day', nameHi: 'गणतंत्र दिवस', type: 'gazetted' },
@@ -387,7 +387,7 @@ export const sampleTeachers: TeacherProfile[] = [
     employmentStatus: 'Regular',
     contactNumber: '+91 94190 12345',
     email: 'mohdyousufwani1977@gmail.com',
-    residentialAddress: 'Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.',
+    residentialAddress: 'Pamposh Colony, Palapora Zone, Iddgah',
     district: 'Srinagar',
     schoolName: 'Govt Middle School Pamposh Colony',
     schoolId: '09240104502',
@@ -456,7 +456,8 @@ export const sampleTeachers: TeacherProfile[] = [
   },
   {
     id: 'tch-2',
-    employeeId: 'JK-EDU-1985-0451',
+    employeeId: 'KHYEDU 00220000',
+    previousCpisCode: 'JK-EDU-1985-0451',
     name: 'Nazir Ahmad Dar',
     fatherName: 'Abdul Gani Dar',
     motherName: 'Mehmooda Begum',
@@ -484,7 +485,7 @@ export const sampleTeachers: TeacherProfile[] = [
     employmentStatus: 'Regular',
     contactNumber: '+91 94190 23456',
     email: 'nazir.dar@school.edu.in',
-    residentialAddress: 'Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.',
+    residentialAddress: 'Pamposh Colony, Palapora Zone, Iddgah',
     district: 'Srinagar',
     schoolName: 'Govt Middle School Pamposh Colony',
     schoolId: '09240104502',
@@ -569,7 +570,7 @@ export const sampleTeachers: TeacherProfile[] = [
     employmentStatus: 'Regular',
     contactNumber: '+91 94190 34567',
     email: 'bilal.dar@school.edu.in',
-    residentialAddress: 'Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.',
+    residentialAddress: 'Pamposh Colony, Palapora Zone, Iddgah',
     district: 'Srinagar',
     schoolName: 'Govt Middle School Pamposh Colony',
     schoolId: '09240104502',
@@ -626,9 +627,9 @@ export const sampleTeachers: TeacherProfile[] = [
   },
 ];
 
-export const STANDARDIZED_ADDRESS = 'Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.';
-export const STANDARDIZED_VILLAGE_TOWN = 'Palpora';
-export const STANDARDIZED_BLOCK_TEHSIL = 'Iddgah';
+export const STANDARDIZED_ADDRESS = 'Pamposh Colony, Palapora Zone, Iddgah';
+export const STANDARDIZED_VILLAGE_TOWN = 'Pamposh Colony';
+export const STANDARDIZED_BLOCK_TEHSIL = 'Palapora Zone, Iddgah';
 export const STANDARDIZED_DISTRICT = 'Srinagar';
 export const STANDARDIZED_STATE = 'Jammu and Kashmir';
 export const STANDARDIZED_PIN_CODE = '190017';
@@ -646,7 +647,7 @@ export const sampleStudents: Student[] = [
     section: 'A',
     rollNumber: 1,
     academicSession: '2026-2027',
-    address: 'Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.',
+    address: 'Pamposh Colony, Palapora Zone, Iddgah',
     villageTown: 'Palpora',
     blockTehsil: 'Iddgah',
     district: 'Srinagar',
@@ -675,7 +676,7 @@ export const sampleStudents: Student[] = [
     section: 'A',
     rollNumber: 1,
     academicSession: '2026-2027',
-    address: 'Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.',
+    address: 'Pamposh Colony, Palapora Zone, Iddgah',
     villageTown: 'Palpora',
     blockTehsil: 'Iddgah',
     district: 'Srinagar',
@@ -704,7 +705,7 @@ export const sampleStudents: Student[] = [
     section: 'A',
     rollNumber: 2,
     academicSession: '2026-2027',
-    address: 'Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.',
+    address: 'Pamposh Colony, Palapora Zone, Iddgah',
     villageTown: 'Palpora',
     blockTehsil: 'Iddgah',
     district: 'Srinagar',
@@ -733,7 +734,7 @@ export const sampleStudents: Student[] = [
     section: 'A',
     rollNumber: 3,
     academicSession: '2026-2027',
-    address: 'Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.',
+    address: 'Pamposh Colony, Palapora Zone, Iddgah',
     villageTown: 'Palpora',
     blockTehsil: 'Iddgah',
     district: 'Srinagar',
@@ -761,7 +762,7 @@ export const sampleStudents: Student[] = [
     section: 'A',
     rollNumber: 4,
     academicSession: '2026-2027',
-    address: 'Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.',
+    address: 'Pamposh Colony, Palapora Zone, Iddgah',
     villageTown: 'Palpora',
     blockTehsil: 'Iddgah',
     district: 'Srinagar',
@@ -786,7 +787,7 @@ export const sampleStudents: Student[] = [
     section: 'A',
     rollNumber: 5,
     academicSession: '2026-2027',
-    address: 'Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.',
+    address: 'Pamposh Colony, Palapora Zone, Iddgah',
     villageTown: 'Palpora',
     blockTehsil: 'Iddgah',
     district: 'Srinagar',
@@ -813,7 +814,7 @@ export const sampleStudents: Student[] = [
     section: 'A',
     rollNumber: 6,
     academicSession: '2026-2027',
-    address: 'Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.',
+    address: 'Pamposh Colony, Palapora Zone, Iddgah',
     villageTown: 'Palpora',
     blockTehsil: 'Iddgah',
     district: 'Srinagar',
@@ -841,7 +842,7 @@ export const sampleStudents: Student[] = [
     section: 'A',
     rollNumber: 7,
     academicSession: '2026-2027',
-    address: 'Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.',
+    address: 'Pamposh Colony, Palapora Zone, Iddgah',
     villageTown: 'Palpora',
     blockTehsil: 'Iddgah',
     district: 'Srinagar',
@@ -869,7 +870,7 @@ export const sampleStudents: Student[] = [
     section: 'A',
     rollNumber: 8,
     academicSession: '2026-2027',
-    address: 'Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.',
+    address: 'Pamposh Colony, Palapora Zone, Iddgah',
     villageTown: 'Palpora',
     blockTehsil: 'Iddgah',
     district: 'Srinagar',
@@ -898,7 +899,7 @@ export const sampleStudents: Student[] = [
     section: 'A',
     rollNumber: 1,
     academicSession: '2026-2027',
-    address: 'Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.',
+    address: 'Pamposh Colony, Palapora Zone, Iddgah',
     villageTown: 'Palpora',
     blockTehsil: 'Iddgah',
     district: 'Srinagar',
@@ -924,7 +925,7 @@ export const sampleStudents: Student[] = [
     section: 'A',
     rollNumber: 2,
     academicSession: '2026-2027',
-    address: 'Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.',
+    address: 'Pamposh Colony, Palapora Zone, Iddgah',
     villageTown: 'Palpora',
     blockTehsil: 'Iddgah',
     district: 'Srinagar',
@@ -951,7 +952,7 @@ export const sampleStudents: Student[] = [
     section: 'A',
     rollNumber: 1,
     academicSession: '2026-2027',
-    address: 'Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.',
+    address: 'Pamposh Colony, Palapora Zone, Iddgah',
     villageTown: 'Palpora',
     blockTehsil: 'Iddgah',
     district: 'Srinagar',
@@ -978,7 +979,7 @@ export const sampleStudents: Student[] = [
     section: 'A',
     rollNumber: 1,
     academicSession: '2026-2027',
-    address: 'Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.',
+    address: 'Pamposh Colony, Palapora Zone, Iddgah',
     villageTown: 'Palpora',
     blockTehsil: 'Iddgah',
     district: 'Srinagar',
@@ -1005,7 +1006,7 @@ export const sampleStudents: Student[] = [
     section: 'A',
     rollNumber: 1,
     academicSession: '2026-2027',
-    address: 'Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.',
+    address: 'Pamposh Colony, Palapora Zone, Iddgah',
     villageTown: 'Palpora',
     blockTehsil: 'Iddgah',
     district: 'Srinagar',
@@ -1032,7 +1033,7 @@ export const sampleStudents: Student[] = [
     section: 'A',
     rollNumber: 1,
     academicSession: '2026-2027',
-    address: 'Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.',
+    address: 'Pamposh Colony, Palapora Zone, Iddgah',
     villageTown: 'Palpora',
     blockTehsil: 'Iddgah',
     district: 'Srinagar',
@@ -1059,7 +1060,7 @@ export const sampleStudents: Student[] = [
     section: 'A',
     rollNumber: 1,
     academicSession: '2026-2027',
-    address: 'Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.',
+    address: 'Pamposh Colony, Palapora Zone, Iddgah',
     villageTown: 'Palpora',
     blockTehsil: 'Iddgah',
     district: 'Srinagar',
@@ -1192,7 +1193,7 @@ export const sampleMarksEntries: StudentMarkEntry[] = [
 export const sampleTeacherLeaveApplications: TeacherLeaveApplication[] = [
   {
     id: 'leave-app-1',
-    employeeId: 'TCH-101',
+    employeeId: 'KHYEDU 00220000',
     teacherName: 'Nazir Ahmad Dar',
     leaveType: 'Casual_Leave',
     applicationDate: '2026-10-24',
@@ -1239,14 +1240,16 @@ export function generateSampleAttendance(): AttendanceRecord[] {
       let status: 'Present' | 'Absent' | 'Late' | 'Approved_Leave' = 'Present';
       
       const dayNum = parseInt(date.slice(-2), 10);
-      if (idx === 4 && (dayNum === 14 || dayNum === 15)) {
+      if (idx === 4 && (dayNum === 14 || dayNum === 15 || dayNum === 16)) {
+        status = 'Absent';
+      } else if (idx === 5 && (dayNum === 26 || dayNum === 27 || dayNum === 28)) {
+        status = 'Absent';
+      } else if (idx === 6 && (dayNum === 15 || dayNum === 16 || dayNum === 17)) {
         status = 'Absent';
       } else if (idx === 7 && dayNum === 9) {
         status = 'Approved_Leave';
       } else if (idx === 3 && dayNum === 22) {
         status = 'Late';
-      } else if (idx === 5 && dayNum === 16) {
-        status = 'Absent';
       } else if (idx === 2 && dayNum === 27) {
         status = 'Present';
       }
@@ -1383,7 +1386,7 @@ export const sampleTeacherAttendanceRecords: TeacherAttendanceRecord[] = [
     id: 't-att-2',
     date: '2026-10-29',
     teacherId: 'tch-2',
-    employeeId: 'TCH-101',
+    employeeId: 'KHYEDU 00220000',
     teacherName: 'Nazir Ahmad Dar',
     designation: 'Senior Teacher (TGT)',
     status: 'Present',

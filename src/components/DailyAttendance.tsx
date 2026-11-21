@@ -48,6 +48,8 @@ import {
   VolumeX,
   Settings,
   Download,
+  ArrowUpDown,
+  Edit3,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -269,9 +271,50 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
       'SM-2026-002': 'Fever & medical rest advised',
     };
   });
-  const [activeFilterChip, setActiveFilterChip] = useState<'all' | 'Present' | 'Absent' | 'pending_sync'>('all');
+  const [activeFilterChip, setActiveFilterChip] = useState<'all' | 'Pending' | 'Present' | 'Absent' | 'pending_sync'>('all');
+  const [autoSortPendingFirst, setAutoSortPendingFirst] = useState<boolean>(true);
+  const [scanFeedbackEnabled, setScanFeedbackEnabled] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('sm_qr_scan_feedback_enabled');
+      return saved === null ? true : saved === 'true';
+    } catch {
+      return true;
+    }
+  });
+  const [selectedPendingIds, setSelectedPendingIds] = useState<string[]>([]);
+  const [activeSessionScanCount, setActiveSessionScanCount] = useState<number>(0);
+  const [recentScanDateFilter, setRecentScanDateFilter] = useState<string>('');
+  const [recentScanClassFilter, setRecentScanClassFilter] = useState<string>('ALL');
+  const [recentScanGroupBy, setRecentScanGroupBy] = useState<'none' | 'session' | 'period'>('none');
+  const [isExportingRecentScansPdf, setIsExportingRecentScansPdf] = useState<boolean>(false);
+  const [isExportingRecentScansExcel, setIsExportingRecentScansExcel] = useState<boolean>(false);
+  const [editingRecentScanKey, setEditingRecentScanKey] = useState<string | null>(null);
+  const [editingRecentScanStatus, setEditingRecentScanStatus] = useState<AttendanceStatus>('Present');
+  const [editingRecentScanReason, setEditingRecentScanReason] = useState<string>('');
+  const [editedRecentScanIds, setEditedRecentScanIds] = useState<string[]>([]);
   const [smsNoticeToast, setSmsNoticeToast] = useState<string | null>(null);
   const recentScannedIdsRef = useRef<Map<string, number>>(new Map());
+  const lastContextKeyRef = useRef<string>('');
+
+  const handleToggleScanFeedback = () => {
+    setScanFeedbackEnabled((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('sm_qr_scan_feedback_enabled', String(next));
+      } catch {
+        // Ignore storage restrictions
+      }
+      return next;
+    });
+  };
+
+  const canEditRecentScans = [
+    'admin',
+    'head_teacher',
+    'primary_admin',
+    'senior_admin',
+    'junior_admin',
+  ].includes(currentUser.role);
 
   // Attendance Settings & Automated Push Notification State
   const [showAttendanceSettings, setShowAttendanceSettings] = useState<boolean>(false);
@@ -482,58 +525,84 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
     setIsRecentScansCollapsed(false);
   };
 
-  // Audio feedback generator for QR and NFC scans in noisy classrooms
+  // Haptic feedback trigger for mobile devices during rapid QR/NFC check-ins
+  const triggerHapticFeedback = (type: 'success' | 'error') => {
+    if (!scanFeedbackEnabled) return;
+    try {
+      if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+        navigator.vibrate(type === 'success' ? 45 : [65, 45, 65]);
+      }
+    } catch {
+      // Vibration API not supported or blocked
+    }
+  };
+
+  // Subtle dual-chime audio + haptic feedback for rapid QR/NFC check-ins
   const playSuccessBeep = () => {
+    if (!scanFeedbackEnabled) return;
+    triggerHapticFeedback('success');
     try {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (!AudioCtx) return;
       const ctx = new AudioCtx();
+      const now = ctx.currentTime;
       const osc1 = ctx.createOscillator();
       const osc2 = ctx.createOscillator();
       const gain = ctx.createGain();
 
       osc1.type = 'sine';
-      osc1.frequency.setValueAtTime(880, ctx.currentTime); // 880 Hz
+      osc1.frequency.setValueAtTime(880, now); // A5
       osc2.type = 'sine';
-      osc2.frequency.setValueAtTime(1320, ctx.currentTime + 0.08); // 1320 Hz harmonic
+      osc2.frequency.setValueAtTime(1174.66, now + 0.07); // D6 subtle confirmation chime
 
-      gain.gain.setValueAtTime(0.16, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.22);
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.linearRampToValueAtTime(0.09, now + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.21);
 
       osc1.connect(gain);
       osc2.connect(gain);
       gain.connect(ctx.destination);
 
-      osc1.start(ctx.currentTime);
-      osc1.stop(ctx.currentTime + 0.08);
-      osc2.start(ctx.currentTime + 0.08);
-      osc2.stop(ctx.currentTime + 0.22);
-    } catch (e) {
+      osc1.start(now);
+      osc1.stop(now + 0.075);
+      osc2.start(now + 0.07);
+      osc2.stop(now + 0.21);
+      window.setTimeout(() => {
+        ctx.close().catch(() => {});
+      }, 280);
+    } catch {
       // AudioContext policy
     }
   };
 
   const playErrorTone = () => {
+    if (!scanFeedbackEnabled) return;
+    triggerHapticFeedback('error');
     try {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (!AudioCtx) return;
       const ctx = new AudioCtx();
+      const now = ctx.currentTime;
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
 
-      osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(260, ctx.currentTime);
-      osc.frequency.linearRampToValueAtTime(180, ctx.currentTime + 0.25);
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(280, now);
+      osc.frequency.linearRampToValueAtTime(195, now + 0.22);
 
-      gain.gain.setValueAtTime(0.18, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.28);
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.linearRampToValueAtTime(0.11, now + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
 
       osc.connect(gain);
       gain.connect(ctx.destination);
 
-      osc.start(ctx.currentTime);
-      osc.stop(ctx.currentTime + 0.28);
-    } catch (e) {
+      osc.start(now);
+      osc.stop(now + 0.24);
+      window.setTimeout(() => {
+        ctx.close().catch(() => {});
+      }, 300);
+    } catch {
       // AudioContext policy
     }
   };
@@ -629,7 +698,7 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
     }
   }, []);
 
-  // Session timer ticker
+  // Session timer ticker & active session scan counter lifecycle
   useEffect(() => {
     let interval: any = null;
     if (showQrScannerModal) {
@@ -638,6 +707,7 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
       }, 1000);
     } else {
       setSessionSeconds(0);
+      setActiveSessionScanCount(0);
       setIsFlashOn(false);
     }
     return () => {
@@ -870,8 +940,729 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
     });
   };
 
-  // Load existing records whenever date, class, or section changes
+  // Download Today's Attendance CSV Export (leverages school profile details & current day's recorded data)
+  const handleDownloadTodaysAttendanceCsv = () => {
+    const csvEscape = (value: unknown): string => {
+      const str = String(value ?? '');
+      return `"${str.replace(/"/g, '""')}"`;
+    };
+
+    const studentById = new Map<string, Student>();
+    deduplicateStudentsByAdmissionNumber(students).forEach((st) => {
+      studentById.set(st.id, st);
+    });
+
+    // Gather all recorded attendance entries for selectedDate across school, overlaid with live draftStatus for current class
+    const mergedByStudentId = new Map<
+      string,
+      {
+        student?: Student;
+        studentId: string;
+        classNumber: string;
+        section: string;
+        status: string;
+        markedAt: string;
+        remarks: string;
+        locationVerified: string;
+      }
+    >();
+
+    attendanceRecords
+      .filter((r) => r.date === selectedDate)
+      .forEach((rec) => {
+        const st = studentById.get(rec.studentId);
+        mergedByStudentId.set(rec.studentId, {
+          student: st,
+          studentId: rec.studentId,
+          classNumber: rec.classNumber || st?.classNumber || '',
+          section: rec.section || st?.section || '',
+          status: rec.status === 'Approved_Leave' ? 'Approved Leave' : rec.status,
+          markedAt: rec.markedAt || '',
+          remarks: notesMap[rec.studentId] || rec.remarks || '',
+          locationVerified: rec.isLocationVerified ? 'Yes' : 'No',
+        });
+      });
+
+    // Overlay active class students (capturing any unsaved draft changes or Pending rows)
+    classStudents.forEach((st) => {
+      const liveStatus = draftStatus[st.id];
+      const existing = mergedByStudentId.get(st.id);
+      const gps = studentGpsMap[st.id];
+      if (liveStatus) {
+        mergedByStudentId.set(st.id, {
+          student: st,
+          studentId: st.id,
+          classNumber: selectedClass,
+          section: selectedSection,
+          status: liveStatus === 'Approved_Leave' ? 'Approved Leave' : liveStatus,
+          markedAt: existing?.markedAt || new Date().toISOString(),
+          remarks: notesMap[st.id] || existing?.remarks || '',
+          locationVerified: (gps?.isLocationVerified ?? existing?.locationVerified === 'Yes') ? 'Yes' : 'No',
+        });
+      } else if (!existing) {
+        mergedByStudentId.set(st.id, {
+          student: st,
+          studentId: st.id,
+          classNumber: selectedClass,
+          section: selectedSection,
+          status: 'Pending',
+          markedAt: '',
+          remarks: notesMap[st.id] || '',
+          locationVerified: 'No',
+        });
+      }
+    });
+
+    const rows = Array.from(mergedByStudentId.values()).sort((a, b) => {
+      const clsDiff = (parseInt(a.classNumber, 10) || 0) - (parseInt(b.classNumber, 10) || 0);
+      if (clsDiff !== 0) return clsDiff;
+      if (a.section !== b.section) return a.section.localeCompare(b.section);
+      return (a.student?.rollNumber ?? 999) - (b.student?.rollNumber ?? 999);
+    });
+
+    const presentTotal = rows.filter((r) => r.status === 'Present').length;
+    const absentTotal = rows.filter((r) => r.status === 'Absent').length;
+    const lateTotal = rows.filter((r) => r.status === 'Late').length;
+    const leaveTotal = rows.filter((r) => r.status === 'Approved Leave').length;
+    const pendingTotal = rows.filter((r) => r.status === 'Pending').length;
+
+    const schoolAddress = formatSchoolAddressOnce(school);
+    const headmasterLabel = school.headmasterName || school.headTeacherName || 'Headmaster';
+    const generatedAt = new Date().toLocaleString('en-IN');
+
+    const csvLines: string[] = [
+      [csvEscape('SCHOOL MASTER - DAILY STUDENT ATTENDANCE REPORT')].join(','),
+      [csvEscape('School Name'), csvEscape(school.name), csvEscape('UDISE Code'), csvEscape(school.code || 'N/A')].join(','),
+      [csvEscape('Address'), csvEscape(schoolAddress), csvEscape('Block / District / State'), csvEscape([school.blockTehsil, school.district, school.state].filter(Boolean).join(', ') || 'N/A')].join(','),
+      [csvEscape('Academic Session'), csvEscape(school.academicSession), csvEscape('Headmaster'), csvEscape(headmasterLabel)].join(','),
+      [csvEscape('Attendance Date'), csvEscape(selectedDate), csvEscape('Exported By'), csvEscape(`${currentUser.name} (${generatedAt})`)].join(','),
+      [
+        csvEscape('Summary'),
+        csvEscape(`Total: ${rows.length} | Present: ${presentTotal} | Absent: ${absentTotal} | Late: ${lateTotal} | Leave: ${leaveTotal} | Pending: ${pendingTotal}`),
+      ].join(','),
+      '',
+      [
+        'Date',
+        'Class',
+        'Section',
+        'Roll No',
+        'Admission No',
+        'Student Name',
+        "Father's Name",
+        'Status',
+        'Marked Timestamp',
+        'GPS Verified',
+        'Remarks / Notes',
+      ]
+        .map(csvEscape)
+        .join(','),
+      ...rows.map((row) =>
+        [
+          selectedDate,
+          row.classNumber,
+          row.section,
+          row.student?.rollNumber ?? '',
+          row.student?.admissionNumber ?? row.studentId,
+          row.student?.fullName ?? 'Unknown Student',
+          row.student?.fatherName ?? '',
+          row.status,
+          row.markedAt ? new Date(row.markedAt).toLocaleString('en-IN') : '',
+          row.locationVerified,
+          row.remarks,
+        ]
+          .map(csvEscape)
+          .join(',')
+      ),
+    ];
+
+    const csvContent = `\uFEFF${csvLines.join('\r\n')}`;
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const safeSchoolTag = (school.code || school.name || 'School').replace(/[^a-zA-Z0-9_-]+/g, '_');
+    const filename = `Todays_Attendance_${safeSchoolTag}_${selectedDate}.csv`;
+
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', filename);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    setSmsNoticeToast(`Downloaded today's attendance CSV (${rows.length} student records) — ${filename}`);
+    setTimeout(() => setSmsNoticeToast(null), 3500);
+  };
+
+  // Unique class groups available for filtering Recent Scans
+  const recentScanClassGroupOptions = useMemo(() => {
+    const groups = new Set<string>();
+    attendanceRecords.forEach((r) => {
+      if (r.classNumber) {
+        groups.add(r.section ? `${r.classNumber}-${r.section}` : r.classNumber);
+      }
+    });
+    deduplicateStudentsByAdmissionNumber(students).forEach((s) => {
+      if (s.classNumber) {
+        groups.add(s.section ? `${s.classNumber}-${s.section}` : s.classNumber);
+      }
+    });
+    return Array.from(groups).sort((a, b) => {
+      const [clsA, secA = ''] = a.split('-');
+      const [clsB, secB = ''] = b.split('-');
+      const diff = (parseInt(clsA, 10) || 0) - (parseInt(clsB, 10) || 0);
+      return diff !== 0 ? diff : secA.localeCompare(secB);
+    });
+  }, [attendanceRecords, students]);
+
+  // Time-of-day slot classifiers for Recent Scans grouping & Excel archival
+  const classifyScanTimeSlots = (
+    markedAt?: string
+  ): { sessionSlot: string; sessionOrder: number; periodSlot: string; periodOrder: number } => {
+    const parsed = markedAt ? new Date(markedAt) : null;
+    if (!parsed || Number.isNaN(parsed.getTime())) {
+      return {
+        sessionSlot: 'Standard Daily Roll-Call',
+        sessionOrder: 99,
+        periodSlot: 'General Roll-Call',
+        periodOrder: 99,
+      };
+    }
+
+    const totalMinutes = parsed.getHours() * 60 + parsed.getMinutes();
+
+    let sessionSlot = 'Afternoon Session (02:30 PM Onwards)';
+    let sessionOrder = 4;
+    if (totalMinutes < 9 * 60) {
+      sessionSlot = 'Morning Assembly (Before 09:00 AM)';
+      sessionOrder = 1;
+    } else if (totalMinutes < 12 * 60) {
+      sessionSlot = 'Morning Session (09:00 AM – 12:00 PM)';
+      sessionOrder = 2;
+    } else if (totalMinutes < 14 * 60 + 30) {
+      sessionSlot = 'Midday / Post-Recess (12:00 PM – 02:30 PM)';
+      sessionOrder = 3;
+    }
+
+    let periodSlot = 'Period 8 / Dismissal (02:15 PM+)';
+    let periodOrder = 9;
+    if (totalMinutes < 9 * 60) {
+      periodSlot = 'Zero Period / Assembly (Before 09:00 AM)';
+      periodOrder = 1;
+    } else if (totalMinutes < 9 * 60 + 45) {
+      periodSlot = 'Period 1 (09:00 – 09:45 AM)';
+      periodOrder = 2;
+    } else if (totalMinutes < 10 * 60 + 30) {
+      periodSlot = 'Period 2 (09:45 – 10:30 AM)';
+      periodOrder = 3;
+    } else if (totalMinutes < 11 * 60 + 15) {
+      periodSlot = 'Period 3 (10:30 – 11:15 AM)';
+      periodOrder = 4;
+    } else if (totalMinutes < 12 * 60) {
+      periodSlot = 'Period 4 (11:15 AM – 12:00 PM)';
+      periodOrder = 5;
+    } else if (totalMinutes < 12 * 60 + 45) {
+      periodSlot = 'Period 5 (12:00 – 12:45 PM)';
+      periodOrder = 6;
+    } else if (totalMinutes < 13 * 60 + 30) {
+      periodSlot = 'Period 6 (12:45 – 01:30 PM)';
+      periodOrder = 7;
+    } else if (totalMinutes < 14 * 60 + 15) {
+      periodSlot = 'Period 7 (01:30 – 02:15 PM)';
+      periodOrder = 8;
+    }
+
+    return { sessionSlot, sessionOrder, periodSlot, periodOrder };
+  };
+
+  // Filtered recent attendance scans retrieved directly from attendanceRecords state
+  const filteredRecentCheckInsAll = useMemo(() => {
+    const studentMap = new Map<string, Student>();
+    deduplicateStudentsByAdmissionNumber(students).forEach((s) => studentMap.set(s.id, s));
+    const editedSet = new Set(editedRecentScanIds);
+
+    const matching = attendanceRecords
+      .filter((r) => {
+        const isEligibleStatus =
+          r.status === 'Present' ||
+          r.status === 'Late' ||
+          editedSet.has(r.id) ||
+          Boolean(r.remarks?.includes('Admin Corrected'));
+        if (!isEligibleStatus) return false;
+        if (recentScanDateFilter && r.date !== recentScanDateFilter) return false;
+        if (recentScanClassFilter !== 'ALL') {
+          const st = studentMap.get(r.studentId);
+          const cls = r.classNumber || st?.classNumber || '';
+          const sec = r.section || st?.section || '';
+          const groupKey = sec ? `${cls}-${sec}` : cls;
+          if (groupKey !== recentScanClassFilter && cls !== recentScanClassFilter) return false;
+        }
+        return true;
+      })
+      .sort((a, b) => {
+        // Prioritize selectedDate check-ins when no explicit date filter is set, then newest markedAt first
+        if (!recentScanDateFilter) {
+          const aIsToday = a.date === selectedDate ? 1 : 0;
+          const bIsToday = b.date === selectedDate ? 1 : 0;
+          if (aIsToday !== bIsToday) return bIsToday - aIsToday;
+        }
+        const dateCmp = b.date.localeCompare(a.date);
+        if (dateCmp !== 0) return dateCmp;
+        const timeA = a.markedAt ? new Date(a.markedAt).getTime() : 0;
+        const timeB = b.markedAt ? new Date(b.markedAt).getTime() : 0;
+        return timeB - timeA;
+      });
+
+    const seenKeys = new Set<string>();
+    const result: Array<{
+      id: string;
+      record: AttendanceRecord;
+      studentId: string;
+      studentName: string;
+      rollNumber?: number;
+      admissionNumber: string;
+      classNumber: string;
+      section: string;
+      date: string;
+      status: AttendanceStatus;
+      timestampLabel: string;
+      sessionSlot: string;
+      sessionOrder: number;
+      periodSlot: string;
+      periodOrder: number;
+      remarks?: string;
+    }> = [];
+
+    for (const rec of matching) {
+      const dedupeKey = `${rec.studentId}::${rec.date}`;
+      if (seenKeys.has(dedupeKey)) continue;
+      seenKeys.add(dedupeKey);
+      const st = studentMap.get(rec.studentId);
+      const parsedTime = rec.markedAt ? new Date(rec.markedAt) : null;
+      const isValidDate = parsedTime && !Number.isNaN(parsedTime.getTime());
+      const timeStr = isValidDate
+        ? parsedTime.toLocaleTimeString('en-US', {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: true,
+          })
+        : rec.date;
+      const { sessionSlot, sessionOrder, periodSlot, periodOrder } = classifyScanTimeSlots(rec.markedAt);
+
+      result.push({
+        id: rec.id,
+        record: rec,
+        studentId: rec.studentId,
+        studentName: st?.fullName || rec.studentId,
+        rollNumber: st?.rollNumber,
+        admissionNumber: st?.admissionNumber || rec.studentId,
+        classNumber: rec.classNumber || st?.classNumber || '',
+        section: rec.section || st?.section || '',
+        date: rec.date,
+        status: rec.status,
+        timestampLabel: rec.date === selectedDate ? timeStr : `${rec.date} • ${timeStr}`,
+        sessionSlot,
+        sessionOrder,
+        periodSlot,
+        periodOrder,
+        remarks: rec.remarks,
+      });
+    }
+
+    return result;
+  }, [
+    attendanceRecords,
+    students,
+    selectedDate,
+    recentScanDateFilter,
+    recentScanClassFilter,
+    editedRecentScanIds,
+  ]);
+
+  // Display top 5 recent check-ins in flat mode (and up to 25 grouped across active time-of-day slots)
+  const recentCheckInsFromRecords = useMemo(
+    () => filteredRecentCheckInsAll.slice(0, 5),
+    [filteredRecentCheckInsAll]
+  );
+
+  const groupedRecentCheckIns = useMemo(() => {
+    if (recentScanGroupBy === 'none') return [];
+    const pool = filteredRecentCheckInsAll.slice(0, 25);
+    const groupsMap = new Map<string, { order: number; items: typeof pool }>();
+    pool.forEach((item) => {
+      const slotKey = recentScanGroupBy === 'session' ? item.sessionSlot : item.periodSlot;
+      const order = recentScanGroupBy === 'session' ? item.sessionOrder : item.periodOrder;
+      const bucket = groupsMap.get(slotKey);
+      if (bucket) bucket.items.push(item);
+      else groupsMap.set(slotKey, { order, items: [item] });
+    });
+    return Array.from(groupsMap.entries())
+      .sort((a, b) => a[1].order - b[1].order)
+      .map(([slotName, data]) => ({
+        slotName,
+        items: data.items,
+      }));
+  }, [filteredRecentCheckInsAll, recentScanGroupBy]);
+
+  // Download ALL matching Recent Scans as a formatted Excel (.xlsx) workbook for administrative archival
+  const handleExportAllRecentScansExcel = async () => {
+    const rowsToExport = filteredRecentCheckInsAll;
+    if (rowsToExport.length === 0) return;
+    setIsExportingRecentScansExcel(true);
+    try {
+      const XLSX = await import('xlsx');
+      const generatedAt = new Date().toLocaleString('en-IN');
+      const dateLabel = recentScanDateFilter || `All Dates (Active: ${selectedDate})`;
+      const classLabel = recentScanClassFilter === 'ALL' ? 'All Class Groups' : `Class ${recentScanClassFilter}`;
+
+      const headerBanner = [
+        [`${school.name || 'SCHOOL MASTER'} — ALL RECENT ATTENDANCE SCANS ARCHIVE`],
+        [`${formatSchoolAddressOnce(school)}  |  U-DISE: ${school.code || 'N/A'}  |  Academic Session: ${school.academicSession}`],
+        [`Date Filter: ${dateLabel}  |  Class Group: ${classLabel}  |  Exported By: ${currentUser.name} (${generatedAt})  |  Total Records: ${rowsToExport.length}`],
+        [],
+        [
+          '#',
+          'Date',
+          'Check-In Time',
+          'Session Slot',
+          'Period Slot',
+          'Student Name',
+          'Admission No',
+          'Roll No',
+          'Class',
+          'Section',
+          'Status',
+          'Remarks / Source',
+        ],
+      ];
+
+      const detailRows = rowsToExport.map((item, idx) => [
+        idx + 1,
+        item.date,
+        item.timestampLabel.replace(`${item.date} • `, ''),
+        item.sessionSlot,
+        item.periodSlot,
+        item.studentName,
+        item.admissionNumber,
+        item.rollNumber !== undefined ? item.rollNumber : '—',
+        item.classNumber || 'N/A',
+        item.section || '—',
+        item.status === 'Approved_Leave' ? 'Approved Leave' : item.status,
+        item.remarks || 'Recorded Attendance Scan',
+      ]);
+
+      const wsDetails = XLSX.utils.aoa_to_sheet([...headerBanner, ...detailRows]);
+      wsDetails['!cols'] = [
+        { wch: 5 },
+        { wch: 13 },
+        { wch: 15 },
+        { wch: 36 },
+        { wch: 32 },
+        { wch: 24 },
+        { wch: 16 },
+        { wch: 9 },
+        { wch: 9 },
+        { wch: 9 },
+        { wch: 15 },
+        { wch: 36 },
+      ];
+      wsDetails['!merges'] = [
+        { s: { r: 0, c: 0 }, e: { r: 0, c: 11 } },
+        { s: { r: 1, c: 0 }, e: { r: 1, c: 11 } },
+        { s: { r: 2, c: 0 }, e: { r: 2, c: 11 } },
+      ];
+
+      // Build Session & Period Summary Sheet for administrative review (sorted chronologically by slot order)
+      const buildSlotSummary = (
+        label: string,
+        picker: (r: (typeof rowsToExport)[number]) => { slot: string; order: number }
+      ) => {
+        const map = new Map<
+          string,
+          { order: number; total: number; present: number; late: number; absent: number; leave: number }
+        >();
+        rowsToExport.forEach((item) => {
+          const { slot, order } = picker(item);
+          const stat = map.get(slot) || { order, total: 0, present: 0, late: 0, absent: 0, leave: 0 };
+          stat.total += 1;
+          if (item.status === 'Present') stat.present += 1;
+          else if (item.status === 'Late') stat.late += 1;
+          else if (item.status === 'Absent') stat.absent += 1;
+          else if (item.status === 'Approved_Leave') stat.leave += 1;
+          map.set(slot, stat);
+        });
+        return [
+          [label],
+          ['Time-of-Day Slot', 'Total Scans', 'Present', 'Late', 'Absent', 'Approved Leave'],
+          ...Array.from(map.entries())
+            .sort((a, b) => a[1].order - b[1].order)
+            .map(([slot, st]) => [
+              slot,
+              st.total,
+              st.present,
+              st.late,
+              st.absent,
+              st.leave,
+            ]),
+        ];
+      };
+
+      const summaryRows = [
+        [`${school.name || 'SCHOOL MASTER'} — SCANS BY SESSION & PERIOD SUMMARY`],
+        [`Filters: ${dateLabel} • ${classLabel} • Generated: ${generatedAt}`],
+        [],
+        ...buildSlotSummary('BREAKDOWN BY SESSION', (r) => ({
+          slot: r.sessionSlot,
+          order: r.sessionOrder,
+        })),
+        [],
+        ...buildSlotSummary('BREAKDOWN BY PERIOD', (r) => ({
+          slot: r.periodSlot,
+          order: r.periodOrder,
+        })),
+      ];
+      const wsSummary = XLSX.utils.aoa_to_sheet(summaryRows);
+      wsSummary['!cols'] = [
+        { wch: 40 },
+        { wch: 13 },
+        { wch: 11 },
+        { wch: 11 },
+        { wch: 11 },
+        { wch: 16 },
+      ];
+      wsSummary['!merges'] = [
+        { s: { r: 0, c: 0 }, e: { r: 0, c: 5 } },
+        { s: { r: 1, c: 0 }, e: { r: 1, c: 5 } },
+      ];
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, wsDetails, 'All_Recent_Scans');
+      XLSX.utils.book_append_sheet(wb, wsSummary, 'Session_Period_Summary');
+
+      const safeSchoolCode = (school.code || 'School').replace(/[^a-zA-Z0-9_-]/g, '');
+      const classTag = recentScanClassFilter === 'ALL' ? 'AllClasses' : `Class_${recentScanClassFilter}`;
+      const dateTag = recentScanDateFilter || selectedDate;
+      XLSX.writeFile(wb, `All_Recent_Scans_${safeSchoolCode}_${classTag}_${dateTag}.xlsx`);
+
+      setQrScanSuccessToast(
+        `✓ Downloaded formatted Excel archive (${rowsToExport.length} recent scan${rowsToExport.length === 1 ? '' : 's'})`
+      );
+      setTimeout(() => setQrScanSuccessToast(null), 3200);
+    } catch (err) {
+      console.error('Failed to export All Recent Scans Excel', err);
+      setQrScanSuccessToast('⚠️ Could not generate Excel file. Please try again.');
+      setTimeout(() => setQrScanSuccessToast(null), 3200);
+    } finally {
+      setIsExportingRecentScansExcel(false);
+    }
+  };
+
+  // Admin inline edit handler for correcting a misidentified scan's attendance status
+  const handleSaveRecentScanEdit = (item: (typeof recentCheckInsFromRecords)[number]) => {
+    const prevStatus = item.status;
+    const nextStatus = editingRecentScanStatus;
+    const reasonText =
+      editingRecentScanReason.trim() || 'Admin corrected misidentified attendance scan';
+
+    const updatedRecord: AttendanceRecord = {
+      ...item.record,
+      status: nextStatus,
+      markedByUserId: currentUser.id,
+      markedAt: new Date().toISOString(),
+      remarks: `Admin Corrected (${prevStatus} → ${nextStatus}): ${reasonText}`,
+    };
+
+    const auditEntry: AttendanceAuditLog = {
+      id: `audit-scan-${Date.now()}-${item.studentId}`,
+      timestamp: new Date().toISOString(),
+      userId: currentUser.id,
+      userName: currentUser.name,
+      studentId: item.studentId,
+      studentName: item.studentName,
+      date: item.date,
+      previousStatus: prevStatus,
+      newStatus: nextStatus,
+      reason: reasonText,
+    };
+
+    onSaveAttendance([updatedRecord], prevStatus !== nextStatus ? [auditEntry] : []);
+    setEditedRecentScanIds((prev) => (prev.includes(item.id) ? prev : [...prev, item.id]));
+
+    if (
+      item.date === selectedDate &&
+      item.classNumber === selectedClass &&
+      item.section === selectedSection
+    ) {
+      setDraftStatus((prev) => ({ ...prev, [item.studentId]: nextStatus }));
+    }
+
+    setEditingRecentScanKey(null);
+    setEditingRecentScanReason('');
+    setQrScanSuccessToast(
+      `✓ Updated ${item.studentName} (${item.date}) status to ${
+        nextStatus === 'Approved_Leave' ? 'Approved Leave' : nextStatus
+      }`
+    );
+    setTimeout(() => setQrScanSuccessToast(null), 3200);
+  };
+
+  // Download Recent Scans PDF Summary for record-keeping
+  const handleExportRecentScansPdf = async () => {
+    const rowsToExport = recentCheckInsFromRecords;
+    if (rowsToExport.length === 0) return;
+    setIsExportingRecentScansPdf(true);
+    try {
+      const { jsPDF } = await import('jspdf');
+      const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+      const pageW = doc.internal.pageSize.getWidth();
+      const pageH = doc.internal.pageSize.getHeight();
+      const margin = 14;
+
+      // Official School Header Band
+      doc.setFillColor(15, 23, 42);
+      doc.rect(0, 0, pageW, 30, 'F');
+      doc.setFillColor(245, 158, 11);
+      doc.rect(0, 30, pageW, 1.5, 'F');
+
+      doc.setTextColor(255, 255, 255);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(14);
+      doc.text((school.name || 'SCHOOL MASTER').toUpperCase(), margin, 12);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.5);
+      doc.setTextColor(203, 213, 225);
+      doc.text(
+        `U-DISE: ${school.code || 'N/A'}  |  Session: ${school.academicSession}  |  ${formatSchoolAddressOnce(school)}`.slice(0, 105),
+        margin,
+        18.5
+      );
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(253, 230, 138);
+      doc.text('RECENT ATTENDANCE SCANS SUMMARY REPORT', margin, 25.5);
+
+      // Filter & Export Metadata Box
+      doc.setFillColor(248, 250, 252);
+      doc.setDrawColor(226, 232, 240);
+      doc.roundedRect(margin, 36, pageW - margin * 2, 16, 2, 2, 'FD');
+
+      doc.setTextColor(30, 41, 59);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.5);
+      const dateLabel = recentScanDateFilter || `All Dates (Active: ${selectedDate})`;
+      const classLabel = recentScanClassFilter === 'ALL' ? 'All Class Groups' : `Class ${recentScanClassFilter}`;
+      doc.text(`Date Filter: ${dateLabel}`, margin + 4, 42.5);
+      doc.text(`Class Group: ${classLabel}`, margin + 92, 42.5);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(71, 85, 105);
+      doc.text(`Generated By: ${currentUser.name}  •  ${new Date().toLocaleString('en-IN')}`, margin + 4, 48.5);
+      doc.text(`Total Scans Listed: ${rowsToExport.length}`, margin + 92, 48.5);
+
+      // Table Header
+      let y = 59;
+      const drawTableHeader = (startY: number) => {
+        doc.setFillColor(30, 27, 75);
+        doc.rect(margin, startY, pageW - margin * 2, 8, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(8);
+        doc.text('#', margin + 2.5, startY + 5.3);
+        doc.text('Student Name', margin + 10, startY + 5.3);
+        doc.text('Class', margin + 58, startY + 5.3);
+        doc.text('Roll', margin + 75, startY + 5.3);
+        doc.text('Admission No', margin + 88, startY + 5.3);
+        doc.text('Date & Time', margin + 118, startY + 5.3);
+        doc.text('Status', margin + 160, startY + 5.3);
+      };
+
+      drawTableHeader(y);
+      y += 8;
+
+      rowsToExport.forEach((item, idx) => {
+        if (y > pageH - 26) {
+          doc.addPage();
+          y = 18;
+          drawTableHeader(y);
+          y += 8;
+        }
+
+        if (idx % 2 === 1) {
+          doc.setFillColor(248, 250, 252);
+          doc.rect(margin, y, pageW - margin * 2, 8.5, 'F');
+        }
+        doc.setDrawColor(226, 232, 240);
+        doc.line(margin, y + 8.5, pageW - margin, y + 8.5);
+
+        doc.setTextColor(15, 23, 42);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(8);
+        doc.text(String(idx + 1), margin + 2.5, y + 5.6);
+        doc.setFont('helvetica', 'bold');
+        doc.text(item.studentName.slice(0, 26), margin + 10, y + 5.6);
+        doc.setFont('helvetica', 'normal');
+        doc.text(
+          item.classNumber ? `${item.classNumber}-${item.section}` : 'N/A',
+          margin + 58,
+          y + 5.6
+        );
+        doc.text(item.rollNumber !== undefined ? String(item.rollNumber) : '—', margin + 75, y + 5.6);
+        doc.text(item.admissionNumber.slice(0, 14), margin + 88, y + 5.6);
+        doc.text(
+          `${item.date} ${item.timestampLabel.replace(`${item.date} • `, '')}`.slice(0, 22),
+          margin + 118,
+          y + 5.6
+        );
+
+        const statusLabel = item.status === 'Approved_Leave' ? 'Leave' : item.status;
+        if (item.status === 'Present') doc.setTextColor(5, 150, 105);
+        else if (item.status === 'Absent') doc.setTextColor(225, 29, 72);
+        else if (item.status === 'Late') doc.setTextColor(217, 119, 6);
+        else doc.setTextColor(37, 99, 235);
+        doc.setFont('helvetica', 'bold');
+        doc.text(statusLabel, margin + 160, y + 5.6);
+
+        y += 8.5;
+      });
+
+      // Signature Footer
+      const footerY = Math.min(pageH - 18, Math.max(y + 18, 130));
+      doc.setDrawColor(148, 163, 184);
+      doc.line(margin, footerY, margin + 52, footerY);
+      doc.line(pageW - margin - 56, footerY, pageW - margin, footerY);
+      doc.setTextColor(71, 85, 105);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8);
+      doc.text('Recorded By / Class Teacher', margin, footerY + 5);
+      doc.text(
+        school.headmasterName || school.headTeacherName || 'Headmaster Signature',
+        pageW - margin - 56,
+        footerY + 5
+      );
+
+      const safeSchoolTag = (school.code || school.name || 'School').replace(/[^a-zA-Z0-9_-]+/g, '_');
+      const dateTag = recentScanDateFilter || selectedDate;
+      const classTag = recentScanClassFilter === 'ALL' ? 'AllClasses' : `Class_${recentScanClassFilter}`;
+      const filename = `Recent_Scans_${safeSchoolTag}_${classTag}_${dateTag}.pdf`;
+      doc.save(filename);
+
+      setQrScanSuccessToast(`✓ Downloaded Recent Scans PDF summary (${rowsToExport.length} record(s))`);
+      setTimeout(() => setQrScanSuccessToast(null), 3200);
+    } catch (err) {
+      console.error('Failed to export Recent Scans PDF:', err);
+      setQrScanSuccessToast('⚠️ Could not generate Recent Scans PDF. Please try again.');
+      setTimeout(() => setQrScanSuccessToast(null), 3200);
+    } finally {
+      setIsExportingRecentScansPdf(false);
+    }
+  };
+
+  // Load existing records whenever date, class, or section changes (unrecorded students remain Pending)
   useEffect(() => {
+    const contextKey = `${selectedDate}::${selectedClass}::${selectedSection}`;
+    const isContextSwitch = lastContextKeyRef.current !== contextKey;
+    lastContextKeyRef.current = contextKey;
+
     const existing = attendanceRecords.filter(
       (r) => r.date === selectedDate && r.classNumber === selectedClass && r.section === selectedSection
     );
@@ -902,18 +1693,138 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
         }
       });
       setAlreadyExists(true);
-      setIsSaved(true);
+      if (isContextSwitch) {
+        setIsSaved(true);
+      }
     } else {
-      // Default to Present for ease of marking
-      classStudents.forEach((s) => {
-        initialMap[s.id] = 'Present';
-      });
+      // Leave unrecorded students unmarked ('Pending') so Pending stays at top until marked
       setAlreadyExists(false);
-      setIsSaved(false);
+      if (isContextSwitch) {
+        setIsSaved(false);
+      }
     }
-    setDraftStatus(initialMap);
-    setStudentGpsMap(initialGps);
+
+    if (isContextSwitch) {
+      setDraftStatus(initialMap);
+      setStudentGpsMap(initialGps);
+    } else if (existing.length > 0) {
+      setDraftStatus((prev) => ({ ...prev, ...initialMap }));
+      setStudentGpsMap((prev) => ({ ...prev, ...initialGps }));
+    }
   }, [selectedDate, selectedClass, selectedSection, attendanceRecords]);
+
+  // Reset or prune multi-selected pending students whenever class/date/status changes
+  useEffect(() => {
+    setSelectedPendingIds([]);
+  }, [selectedDate, selectedClass, selectedSection]);
+
+  useEffect(() => {
+    setSelectedPendingIds((prev) =>
+      prev.filter((id) => !draftStatus[id] && classStudents.some((s) => s.id === id))
+    );
+  }, [draftStatus, classStudents]);
+
+  // Visible sorted student rows (shared between header checkbox and table body)
+  const displayedClassStudents = useMemo(() => {
+    return [...classStudents]
+      .filter((st) => {
+        const currentSt = draftStatus[st.id];
+        if (activeFilterChip === 'Pending') return !currentSt;
+        if (activeFilterChip === 'Present') return currentSt === 'Present';
+        if (activeFilterChip === 'Absent') return currentSt === 'Absent';
+        if (activeFilterChip === 'pending_sync') return !isSaved;
+        return true;
+      })
+      .sort((a, b) => {
+        if (autoSortPendingFirst) {
+          const rank = (status?: AttendanceStatus): number => {
+            if (!status) return 0; // Pending students stay at the top
+            if (status === 'Late' || status === 'Approved_Leave') return 1;
+            return 2; // Marked Present or Absent sink to the bottom
+          };
+          const diff = rank(draftStatus[a.id]) - rank(draftStatus[b.id]);
+          if (diff !== 0) return diff;
+        }
+        return a.rollNumber - b.rollNumber;
+      });
+  }, [classStudents, draftStatus, activeFilterChip, isSaved, autoSortPendingFirst]);
+
+  const visiblePendingStudentIds = useMemo(
+    () => displayedClassStudents.filter((st) => !draftStatus[st.id]).map((st) => st.id),
+    [displayedClassStudents, draftStatus]
+  );
+
+  const allVisiblePendingSelected =
+    visiblePendingStudentIds.length > 0 &&
+    visiblePendingStudentIds.every((id) => selectedPendingIds.includes(id));
+
+  const handleToggleSelectPending = (studentId: string) => {
+    if (draftStatus[studentId]) return; // Only Pending students can be selected for pending bulk action
+    setSelectedPendingIds((prev) =>
+      prev.includes(studentId) ? prev.filter((id) => id !== studentId) : [...prev, studentId]
+    );
+  };
+
+  const handleToggleSelectAllVisiblePending = () => {
+    if (visiblePendingStudentIds.length === 0) return;
+    if (allVisiblePendingSelected) {
+      setSelectedPendingIds((prev) => prev.filter((id) => !visiblePendingStudentIds.includes(id)));
+    } else {
+      setSelectedPendingIds((prev) => Array.from(new Set([...prev, ...visiblePendingStudentIds])));
+    }
+  };
+
+  const handleBulkUpdateSelectedPending = (newStatus: AttendanceStatus) => {
+    const validIds = selectedPendingIds.filter((id) => !draftStatus[id]);
+    if (validIds.length === 0) return;
+
+    setDraftStatus((prev) => {
+      const next = { ...prev };
+      validIds.forEach((id) => {
+        next[id] = newStatus;
+      });
+      return next;
+    });
+    setIsSaved(false);
+    setSelectedPendingIds([]);
+    playSuccessBeep();
+
+    if (newStatus === 'Present') {
+      const attachBatchGps = (gpsData: {
+        latitude: number;
+        longitude: number;
+        accuracy: number;
+        distanceFromSchool: number;
+        isWithinBoundary: boolean;
+      }) => {
+        setStudentGpsMap((prev) => {
+          const updated = { ...prev };
+          validIds.forEach((id) => {
+            updated[id] = {
+              latitude: gpsData.latitude,
+              longitude: gpsData.longitude,
+              distanceMeters: gpsData.distanceFromSchool,
+              isLocationVerified: gpsData.isWithinBoundary,
+              accuracyMeters: gpsData.accuracy,
+            };
+          });
+          return updated;
+        });
+      };
+
+      if (currentGps) {
+        attachBatchGps(currentGps);
+      } else {
+        requestBrowserGeolocation((loc) => attachBatchGps(loc));
+      }
+    }
+
+    const statusLabel = newStatus === 'Approved_Leave' ? 'Approved Leave' : newStatus;
+    setSmsNoticeToast(
+      `✓ Updated ${validIds.length} Pending student${validIds.length === 1 ? '' : 's'} to ${statusLabel}. Click "Save Attendance" to finalize.`
+    );
+    window.setTimeout(() => setSmsNoticeToast(null), 4000);
+  };
 
   // Bulk mark all present and attach GPS location
   const handleMarkAllPresent = () => {
@@ -922,6 +1833,7 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
       next[s.id] = 'Present';
     });
     setDraftStatus(next);
+    setSelectedPendingIds([]);
     setIsSaved(false);
 
     const assignGps = (gpsData: { latitude: number; longitude: number; accuracy: number; distanceFromSchool: number; isWithinBoundary: boolean }) => {
@@ -1018,8 +1930,9 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
     }
 
     recentScannedIdsRef.current.set(student.id, now);
+    setActiveSessionScanCount((prev) => prev + 1);
 
-    // Audio & Visual Reticle Flash Feedback
+    // Audio, Haptic & Visual Reticle Flash Feedback
     playSuccessBeep();
     setFlashGreenOverlay(true);
     setTimeout(() => setFlashGreenOverlay(false), 380);
@@ -1073,34 +1986,36 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
       });
     }
 
-    // Check offline connectivity status
+    // Check offline connectivity status & persist check-in immediately into attendanceRecords
     const isRemoteOffline = isOffline || (typeof navigator !== 'undefined' && !navigator.onLine);
-    if (isRemoteOffline) {
-      const offlineRecord: AttendanceRecord = {
-        id: `offline-att-${Date.now()}-${student.id}`,
-        date: selectedDate,
-        studentId: student.id,
-        classNumber: selectedClass,
-        section: selectedSection,
-        status: 'Present',
-        academicSession: school.academicSession,
-        markedByUserId: currentUser.id,
-        markedAt: new Date().toISOString(),
-        isOfflineSynced: true,
-        remarks: 'QR Scanned (Remote / Offline Queue Cached)',
-        latitude: currentGps?.latitude,
-        longitude: currentGps?.longitude,
-        distanceFromSchoolMeters: currentGps?.distanceFromSchool,
-        isLocationVerified: currentGps?.isWithinBoundary,
-        locationAccuracyMeters: currentGps?.accuracy,
-      };
+    const scannedRecord: AttendanceRecord = {
+      id: `att-${student.id}-${selectedDate}`,
+      date: selectedDate,
+      studentId: student.id,
+      classNumber: student.classNumber || selectedClass,
+      section: student.section || selectedSection,
+      status: 'Present',
+      academicSession: school.academicSession,
+      markedByUserId: currentUser.id,
+      markedAt: new Date().toISOString(),
+      isOfflineSynced: !isRemoteOffline,
+      remarks: isRemoteOffline ? 'QR Scanned (Remote / Offline Queue Cached)' : 'QR Scanned Check-in',
+      latitude: currentGps?.latitude,
+      longitude: currentGps?.longitude,
+      distanceFromSchoolMeters: currentGps?.distanceFromSchool,
+      isLocationVerified: currentGps?.isWithinBoundary,
+      locationAccuracyMeters: currentGps?.accuracy,
+    };
 
+    onSaveAttendance([scannedRecord], []);
+
+    if (isRemoteOffline) {
       try {
         const queueKey = 'school_master_offline_attendance_queue';
         const raw = localStorage.getItem(queueKey);
         const queue: AttendanceRecord[] = raw ? JSON.parse(raw) : [];
         const filtered = queue.filter((r) => !(r.date === selectedDate && r.studentId === student.id));
-        filtered.push(offlineRecord);
+        filtered.push(scannedRecord);
         localStorage.setItem(queueKey, JSON.stringify(filtered));
       } catch (err) {
         console.warn('Failed to cache to offline attendance queue', err);
@@ -1565,10 +2480,12 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
   let absentCount = 0;
   let lateCount = 0;
   let leaveCount = 0;
+  let pendingCount = 0;
 
   classStudents.forEach((s) => {
-    const st = draftStatus[s.id] || 'Present';
-    if (st === 'Present') presentCount++;
+    const st = draftStatus[s.id];
+    if (!st) pendingCount++;
+    else if (st === 'Present') presentCount++;
     else if (st === 'Absent') absentCount++;
     else if (st === 'Late') lateCount++;
     else if (st === 'Approved_Leave') leaveCount++;
@@ -1581,9 +2498,12 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
   const isSunday = selectedDateObj.getDay() === 0;
   const holidayMatch = school.holidays.find((h) => h.date === selectedDate);
 
-  // Save Attendance
+  // Save Attendance (commits all marked students; if none marked yet, defaults class to Present on Save)
   const handleSaveAttendance = () => {
-    const newRecords: AttendanceRecord[] = classStudents.map((s) => {
+    const markedStudents = classStudents.filter((s) => Boolean(draftStatus[s.id]));
+    const studentsToCommit = markedStudents.length > 0 ? markedStudents : classStudents;
+
+    const newRecords: AttendanceRecord[] = studentsToCommit.map((s) => {
       const stStatus = draftStatus[s.id] || 'Present';
       const gps = studentGpsMap[s.id] || (stStatus === 'Present' && currentGps ? {
         latitude: currentGps.latitude,
@@ -1849,6 +2769,15 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
           </button>
           <button
             type="button"
+            onClick={handleDownloadTodaysAttendanceCsv}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700 shadow-xs transition-colors whitespace-nowrap shrink-0"
+            title={`Download CSV of ${selectedDate} recorded attendance with official school profile header`}
+          >
+            <FileSpreadsheet className="w-4 h-4" />
+            <span>Download Today's Attendance</span>
+          </button>
+          <button
+            type="button"
             onClick={handleExportAttendanceStatsCsv}
             disabled={!selectedClass}
             className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-emerald-50 text-emerald-800 hover:bg-emerald-100 border border-emerald-300 transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
@@ -2104,53 +3033,139 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
         </div>
       </div>
 
-      {/* Attendance Summary Banner */}
-      <div className="bg-gradient-to-r from-slate-900 to-indigo-950 text-white p-5 rounded-2xl shadow-sm">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      {/* Selected Date Daily Attendance Summary Card (Instant Visibility Before Scanning) */}
+      <div className="bg-gradient-to-br from-slate-900 via-[#102344] to-indigo-950 text-white p-5 rounded-2xl shadow-md border border-indigo-800/40 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span className="font-extrabold text-sm sm:text-base text-amber-300">
-                Class: {selectedClass}-{selectedSection}
+                Class {selectedClass}-{selectedSection} • Daily Status Summary
               </span>
-              <span className="text-slate-400">•</span>
-              <span className="text-xs text-slate-300 font-mono">Date: {selectedDate}</span>
-            </div>
-            <div className="mt-2 flex flex-wrap gap-4 text-xs">
-              <span className="text-slate-300">
-                Total Students: <strong className="text-white font-bold">{totalStudents}</strong>
-              </span>
-              <span className="text-emerald-400">
-                Present: <strong className="text-emerald-300 font-bold">{presentCount}</strong>
-              </span>
-              <span className="text-rose-400">
-                Absent: <strong className="text-rose-300 font-bold">{absentCount}</strong>
-              </span>
-              <span className="text-amber-400">
-                Late: <strong className="text-amber-300 font-bold">{lateCount}</strong>
-              </span>
-              <span className="text-blue-400">
-                On Approved Leave: <strong className="text-blue-300 font-bold">{leaveCount}</strong>
+              <span className="px-2 py-0.5 rounded-full bg-white/10 border border-white/15 text-[11px] text-slate-200 font-mono">
+                {selectedDate}
               </span>
             </div>
+            <p className="text-[11px] text-slate-300 mt-1">
+              Live attendance breakdown for the selected date — review Present, Absent, and Pending students before or during QR scanning.
+            </p>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 self-start sm:self-auto">
+            <button
+              type="button"
+              onClick={handleToggleScanFeedback}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-[11px] font-bold border transition-colors ${
+                scanFeedbackEnabled
+                  ? 'bg-emerald-500/15 text-emerald-300 border-emerald-400/35 hover:bg-emerald-500/25'
+                  : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-200'
+              }`}
+              title={
+                scanFeedbackEnabled
+                  ? 'Sound & haptic feedback active on QR scan (click to mute)'
+                  : 'Sound & haptic feedback muted (click to enable)'
+              }
+            >
+              {scanFeedbackEnabled ? (
+                <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
+              ) : (
+                <VolumeX className="w-3.5 h-3.5 text-slate-400" />
+              )}
+              <span>{scanFeedbackEnabled ? 'Scan Sound & Haptics' : 'Feedback Muted'}</span>
+            </button>
+
             <div className="text-right">
               <p className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">Attendance Rate</p>
-              <p className="text-2xl font-black text-emerald-400">{attendancePercentage}%</p>
+              <p className="text-2xl font-black text-emerald-400 leading-none mt-0.5">{attendancePercentage}%</p>
             </div>
-            <div className="h-10 w-px bg-slate-800 hidden sm:block" />
-            <div className="text-xs text-slate-300">
-              {isSaved ? (
-                <span className="inline-flex items-center gap-1 text-emerald-400 font-semibold">
-                  <CheckCircle className="w-4 h-4" /> Saved
-                </span>
-              ) : (
-                <span className="inline-flex items-center gap-1 text-amber-400 font-semibold animate-pulse">
-                  <Clock className="w-4 h-4" /> Unsaved changes
-                </span>
-              )}
+          </div>
+        </div>
+
+        {/* 4 Summary Metric Cards: Total / Present / Absent / Pending */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="rounded-xl bg-white/10 border border-white/15 p-3">
+            <p className="text-[10px] uppercase tracking-wider font-bold text-slate-300">Total Students</p>
+            <p className="text-2xl font-black text-white mt-1">{totalStudents}</p>
+            <p className="text-[10px] text-slate-400 mt-0.5">
+              {totalStudents - pendingCount} marked today
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setActiveFilterChip('Present')}
+            className="text-left rounded-xl bg-emerald-500/15 hover:bg-emerald-500/20 border border-emerald-400/30 p-3 transition-colors cursor-pointer"
+          >
+            <p className="text-[10px] uppercase tracking-wider font-bold text-emerald-300 flex items-center justify-between">
+              <span>Present</span>
+              <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
+            </p>
+            <p className="text-2xl font-black text-emerald-300 mt-1">{presentCount}</p>
+            <p className="text-[10px] text-emerald-200/80 mt-0.5">
+              {lateCount > 0 ? `+ ${lateCount} Late` : 'Checked in'}
+            </p>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveFilterChip('Absent')}
+            className="text-left rounded-xl bg-rose-500/15 hover:bg-rose-500/20 border border-rose-400/30 p-3 transition-colors cursor-pointer"
+          >
+            <p className="text-[10px] uppercase tracking-wider font-bold text-rose-300 flex items-center justify-between">
+              <span>Absent</span>
+              <XCircle className="w-3.5 h-3.5 text-rose-400" />
+            </p>
+            <p className="text-2xl font-black text-rose-300 mt-1">{absentCount}</p>
+            <p className="text-[10px] text-rose-200/80 mt-0.5">
+              {leaveCount > 0 ? `+ ${leaveCount} Approved Leave` : 'Not in class'}
+            </p>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveFilterChip('Pending')}
+            className={`text-left rounded-xl p-3 border transition-colors cursor-pointer ${
+              pendingCount > 0
+                ? 'bg-amber-500/20 hover:bg-amber-500/25 border-amber-400/50 ring-1 ring-amber-400/30'
+                : 'bg-white/5 hover:bg-white/10 border-white/15'
+            }`}
+          >
+            <p className="text-[10px] uppercase tracking-wider font-bold text-amber-300 flex items-center justify-between">
+              <span>Pending</span>
+              <Clock className="w-3.5 h-3.5 text-amber-300" />
+            </p>
+            <p className="text-2xl font-black text-amber-300 mt-1">{pendingCount}</p>
+            <p className="text-[10px] text-amber-200/90 mt-0.5">
+              {pendingCount > 0 ? 'Awaiting roll-call' : 'All students marked'}
+            </p>
+          </button>
+        </div>
+
+        {/* Completion Progress Bar & Save Status */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-1">
+          <div className="flex-1 flex items-center gap-3">
+            <div className="flex-1 h-2 rounded-full bg-slate-800 overflow-hidden">
+              <div
+                className="h-full bg-gradient-to-r from-emerald-400 to-teal-400 rounded-full transition-all duration-300"
+                style={{
+                  width: `${totalStudents > 0 ? Math.round(((totalStudents - pendingCount) / totalStudents) * 100) : 0}%`,
+                }}
+              />
             </div>
+            <span className="text-[11px] font-mono text-slate-300 shrink-0">
+              {totalStudents - pendingCount}/{totalStudents} Marked
+            </span>
+          </div>
+
+          <div className="text-xs text-slate-300 shrink-0">
+            {isSaved ? (
+              <span className="inline-flex items-center gap-1 text-emerald-400 font-semibold">
+                <CheckCircle className="w-4 h-4" /> Saved for {selectedDate}
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 text-amber-300 font-semibold animate-pulse">
+                <Clock className="w-4 h-4" /> Unsaved changes
+              </span>
+            )}
           </div>
         </div>
       </div>
@@ -2615,6 +3630,17 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
           </button>
           <button
             type="button"
+            onClick={() => setActiveFilterChip('Pending')}
+            className={`px-3 py-1 rounded-xl text-xs font-bold transition-all ${
+              activeFilterChip === 'Pending'
+                ? 'bg-amber-500 text-white shadow-xs'
+                : 'bg-amber-50 text-amber-800 hover:bg-amber-100 border border-amber-200'
+            }`}
+          >
+            Pending ({pendingCount})
+          </button>
+          <button
+            type="button"
             onClick={() => setActiveFilterChip('Present')}
             className={`px-3 py-1 rounded-xl text-xs font-bold transition-all ${
               activeFilterChip === 'Present'
@@ -2649,6 +3675,20 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={() => setAutoSortPendingFirst((prev) => !prev)}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all active:scale-95 ${
+              autoSortPendingFirst
+                ? 'bg-amber-50 text-amber-800 border-amber-300 shadow-2xs'
+                : 'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'
+            }`}
+            title="Automatically keep Pending students at the top and move marked Present/Absent students to the bottom"
+          >
+            <ArrowUpDown className="w-3.5 h-3.5" />
+            <span>{autoSortPendingFirst ? 'Auto-Sort: Pending First' : 'Sort: Roll Order'}</span>
+          </button>
+
           <button
             type="button"
             onClick={() => {
@@ -2693,12 +3733,102 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
         </div>
       )}
 
+      {/* Multi-Select Pending Students Bulk Action Bar */}
+      {(selectedPendingIds.length > 0 || visiblePendingStudentIds.length > 0) && (
+        <div
+          className={`p-3.5 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-all ${
+            selectedPendingIds.length > 0
+              ? 'bg-amber-50 border-amber-300 shadow-sm'
+              : 'bg-slate-50 border-slate-200/80'
+          }`}
+        >
+          <div className="flex items-center gap-2.5 flex-wrap text-xs">
+            <button
+              type="button"
+              onClick={handleToggleSelectAllVisiblePending}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-white hover:bg-amber-100/70 text-slate-800 border border-slate-300 font-bold transition-colors cursor-pointer"
+            >
+              <ListChecks className="w-3.5 h-3.5 text-amber-600" />
+              <span>
+                {allVisiblePendingSelected
+                  ? `Deselect All Pending (${visiblePendingStudentIds.length})`
+                  : `Select All Pending (${visiblePendingStudentIds.length})`}
+              </span>
+            </button>
+
+            <span className="font-bold text-slate-700">
+              {selectedPendingIds.length > 0 ? (
+                <>
+                  <strong className="text-amber-800">{selectedPendingIds.length}</strong> Pending student
+                  {selectedPendingIds.length === 1 ? '' : 's'} selected for bulk update
+                </>
+              ) : (
+                <span className="text-slate-500 font-medium">
+                  Check Pending students below to update their attendance in a single action.
+                </span>
+              )}
+            </span>
+          </div>
+
+          {selectedPendingIds.length > 0 && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={() => handleBulkUpdateSelectedPending('Present')}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-extrabold bg-emerald-600 hover:bg-emerald-500 text-white shadow-xs transition-all active:scale-95 cursor-pointer"
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Mark Selected Present ({selectedPendingIds.length})</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleBulkUpdateSelectedPending('Absent')}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white shadow-xs transition-all active:scale-95 cursor-pointer"
+              >
+                <XCircle className="w-3.5 h-3.5" />
+                <span>Mark Absent</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleBulkUpdateSelectedPending('Late')}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-xs transition-all active:scale-95 cursor-pointer"
+              >
+                <Clock className="w-3.5 h-3.5" />
+                <span>Mark Late</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedPendingIds([])}
+                className="px-2.5 py-1.5 rounded-xl text-xs font-semibold text-slate-600 hover:text-slate-900 hover:bg-white border border-transparent hover:border-slate-200 transition-colors cursor-pointer"
+              >
+                Clear
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Student List Table */}
       <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold uppercase tracking-wider text-[11px]">
               <tr>
+                <th className="py-3.5 px-3 w-10 text-center">
+                  <input
+                    type="checkbox"
+                    checked={allVisiblePendingSelected}
+                    disabled={visiblePendingStudentIds.length === 0}
+                    onChange={handleToggleSelectAllVisiblePending}
+                    aria-label="Select all pending students"
+                    title={
+                      visiblePendingStudentIds.length > 0
+                        ? `Select all ${visiblePendingStudentIds.length} Pending student(s)`
+                        : 'No Pending students in current view'
+                    }
+                    className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 cursor-pointer disabled:opacity-40"
+                  />
+                </th>
                 <th className="py-3.5 px-4 w-14">Roll #</th>
                 <th className="py-3.5 px-4">Student Name & Admission</th>
                 <th className="py-3.5 px-4 hidden md:table-cell">Father's Name</th>
@@ -2709,16 +3839,10 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {classStudents
-                .filter((st) => {
-                  const currentSt = draftStatus[st.id] || 'Present';
-                  if (activeFilterChip === 'Present') return currentSt === 'Present';
-                  if (activeFilterChip === 'Absent') return currentSt === 'Absent';
-                  if (activeFilterChip === 'pending_sync') return !isSaved;
-                  return true;
-                })
-                .map((st, index) => {
-                  const currentSt = draftStatus[st.id] || 'Present';
+              {displayedClassStudents.map((st, index) => {
+                  const currentSt = draftStatus[st.id];
+                  const isPending = !currentSt;
+                  const isSelectedPending = isPending && selectedPendingIds.includes(st.id);
                   const stGps = studentGpsMap[st.id];
                   const isVerifiedLoc = stGps?.isLocationVerified ?? (currentGps?.isWithinBoundary ?? true);
                   const distMeters = stGps?.distanceMeters ?? (currentGps?.distanceFromSchool ?? 24);
@@ -2727,7 +3851,34 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
                   const isLowAttendance = studentAttendanceRate < 60;
 
                   return (
-                    <tr key={st.id} className="hover:bg-slate-50/80 transition-colors">
+                    <tr
+                      key={st.id}
+                      className={`transition-colors ${
+                        isSelectedPending
+                          ? 'bg-emerald-50/70 hover:bg-emerald-50'
+                          : isPending
+                          ? 'bg-amber-50/40 hover:bg-amber-50/80'
+                          : 'hover:bg-slate-50/80'
+                      }`}
+                    >
+                      <td className="py-3 px-3 text-center">
+                        {isPending ? (
+                          <input
+                            type="checkbox"
+                            checked={isSelectedPending}
+                            onChange={() => handleToggleSelectPending(st.id)}
+                            aria-label={`Select pending student ${st.fullName}`}
+                            className="w-4 h-4 rounded border-amber-400 text-emerald-600 focus:ring-emerald-500 cursor-pointer"
+                          />
+                        ) : (
+                          <span
+                            className="inline-flex items-center justify-center w-4 h-4 text-slate-300"
+                            title="Already marked"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                          </span>
+                        )}
+                      </td>
                       <td className="py-3 px-4 font-mono font-bold text-slate-800">
                         {String(st.rollNumber).padStart(2, '0')}
                       </td>
@@ -2781,7 +3932,9 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
                         <div className="flex flex-col items-center justify-center gap-1">
                           <span
                             className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold ${
-                              currentSt === 'Present'
+                              isPending
+                                ? 'bg-amber-100 text-amber-800 border border-amber-300'
+                                : currentSt === 'Present'
                                 ? 'bg-emerald-100 text-emerald-800'
                                 : currentSt === 'Absent'
                                 ? 'bg-rose-100 text-rose-800'
@@ -2790,7 +3943,7 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
                                 : 'bg-blue-100 text-blue-800'
                             }`}
                           >
-                            {currentSt === 'Approved_Leave' ? 'Leave' : currentSt}
+                            {isPending ? 'Pending' : currentSt === 'Approved_Leave' ? 'Leave' : currentSt}
                           </span>
 
                           {/* Verified Location Badge */}
@@ -2806,7 +3959,7 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
                         </div>
                       </td>
 
-                      {/* Status Toggle Switch (Green Present / Red Absent) */}
+                      {/* Status Toggle Switch (Green Present / Red Absent / Neutral Pending) */}
                       <td className="py-3 px-4 text-center">
                         <button
                           type="button"
@@ -2815,13 +3968,21 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
                             handleStatusChange(st, newStatus);
                           }}
                           className={`relative inline-flex h-6 w-12 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1 ${
-                            currentSt === 'Present' ? 'bg-emerald-500' : 'bg-rose-500'
+                            isPending
+                              ? 'bg-slate-300'
+                              : currentSt === 'Present'
+                              ? 'bg-emerald-500'
+                              : 'bg-rose-500'
                           }`}
-                          title={`Toggle between Present and Absent (Currently ${currentSt})`}
+                          title={`Toggle between Present and Absent (Currently ${isPending ? 'Pending' : currentSt})`}
                         >
                           <span
                             className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-md transition-transform ${
-                              currentSt === 'Present' ? 'translate-x-7' : 'translate-x-1'
+                              isPending
+                                ? 'translate-x-4'
+                                : currentSt === 'Present'
+                                ? 'translate-x-7'
+                                : 'translate-x-1'
                             }`}
                           />
                         </button>
@@ -3019,10 +4180,27 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
                   <Camera className="w-5 h-5 text-amber-400" />
                 </div>
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <h3 className="text-sm font-black text-white">Teacher Scanner Mode</h3>
                     <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-black bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
                       LIVE
+                    </span>
+                    <span
+                      className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-500/20 text-emerald-200 border border-emerald-400/40 shadow-xs"
+                      title="Real-time successful scans recorded during this active scanner session"
+                    >
+                      <span className="relative flex h-2 w-2">
+                        {activeSessionScanCount > 0 && (
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                        )}
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-400" />
+                      </span>
+                      <span>Successful Scans: {activeSessionScanCount}</span>
+                      {sessionSeconds >= 10 && activeSessionScanCount > 0 && (
+                        <span className="font-mono text-emerald-300/90">
+                          • {(activeSessionScanCount / (sessionSeconds / 60)).toFixed(1)}/min
+                        </span>
+                      )}
                     </span>
                   </div>
                   <p className="text-[11px] text-slate-400">Class {selectedClass}-{selectedSection} • Mobile Camera Fast Roll-Call</p>
@@ -3077,6 +4255,28 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
 
                 <button
                   type="button"
+                  onClick={handleToggleScanFeedback}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold border transition-colors ${
+                    scanFeedbackEnabled
+                      ? 'bg-emerald-900/60 hover:bg-emerald-800 text-emerald-200 border-emerald-700/60'
+                      : 'bg-slate-800 hover:bg-slate-700 text-slate-400 border-slate-700'
+                  }`}
+                  title={
+                    scanFeedbackEnabled
+                      ? 'Audio chime & haptic vibration enabled on scan'
+                      : 'Audio & haptic feedback muted'
+                  }
+                >
+                  {scanFeedbackEnabled ? (
+                    <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
+                  ) : (
+                    <VolumeX className="w-3.5 h-3.5 text-slate-400" />
+                  )}
+                  <span className="hidden sm:inline">{scanFeedbackEnabled ? 'Sound On' : 'Muted'}</span>
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => {
                     setShowQrScannerModal(false);
                     startNfcScanning();
@@ -3108,45 +4308,451 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
                 </div>
               )}
 
-              {/* TAB 1: HTML5-QRCODE ATTENDANCE SCANNER */}
-              {scannerActiveTab === 'scanner' && (
-                <AttendanceScanner
-                  students={students}
-                  classStudents={classStudents}
-                  attendanceRecords={attendanceRecords}
-                  selectedDate={selectedDate}
-                  selectedClass={selectedClass}
-                  selectedSection={selectedSection}
-                  draftStatus={draftStatus}
-                  continuousScanning={isContinuousBulkMode}
-                  onToggleContinuousScanning={setIsContinuousBulkMode}
-                  autoSync={scannerAutoSync}
-                  onToggleAutoSync={handleToggleScannerAutoSync}
-                  isOffline={isOffline}
-                  onTriggerBackgroundSync={handleScannerBackgroundSync}
-                  onScanSuccess={(student) => handleScanStudent(student)}
-                  onScanFailure={(rawText, reason) => {
-                    playErrorTone();
-                    setScanFailureLogs((prev) => [
-                      {
-                        id: `fl-${Date.now()}`,
-                        rawInput: rawText.slice(0, 60),
-                        reason,
-                        timestamp: new Date().toLocaleTimeString(),
-                      },
-                      ...prev.slice(0, 49),
-                    ]);
-                  }}
-                  onPromptSelectClass={() => {
-                    setShowQrScannerModal(false);
-                    setFabTempClass(selectedClass || school.classesOffered[0] || '5');
-                    setFabTempSection(selectedSection || 'A');
-                    setShowFabClassPrompt(true);
-                  }}
-                  cameraFacing={cameraFacing}
-                  language={language}
-                />
-              )}
+              {/* TAB 1: REAL-TIME PROGRESS SUMMARY + HTML5-QRCODE SCANNER + RECENT SCANS */}
+              {scannerActiveTab === 'scanner' && (() => {
+                const markedCount = Math.max(0, totalStudents - pendingCount);
+                const markedPct =
+                  totalStudents > 0 ? Math.round((markedCount / totalStudents) * 100) : 0;
+
+                const renderRecentScanRow = (item: (typeof filteredRecentCheckInsAll)[number]) => {
+                  const rowKey = `${item.id}-${item.date}`;
+                  const isEditingRow = editingRecentScanKey === rowKey;
+                  return (
+                    <div
+                      key={rowKey}
+                      className="px-3.5 py-2.5 space-y-2 hover:bg-slate-800/40 transition-colors"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <CheckCircle2
+                            className={`w-4 h-4 shrink-0 ${
+                              item.status === 'Present'
+                                ? 'text-emerald-400'
+                                : item.status === 'Absent'
+                                ? 'text-rose-400'
+                                : item.status === 'Late'
+                                ? 'text-amber-400'
+                                : 'text-blue-400'
+                            }`}
+                          />
+                          <div className="min-w-0">
+                            <div className="text-xs font-bold text-white truncate">
+                              {item.studentName}
+                            </div>
+                            <div className="text-[10px] text-slate-400 font-mono truncate">
+                              {item.classNumber ? `Class ${item.classNumber}-${item.section}` : 'Class N/A'}
+                              {item.rollNumber !== undefined ? ` • Roll #${item.rollNumber}` : ''}
+                              {` • ${item.admissionNumber}`}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
+                          <span className="inline-flex items-center gap-1 text-[10px] font-mono text-slate-300 bg-slate-800/90 px-2 py-0.5 rounded-md border border-slate-700">
+                            <Clock className="w-3 h-3 text-slate-400" />
+                            <span>{item.timestampLabel}</span>
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 rounded-md text-[10px] font-bold border ${
+                              item.status === 'Present'
+                                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                                : item.status === 'Absent'
+                                ? 'bg-rose-500/20 text-rose-300 border-rose-500/30'
+                                : item.status === 'Late'
+                                ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                                : 'bg-blue-500/20 text-blue-300 border-blue-500/30'
+                            }`}
+                          >
+                            {item.status === 'Approved_Leave' ? 'Leave' : item.status}
+                          </span>
+                          {canEditRecentScans && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (isEditingRow) {
+                                  setEditingRecentScanKey(null);
+                                  setEditingRecentScanReason('');
+                                } else {
+                                  setEditingRecentScanKey(rowKey);
+                                  setEditingRecentScanStatus(item.status);
+                                  setEditingRecentScanReason('');
+                                }
+                              }}
+                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold border transition-colors ${
+                                isEditingRow
+                                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                                  : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
+                              }`}
+                              title="Correct this scan's attendance status"
+                            >
+                              <Edit3 className="w-3 h-3" />
+                              <span>Edit</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Inline Admin Status Correction Editor */}
+                      {isEditingRow && canEditRecentScans && (
+                        <div className="p-2.5 rounded-xl bg-slate-900 border border-indigo-500/40 space-y-2">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="text-[10px] font-bold text-indigo-300 uppercase tracking-wider">
+                              Correct Attendance Status
+                            </span>
+                            <div className="flex items-center gap-1 flex-wrap">
+                              {(
+                                [
+                                  { value: 'Present', label: 'Present' },
+                                  { value: 'Absent', label: 'Absent' },
+                                  { value: 'Late', label: 'Late' },
+                                  { value: 'Approved_Leave', label: 'Leave' },
+                                ] as Array<{ value: AttendanceStatus; label: string }>
+                              ).map((opt) => (
+                                <button
+                                  key={opt.value}
+                                  type="button"
+                                  onClick={() => setEditingRecentScanStatus(opt.value)}
+                                  className={`px-2 py-1 rounded-lg text-[10px] font-bold border transition-colors ${
+                                    editingRecentScanStatus === opt.value
+                                      ? 'bg-indigo-600 text-white border-indigo-500'
+                                      : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+                                  }`}
+                                >
+                                  {opt.label}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                            <input
+                              type="text"
+                              value={editingRecentScanReason}
+                              onChange={(e) => setEditingRecentScanReason(e.target.value)}
+                              placeholder="Reason for correction (optional, logged in audit trail)..."
+                              className="flex-1 px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-[11px] text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                            />
+                            <div className="flex items-center gap-1.5 justify-end">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingRecentScanKey(null);
+                                  setEditingRecentScanReason('');
+                                }}
+                                className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-bold"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleSaveRecentScanEdit(item)}
+                                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold"
+                              >
+                                <Save className="w-3 h-3" />
+                                <span>Save</span>
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                };
+
+                return (
+                <div className="space-y-4">
+                  {/* Real-Time Scanner Enrollment Progress Summary Card */}
+                  <div className="rounded-2xl bg-gradient-to-r from-indigo-950/90 via-slate-900 to-emerald-950/60 border border-indigo-500/30 p-3.5 space-y-2.5 shadow-md">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-400/30 flex items-center justify-center shrink-0">
+                          <TrendingUp className="w-4 h-4 text-emerald-400" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-sm font-black text-white">
+                              {markedPct}% of students marked
+                            </span>
+                            <span className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-slate-800 text-slate-300 border border-slate-700">
+                              {markedCount} / {totalStudents} enrolled
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-400">
+                            Class {selectedClass}-{selectedSection} • {selectedDate} Live Roll-Call Progress
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Real-time Successful Scan Count Throughput Badge */}
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-[11px] font-extrabold bg-emerald-500/15 text-emerald-300 border border-emerald-400/35"
+                          title="Live count of successful QR check-ins recorded in this scanner session"
+                        >
+                          <Zap className="w-3.5 h-3.5 text-amber-300" />
+                          <span>Successful Scan Count: {activeSessionScanCount}</span>
+                        </span>
+                        {activeSessionScanCount > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => setActiveSessionScanCount(0)}
+                            className="px-2 py-1 rounded-lg text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-colors"
+                            title="Reset active session scan counter"
+                          >
+                            Reset
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="w-full h-2.5 rounded-full bg-slate-800/90 overflow-hidden border border-slate-700/60">
+                      <div
+                        className="h-full bg-gradient-to-r from-emerald-500 via-teal-400 to-cyan-400 rounded-full transition-all duration-300"
+                        style={{ width: `${markedPct}%` }}
+                      />
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                      <div className="flex items-center gap-3 flex-wrap">
+                        <span className="text-emerald-300 font-bold">
+                          Present: <strong className="font-mono">{presentCount}</strong>
+                        </span>
+                        <span className="text-rose-300 font-bold">
+                          Absent: <strong className="font-mono">{absentCount}</strong>
+                        </span>
+                        <span className="text-amber-300 font-bold">
+                          Pending: <strong className="font-mono">{pendingCount}</strong>
+                        </span>
+                        {lateCount > 0 && (
+                          <span className="text-orange-300 font-bold">
+                            Late: <strong className="font-mono">{lateCount}</strong>
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-[10px] font-mono text-slate-400">
+                        {pendingCount === 0 && totalStudents > 0
+                          ? '✓ Class roll-call complete'
+                          : `${pendingCount} remaining to scan`}
+                      </span>
+                    </div>
+                  </div>
+
+                  <AttendanceScanner
+                    students={students}
+                    classStudents={classStudents}
+                    attendanceRecords={attendanceRecords}
+                    selectedDate={selectedDate}
+                    selectedClass={selectedClass}
+                    selectedSection={selectedSection}
+                    draftStatus={draftStatus}
+                    continuousScanning={isContinuousBulkMode}
+                    onToggleContinuousScanning={setIsContinuousBulkMode}
+                    autoSync={scannerAutoSync}
+                    onToggleAutoSync={handleToggleScannerAutoSync}
+                    isOffline={isOffline}
+                    onTriggerBackgroundSync={handleScannerBackgroundSync}
+                    onScanSuccess={(student) => handleScanStudent(student)}
+                    onScanFailure={(rawText, reason) => {
+                      playErrorTone();
+                      setScanFailureLogs((prev) => [
+                        {
+                          id: `fl-${Date.now()}`,
+                          rawInput: rawText.slice(0, 60),
+                          reason,
+                          timestamp: new Date().toLocaleTimeString(),
+                        },
+                        ...prev.slice(0, 49),
+                      ]);
+                    }}
+                    onPromptSelectClass={() => {
+                      setShowQrScannerModal(false);
+                      setFabTempClass(selectedClass || school.classesOffered[0] || '5');
+                      setFabTempSection(selectedSection || 'A');
+                      setShowFabClassPrompt(true);
+                    }}
+                    cameraFacing={cameraFacing}
+                    language={language}
+                  />
+
+                  {/* Recent Scans List (Date/Class Filter, Session/Period Grouping, Excel & PDF Export, Inline Admin Edit) */}
+                  <div className="rounded-2xl bg-slate-900/90 border border-slate-700/80 p-4 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <div className="w-7 h-7 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center shrink-0">
+                          <ListChecks className="w-4 h-4 text-emerald-400" />
+                        </div>
+                        <div>
+                          <h4 className="text-xs font-bold text-white tracking-wide">
+                            Recent Scans
+                          </h4>
+                          <p className="text-[11px] text-slate-400">
+                            Filter by date/class, group by Session or Period, edit status, or archive to Excel/PDF
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="px-2 py-1 rounded-lg text-[10px] font-bold bg-slate-800 text-emerald-300 border border-slate-700">
+                          {recentScanGroupBy === 'none'
+                            ? `${recentCheckInsFromRecords.length} of ${filteredRecentCheckInsAll.length} Shown`
+                            : `${groupedRecentCheckIns.length} Slot${groupedRecentCheckIns.length === 1 ? '' : 's'} • ${Math.min(25, filteredRecentCheckInsAll.length)}/${filteredRecentCheckInsAll.length}`}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={filteredRecentCheckInsAll.length === 0 || isExportingRecentScansExcel}
+                          onClick={handleExportAllRecentScansExcel}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white shadow-xs transition-colors"
+                          title="Download the full list of recent scans as a formatted Excel (.xlsx) archive"
+                        >
+                          <FileSpreadsheet className="w-3.5 h-3.5" />
+                          <span>
+                            {isExportingRecentScansExcel
+                              ? 'Exporting...'
+                              : `Download All Recent Scans (${filteredRecentCheckInsAll.length})`}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={recentCheckInsFromRecords.length === 0 || isExportingRecentScansPdf}
+                          onClick={handleExportRecentScansPdf}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white shadow-xs transition-colors"
+                          title="Download Recent Scans summary as a printable PDF"
+                        >
+                          <FileText className="w-3.5 h-3.5" />
+                          <span>{isExportingRecentScansPdf ? 'Exporting...' : 'Download PDF'}</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Filter Bar: Date & Class Group */}
+                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 pt-1">
+                      <div className="sm:col-span-5 flex items-center gap-1.5 bg-slate-950/70 border border-slate-800 rounded-xl px-2.5 py-1.5">
+                        <Calendar className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                        <input
+                          type="date"
+                          value={recentScanDateFilter}
+                          onChange={(e) => setRecentScanDateFilter(e.target.value)}
+                          aria-label="Filter recent scans by date"
+                          className="w-full bg-transparent text-[11px] text-slate-200 focus:outline-none [color-scheme:dark]"
+                        />
+                        {recentScanDateFilter && (
+                          <button
+                            type="button"
+                            onClick={() => setRecentScanDateFilter('')}
+                            className="text-slate-400 hover:text-white"
+                            title="Clear date filter"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="sm:col-span-5 flex items-center gap-1.5 bg-slate-950/70 border border-slate-800 rounded-xl px-2.5 py-1.5">
+                        <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                        <select
+                          value={recentScanClassFilter}
+                          onChange={(e) => setRecentScanClassFilter(e.target.value)}
+                          aria-label="Filter recent scans by class group"
+                          className="w-full bg-slate-950 text-[11px] font-semibold text-slate-200 focus:outline-none"
+                        >
+                          <option value="ALL">All Class Groups</option>
+                          {recentScanClassGroupOptions.map((grp) => (
+                            <option key={grp} value={grp}>
+                              Class {grp}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="sm:col-span-2 flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (recentScanDateFilter || recentScanClassFilter !== 'ALL') {
+                              setRecentScanDateFilter('');
+                              setRecentScanClassFilter('ALL');
+                            } else {
+                              setRecentScanDateFilter(selectedDate);
+                              setRecentScanClassFilter(`${selectedClass}-${selectedSection}`);
+                            }
+                          }}
+                          className="w-full px-2 py-1.5 rounded-xl text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors whitespace-nowrap"
+                          title={
+                            recentScanDateFilter || recentScanClassFilter !== 'ALL'
+                              ? 'Reset filters'
+                              : 'Filter to current date & class'
+                          }
+                        >
+                          {recentScanDateFilter || recentScanClassFilter !== 'ALL' ? 'Reset' : 'Today'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Optional Grouping View Switcher: Flat List | By Session | By Period */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                        <Layers className="w-3 h-3 text-indigo-400" />
+                        <span>View Mode:</span>
+                      </span>
+                      <div className="inline-flex rounded-xl bg-slate-950 p-1 border border-slate-800 text-[10px] font-bold">
+                        {(
+                          [
+                            { id: 'none', label: 'Flat List (Top 5)' },
+                            { id: 'session', label: 'Group by Session' },
+                            { id: 'period', label: 'Group by Period' },
+                          ] as const
+                        ).map((mode) => (
+                          <button
+                            key={mode.id}
+                            type="button"
+                            onClick={() => setRecentScanGroupBy(mode.id)}
+                            className={`px-2.5 py-1 rounded-lg transition-all ${
+                              recentScanGroupBy === mode.id
+                                ? 'bg-indigo-600 text-white shadow-xs'
+                                : 'text-slate-400 hover:text-white'
+                            }`}
+                          >
+                            {mode.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {filteredRecentCheckInsAll.length === 0 ? (
+                      <div className="py-5 text-center rounded-xl bg-slate-950/60 border border-slate-800 text-xs text-slate-400">
+                        No matching attendance scans found for the selected filter. Adjust date/class filters or scan a student QR code.
+                      </div>
+                    ) : recentScanGroupBy === 'none' ? (
+                      <div className="divide-y divide-slate-800/80 rounded-xl overflow-hidden border border-slate-800 bg-slate-950/50">
+                        {recentCheckInsFromRecords.map((item) => renderRecentScanRow(item))}
+                      </div>
+                    ) : (
+                      <div className="space-y-2.5">
+                        {groupedRecentCheckIns.map((group) => (
+                          <div
+                            key={group.slotName}
+                            className="rounded-xl overflow-hidden border border-slate-800 bg-slate-950/60"
+                          >
+                            <div className="px-3.5 py-2 bg-slate-800/80 border-b border-slate-700/80 flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <Clock className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+                                <span className="text-[11px] font-extrabold text-amber-200 truncate">
+                                  {group.slotName}
+                                </span>
+                              </div>
+                              <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-bold bg-indigo-500/20 text-indigo-200 border border-indigo-400/30 shrink-0">
+                                {group.items.length} scan{group.items.length === 1 ? '' : 's'}
+                              </span>
+                            </div>
+                            <div className="divide-y divide-slate-800/80">
+                              {group.items.map((item) => renderRecentScanRow(item))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                );
+              })()}
 
               {/* TAB 2: ATTENDANCE SCANNING HISTORY LOG (Last 20 Scans with Photo Thumbnail) */}
               {scannerActiveTab === 'history' && (

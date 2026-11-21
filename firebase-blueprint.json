@@ -169,6 +169,192 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "name", "columnsCount", "isDefault", "createdByUid", "createdAt", "updatedAt"]
+    },
+    "JkepmAppraisalSubmission": {
+      "title": "JkepmAppraisalSubmission",
+      "description": "Teacher JKEPM Quarterly Self-Assessment & Appraisal report linked to updated CPIS Code.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "teacherId": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "teacherName": { "type": "string", "minLength": 2, "maxLength": 140 },
+        "employeeId": { "type": "string", "minLength": 2, "maxLength": 64 },
+        "cpisCode": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "previousCpisCode": { "type": "string", "maxLength": 40 },
+        "designation": { "type": "string", "maxLength": 140 },
+        "schoolName": { "type": "string", "maxLength": 180 },
+        "schoolUdiseCode": { "type": "string", "maxLength": 32 },
+        "academicSession": { "type": "string", "maxLength": 32 },
+        "quarter": {
+          "type": "string",
+          "enum": ["Q1 (Apr - Jun)", "Q2 (Jul - Sep)", "Q3 (Oct - Dec)", "Q4 (Jan - Mar)"]
+        },
+        "reportingPeriod": { "type": "string", "maxLength": 80 },
+        "status": {
+          "type": "string",
+          "enum": ["Draft", "Submitted", "Returned_For_Correction", "Recommended_By_HOI", "Approved", "Rejected"]
+        },
+        "totalWorkingDays": { "type": "integer" },
+        "totalDaysAttended": { "type": "integer" },
+        "totalLeaveDays": { "type": "integer" },
+        "attendancePercentage": { "type": "number" },
+        "selfAssessmentScore": { "type": "number" },
+        "hoiRemarks": { "type": "string", "maxLength": 1000 },
+        "districtRemarks": { "type": "string", "maxLength": 1000 },
+        "createdByUid": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "teacherId",
+        "teacherName",
+        "employeeId",
+        "cpisCode",
+        "schoolUdiseCode",
+        "academicSession",
+        "quarter",
+        "status",
+        "createdByUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CpisCodeMigration": {
+      "title": "CpisCodeMigration",
+      "description": "Authorized CPIS Code update and immutable audit record preserving legacy CPIS codes.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "teacherId": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "teacherName": { "type": "string", "minLength": 2, "maxLength": 140 },
+        "schoolUdiseCode": { "type": "string", "maxLength": 32 },
+        "oldCpisCode": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "newCpisCode": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "status": { "type": "string", "enum": ["Pending_Verification", "Approved", "Rejected"] },
+        "requestedByUid": { "type": "string", "maxLength": 128 },
+        "requestedByName": { "type": "string", "maxLength": 140 },
+        "verifiedByName": { "type": "string", "maxLength": 140 },
+        "remarks": { "type": "string", "maxLength": 600 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "teacherId",
+        "teacherName",
+        "oldCpisCode",
+        "newCpisCode",
+        "status",
+        "requestedByUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "TeacherLeaveRecord": {
+      "title": "TeacherLeaveRecord",
+      "description": "Complete Teacher Leave Application record supporting Casual & Medical Leave, document metadata, Headmaster review/approval/rejection, and soft-deletion audit status.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "teacherId": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "employeeId": { "type": "string", "minLength": 2, "maxLength": 64 },
+        "teacherName": { "type": "string", "minLength": 2, "maxLength": 140 },
+        "leaveType": {
+          "type": "string",
+          "enum": ["Casual_Leave", "Medical_Leave", "Earned_Leave", "Special_Duty", "Maternity_Paternity"]
+        },
+        "applicationDate": { "type": "string", "maxLength": 32 },
+        "startDate": { "type": "string", "maxLength": 32 },
+        "endDate": { "type": "string", "maxLength": 32 },
+        "totalDays": { "type": "integer" },
+        "reason": { "type": "string", "minLength": 2, "maxLength": 1000 },
+        "supportingDocName": { "type": "string", "maxLength": 200 },
+        "medicalDocumentUrl": { "type": "string", "maxLength": 500 },
+        "status": {
+          "type": "string",
+          "enum": ["Pending", "Under_Review", "Approved", "Rejected"]
+        },
+        "headmasterRemarks": { "type": "string", "maxLength": 1000 },
+        "rejectionReason": { "type": "string", "maxLength": 1000 },
+        "approvedBy": { "type": "string", "maxLength": 140 },
+        "approvalDate": { "type": "string", "maxLength": 32 },
+        "deletedStatus": { "type": "string", "enum": ["Active", "Deleted"] },
+        "deletedBy": { "type": "string", "maxLength": 140 },
+        "deletionReason": { "type": "string", "maxLength": 500 },
+        "createdByUid": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "teacherId",
+        "employeeId",
+        "teacherName",
+        "leaveType",
+        "applicationDate",
+        "startDate",
+        "endDate",
+        "totalDays",
+        "reason",
+        "status",
+        "deletedStatus",
+        "createdByUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "TeacherAttendanceEntry": {
+      "title": "TeacherAttendanceEntry",
+      "description": "Date-wise teacher daily attendance and service register record storing Arrival Time, Departure Time, Designation, Attendance Status, Remarks by HOI, and update metadata.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "date": { "type": "string", "minLength": 4, "maxLength": 32 },
+        "teacherId": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "employeeId": { "type": "string", "minLength": 2, "maxLength": 64 },
+        "teacherName": { "type": "string", "minLength": 2, "maxLength": 140 },
+        "designation": { "type": "string", "maxLength": 140 },
+        "status": {
+          "type": "string",
+          "enum": [
+            "Present",
+            "Absent",
+            "Casual Leave (CL)",
+            "Medical Leave (ML)",
+            "On Duty (OD)",
+            "Half Day",
+            "Late Arrival",
+            "Other",
+            "Late",
+            "On_Duty",
+            "Leave",
+            "On Leave",
+            "Official Duty",
+            "Holiday",
+            "Weekly Off"
+          ]
+        },
+        "checkInTime": { "type": "string", "maxLength": 32 },
+        "checkOutTime": { "type": "string", "maxLength": 32 },
+        "remarks": { "type": "string", "maxLength": 1000 },
+        "remarksByHoi": { "type": "string", "maxLength": 1000 },
+        "updatedBy": { "type": "string", "maxLength": 140 },
+        "createdByUid": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "date",
+        "teacherId",
+        "employeeId",
+        "teacherName",
+        "status",
+        "createdByUid",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -207,6 +393,22 @@
     "/excelMappingSchemas/{schemaId}": {
       "schema": { "$ref": "#/entities/ExcelMappingSchema" },
       "description": "Saved custom Excel template column mapping schemas defined by school administrators."
+    },
+    "/jkepmSubmissions/{submissionId}": {
+      "schema": { "$ref": "#/entities/JkepmAppraisalSubmission" },
+      "description": "JKEPM Quarterly Self-Assessment & Appraisal reports with class teaching, timetable, leave orders, and HOI verification."
+    },
+    "/cpisMigrations/{migrationId}": {
+      "schema": { "$ref": "#/entities/CpisCodeMigration" },
+      "description": "Controlled CPIS Code migration records maintaining old-to-new CPIS audit trails."
+    },
+    "/teacherLeaves/{leaveId}": {
+      "schema": { "$ref": "#/entities/TeacherLeaveRecord" },
+      "description": "Teacher Casual & Medical Leave applications with Headmaster Review/Approve/Reject workflow and audit soft-deletion."
+    },
+    "/teacherAttendance/{recordId}": {
+      "schema": { "$ref": "#/entities/TeacherAttendanceEntry" },
+      "description": "Date-wise teacher daily attendance and service register entries with Arrival/Departure times, Designation, Attendance Status, and HOI Remarks."
     }
   }
 }

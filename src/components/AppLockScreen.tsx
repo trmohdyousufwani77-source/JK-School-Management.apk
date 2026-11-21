@@ -15,6 +15,9 @@ import {
 } from 'lucide-react';
 import { Language, translations } from '../utils/translations';
 import { SchoolProfile, User } from '../types';
+import { formatSchoolAddressOnce } from '../utils/calculations';
+import { SchoolEmblem } from './SchoolEmblem';
+import { AndroidAppDownloadCard } from './AndroidAppDownloadCard';
 
 interface AppLockScreenProps {
   isLocked: boolean;
@@ -185,15 +188,26 @@ export const AppLockScreen: React.FC<AppLockScreenProps> = ({
         <div className="absolute -top-24 -left-24 w-48 h-48 bg-indigo-500/20 rounded-full blur-3xl pointer-events-none" />
         <div className="absolute -bottom-24 -right-24 w-48 h-48 bg-emerald-500/20 rounded-full blur-3xl pointer-events-none" />
 
-        {/* School Header Badge */}
-        <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-amber-500 via-orange-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-indigo-950/60 ring-2 ring-amber-400/30 mb-3">
-          <School className="w-7 h-7 text-white" />
+        {/* Official School Logo (Clear, Uncropped, Well-Spaced) */}
+        <div className="w-20 h-20 rounded-2xl bg-white border-2 border-amber-400 flex items-center justify-center shadow-lg shadow-indigo-950/60 p-2 mb-3.5 shrink-0 overflow-hidden">
+          {school.logoDataUrl ? (
+            <img
+              src={school.logoDataUrl}
+              alt={`${school.name} Official Logo`}
+              className="max-w-full max-h-full w-auto h-auto object-contain"
+            />
+          ) : (
+            <SchoolEmblem size={64} />
+          )}
         </div>
 
         <h2 className="text-lg font-extrabold text-center bg-gradient-to-r from-amber-200 via-white to-orange-200 bg-clip-text text-transparent">
           {language === 'ur' ? (school.nameUrdu || school.name) : school.name}
         </h2>
-        <p className="text-xs text-slate-400 mt-0.5 text-center flex items-center gap-1.5">
+        <p className="text-[11px] text-slate-300 mt-0.5 text-center font-medium">
+          {formatSchoolAddressOnce(school)}
+        </p>
+        <p className="text-xs text-slate-400 mt-1 text-center flex items-center gap-1.5">
           <Lock className="w-3.5 h-3.5 text-amber-400" />
           <span>
             {language === 'ur'
@@ -422,6 +436,9 @@ export const AppLockScreen: React.FC<AppLockScreenProps> = ({
             </button>
           </form>
         )}
+
+        {/* Direct Android App Download on Login / Lock Screen */}
+        <AndroidAppDownloadCard variant="login" className="mt-5" />
 
       </div>
     </div>

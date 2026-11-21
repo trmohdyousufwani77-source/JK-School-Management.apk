@@ -143,6 +143,72 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
     () => activeStudentsList[0]?.id || ''
   );
   const [individualExportBusy, setIndividualExportBusy] = useState<'pdf' | 'jpeg' | null>(null);
+  const [editingExportBusy, setEditingExportBusy] = useState<'pdf' | 'jpeg' | null>(null);
+
+  // Always keep ID card design synced with the centralized Official School Logo & signatures in SchoolProfile
+  const effectiveDesignConfig = useMemo<IdCardDesignConfig>(
+    () => ({
+      ...designConfig,
+      schoolLogoDataUrl: school.logoDataUrl || undefined,
+      principalSignatureDataUrl:
+        school.headmasterSignatureDataUrl || designConfig.principalSignatureDataUrl,
+      schoolStampDataUrl: school.officialStampDataUrl || designConfig.schoolStampDataUrl,
+    }),
+    [
+      designConfig,
+      school.logoDataUrl,
+      school.headmasterSignatureDataUrl,
+      school.officialStampDataUrl,
+    ]
+  );
+
+  const syncedEditingCard = useMemo<SchoolIdCardRecord>(
+    () => ({
+      ...editingCard,
+      schoolName: editingCard.schoolName || school.name,
+      schoolLogoDataUrl: school.logoDataUrl || undefined,
+      principalSignatureDataUrl:
+        school.headmasterSignatureDataUrl || editingCard.principalSignatureDataUrl,
+      schoolStampDataUrl: school.officialStampDataUrl || editingCard.schoolStampDataUrl,
+    }),
+    [editingCard, school]
+  );
+
+  const handleExportSingleCard = async (
+    card: SchoolIdCardRecord,
+    format: 'pdf' | 'jpeg'
+  ) => {
+    setEditingExportBusy(format);
+    try {
+      const brandedCard: SchoolIdCardRecord = {
+        ...card,
+        schoolName: card.schoolName || school.name,
+        schoolLogoDataUrl: school.logoDataUrl || undefined,
+        principalSignatureDataUrl:
+          school.headmasterSignatureDataUrl || card.principalSignatureDataUrl,
+        schoolStampDataUrl: school.officialStampDataUrl || card.schoolStampDataUrl,
+      };
+      const safeName = (brandedCard.fullName || 'Student')
+        .replace(/[^a-zA-Z0-9]+/g, '_')
+        .replace(/^_|_$/g, '');
+      const idTag = brandedCard.admissionNumber || brandedCard.uniqueIdNumber || 'ID';
+
+      if (format === 'pdf') {
+        await exportIdCardsToPdf(
+          [brandedCard],
+          effectiveDesignConfig,
+          qrPrivacy,
+          `Smart_ID_${safeName}_${idTag}.pdf`
+        );
+        showToast(`Downloaded printable PDF Smart ID for ${brandedCard.fullName || 'Student'}.`);
+      } else {
+        await downloadIdCardAsImage(brandedCard, effectiveDesignConfig, qrPrivacy, 'jpeg');
+        showToast(`Downloaded high-resolution JPEG Smart ID for ${brandedCard.fullName || 'Student'}.`);
+      }
+    } finally {
+      setEditingExportBusy(null);
+    }
+  };
 
   const filteredIndividualStudents = useMemo(() => {
     const q = individualSearch.trim().toLowerCase();
@@ -152,7 +218,7 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
       return (
         s.fullName.toLowerCase().includes(q) ||
         s.admissionNumber.toLowerCase().includes(q) ||
-        s.rollNumber.toLowerCase().includes(q) ||
+        String(s.rollNumber).toLowerCase().includes(q) ||
         `${s.classNumber}-${s.section}`.toLowerCase().includes(q)
       );
     });
@@ -173,7 +239,7 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
     const existing = records.find(
       (r) =>
         r.category === 'student' &&
-        (r.sourceId === selectedIndividualStudent.id ||
+        (r.linkedStudentId === selectedIndividualStudent.id ||
           r.admissionNumber === selectedIndividualStudent.admissionNumber)
     );
     const syncedDesign: IdCardDesignConfig = {
@@ -847,23 +913,16 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
                     </button>
                     <button
                       type="button"
-                      onClick={() => downloadIdCardAsImage(card, designConfig, qrPrivacy, 'jpeg')}
-                      className="px-1.5 py-1 rounded border border-slate-200 hover:bg-slate-50 font-mono font-semibold text-slate-700"
-                      title="Download JPG"
+                      onClick={() => handleExportSingleCard(card, 'jpeg')}
+                      className="px-1.5 py-1 rounded border border-amber-200 bg-amber-50 hover:bg-amber-100 font-mono font-semibold text-amber-800"
+                      title="Download JPEG"
                     >
-                      JPG
+                      JPEG
                     </button>
                     <button
                       type="button"
-                      onClick={() =>
-                        exportIdCardsToPdf(
-                          [card],
-                          designConfig,
-                          qrPrivacy,
-                          `${card.uniqueIdNumber}.pdf`
-                        )
-                      }
-                      className="px-1.5 py-1 rounded border border-slate-200 hover:bg-slate-50 font-mono font-semibold text-indigo-700"
+                      onClick={() => handleExportSingleCard(card, 'pdf')}
+                      className="px-1.5 py-1 rounded border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 font-mono font-semibold text-indigo-700"
                       title="Download PDF"
                     >
                       PDF
@@ -1848,52 +1907,61 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
             </div>
           </form>
 
-          {/* Right Live Preview & Instant Downloads */}
+          {/* Right Live Preview & Instant Individual Downloads (PDF / JPEG / PNG) */}
           <div className="xl:col-span-5 bg-white rounded-2xl border border-slate-200 p-5 space-y-4 sticky top-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-xs font-extrabold uppercase tracking-wider text-slate-500">
-                Live Identity Card Preview
-              </h3>
-              <span className="text-[11px] font-mono font-bold text-slate-700">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <h3 className="text-xs font-extrabold uppercase tracking-wider text-slate-500">
+                  Live Identity Card Preview
+                </h3>
+                <p className="text-[11px] text-slate-400">
+                  Synced with official school branding &amp; centralized logo
+                </p>
+              </div>
+              <span className="text-[11px] font-mono font-bold text-slate-700 bg-slate-100 px-2 py-1 rounded-lg">
                 {editingCard.uniqueIdNumber}
               </span>
             </div>
 
             <div className="bg-slate-50 rounded-xl p-4 border border-slate-200/80 flex justify-center">
-              <IdCardPreview card={editingCard} design={designConfig} privacy={qrPrivacy} />
+              <IdCardPreview
+                card={syncedEditingCard}
+                design={effectiveDesignConfig}
+                privacy={qrPrivacy}
+              />
             </div>
 
-            <div className="grid grid-cols-3 gap-2">
+            <div className="space-y-2">
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  disabled={editingExportBusy !== null}
+                  onClick={() => handleExportSingleCard(syncedEditingCard, 'pdf')}
+                  className="py-2.5 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-xs transition-colors"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>{editingExportBusy === 'pdf' ? 'Generating PDF...' : 'Download PDF'}</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={editingExportBusy !== null}
+                  onClick={() => handleExportSingleCard(syncedEditingCard, 'jpeg')}
+                  className="py-2.5 px-3 rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-xs transition-colors"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>{editingExportBusy === 'jpeg' ? 'Generating JPEG...' : 'Download JPEG'}</span>
+                </button>
+              </div>
               <button
                 type="button"
-                onClick={() => downloadIdCardAsImage(editingCard, designConfig, qrPrivacy, 'png')}
-                className="py-2 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-bold text-slate-800 flex items-center justify-center gap-1"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span>PNG</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => downloadIdCardAsImage(editingCard, designConfig, qrPrivacy, 'jpeg')}
-                className="py-2 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-bold text-slate-800 flex items-center justify-center gap-1"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span>JPG</span>
-              </button>
-              <button
-                type="button"
+                disabled={editingExportBusy !== null}
                 onClick={() =>
-                  exportIdCardsToPdf(
-                    [editingCard],
-                    designConfig,
-                    qrPrivacy,
-                    `${editingCard.uniqueIdNumber}.pdf`
-                  )
+                  downloadIdCardAsImage(syncedEditingCard, effectiveDesignConfig, qrPrivacy, 'png')
                 }
-                className="py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold flex items-center justify-center gap-1"
+                className="w-full py-2 rounded-xl border border-slate-200 hover:bg-slate-50 text-xs font-bold text-slate-700 flex items-center justify-center gap-1.5 transition-colors"
               >
                 <Download className="w-3.5 h-3.5" />
-                <span>PDF</span>
+                <span>Download High-Res PNG</span>
               </button>
             </div>
           </div>
@@ -2631,29 +2699,29 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
             <div className="flex flex-wrap items-center justify-end gap-2">
               <button
                 type="button"
-                onClick={() => downloadIdCardAsImage(inspectedCard, designConfig, qrPrivacy, 'png')}
+                onClick={() =>
+                  downloadIdCardAsImage(
+                    { ...inspectedCard, schoolLogoDataUrl: school.logoDataUrl || undefined },
+                    effectiveDesignConfig,
+                    qrPrivacy,
+                    'png'
+                  )
+                }
                 className="px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-bold text-slate-700"
               >
                 Download PNG
               </button>
               <button
                 type="button"
-                onClick={() => downloadIdCardAsImage(inspectedCard, designConfig, qrPrivacy, 'jpeg')}
-                className="px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-bold text-slate-700"
+                onClick={() => handleExportSingleCard(inspectedCard, 'jpeg')}
+                className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold"
               >
-                Download JPG
+                Download JPEG
               </button>
               <button
                 type="button"
-                onClick={() =>
-                  exportIdCardsToPdf(
-                    [inspectedCard],
-                    designConfig,
-                    qrPrivacy,
-                    `${inspectedCard.uniqueIdNumber}.pdf`
-                  )
-                }
-                className="px-3.5 py-1.5 rounded-lg bg-indigo-600 text-white text-xs font-bold"
+                onClick={() => handleExportSingleCard(inspectedCard, 'pdf')}
+                className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold"
               >
                 Download PDF
               </button>

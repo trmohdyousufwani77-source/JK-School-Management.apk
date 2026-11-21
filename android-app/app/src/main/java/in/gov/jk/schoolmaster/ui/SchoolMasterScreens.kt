@@ -194,10 +194,10 @@ fun DirectoryScreen(
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(52.dp)
+                                .size(58.dp)
                                 .clip(RoundedCornerShape(14.dp))
                                 .background(Color.White)
-                                .padding(4.dp),
+                                .padding(6.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             if (officialLogoBitmap != null) {
@@ -212,7 +212,7 @@ fun DirectoryScreen(
                                     imageVector = Icons.Rounded.School,
                                     contentDescription = "Official School Logo",
                                     tint = Color(0xFF1E1B4B),
-                                    modifier = Modifier.size(30.dp)
+                                    modifier = Modifier.size(32.dp)
                                 )
                             }
                         }
@@ -222,6 +222,13 @@ fun DirectoryScreen(
                                 style = MaterialTheme.typography.titleMedium,
                                 color = Color.White,
                                 fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Pamposh Colony, Palapora Zone, Iddgah",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFE0E7FF),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                             Text(
                                 text = "${students.size} Students • ${teachers.size} Teachers • Room Vault",
@@ -762,10 +769,10 @@ fun QrIdCardScreen(
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(44.dp)
-                                .clip(RoundedCornerShape(10.dp))
+                                .size(50.dp)
+                                .clip(RoundedCornerShape(12.dp))
                                 .background(Color.White)
-                                .padding(4.dp),
+                                .padding(5.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             if (officialLogoBitmap != null) {
@@ -780,16 +787,21 @@ fun QrIdCardScreen(
                                     imageVector = if (targetType == IdCardTargetType.STUDENT) Icons.Rounded.Person else Icons.Rounded.Badge,
                                     contentDescription = null,
                                     tint = if (targetType == IdCardTargetType.STUDENT) Color(0xFF1E1B4B) else Color(0xFF0F766E),
-                                    modifier = Modifier.size(26.dp)
+                                    modifier = Modifier.size(28.dp)
                                 )
                             }
                         }
-                        Column {
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text(
                                 text = "GOVT MIDDLE SCHOOL PAMPOSH COLONY",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = Color(0xFFE0E7FF),
                                 fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Pamposh Colony, Palapora Zone, Iddgah",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFFDE68A)
                             )
                             Text(
                                 text = if (targetType == IdCardTargetType.STUDENT) {

@@ -35,6 +35,9 @@ import {
   KeyRound,
   Power,
   Lock,
+  History,
+  Save,
+  ChevronDown,
 } from 'lucide-react';
 import {
   AdminRoleType,
@@ -42,6 +45,7 @@ import {
   TeacherProfile,
   TeacherAttendanceRecord,
   TeacherAttendanceStatus,
+  TeacherAttendanceChangeLogEntry,
   User,
   TeacherServiceRecord,
   JkEpmQuarterlyRecord,
@@ -67,6 +71,140 @@ async function hashTeacherPassword(password: string): Promise<string> {
       .join('');
   }
   return `fallback_${btoa(unescape(encodeURIComponent(salted)))}`;
+}
+
+const STANDARD_TEACHER_DESIGNATIONS: string[] = [
+  'Headmaster',
+  'In-Charge Headmaster',
+  'Master',
+  'Senior Teacher',
+  'General Line Teacher',
+  'Teacher (General Line)',
+  'ReT Teacher',
+  'RReT Teacher',
+  'Physical Education Teacher (PET)',
+  'Urdu Teacher',
+  'Science Teacher',
+  'Mathematics Teacher',
+  'Social Studies Teacher',
+];
+
+const ATTENDANCE_STATUS_OPTIONS: TeacherAttendanceStatus[] = [
+  'Present',
+  'Absent',
+  'Casual Leave (CL)',
+  'Medical Leave (ML)',
+  'On Duty (OD)',
+  'Half Day',
+  'Late Arrival',
+  'Other',
+];
+
+function parseTo24HourTime(value: string | undefined, fallback: string): string {
+  const raw = (value || '').trim();
+  if (!raw) return fallback;
+  const h24 = raw.match(/^(\d{1,2}):(\d{2})$/);
+  if (h24) {
+    return `${h24[1].padStart(2, '0')}:${h24[2]}`;
+  }
+  const h12 = raw.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (h12) {
+    let hrs = parseInt(h12[1], 10);
+    const mins = h12[2];
+    const period = h12[3].toUpperCase();
+    if (period === 'PM' && hrs < 12) hrs += 12;
+    if (period === 'AM' && hrs === 12) hrs = 0;
+    return `${String(hrs).padStart(2, '0')}:${mins}`;
+  }
+  return fallback;
+}
+
+function formatTo12HourAmPm(time24: string): string {
+  const match = (time24 || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return time24 || '09:00 AM';
+  let hrs = parseInt(match[1], 10);
+  const mins = match[2];
+  const period = hrs >= 12 ? 'PM' : 'AM';
+  hrs = hrs % 12;
+  if (hrs === 0) hrs = 12;
+  return `${String(hrs).padStart(2, '0')}:${mins} ${period}`;
+}
+
+interface AttendanceStatusVisualMeta {
+  dotClass: string;
+  badgeClass: string;
+  shortLabel: string;
+}
+
+function getAttendanceStatusMeta(status: TeacherAttendanceStatus | string): AttendanceStatusVisualMeta {
+  switch (status) {
+    case 'Present':
+      return {
+        dotClass: 'bg-emerald-500',
+        badgeClass: 'bg-emerald-50 text-emerald-800 border border-emerald-300',
+        shortLabel: 'Present',
+      };
+    case 'Absent':
+      return {
+        dotClass: 'bg-rose-500',
+        badgeClass: 'bg-rose-50 text-rose-800 border border-rose-300',
+        shortLabel: 'Absent',
+      };
+    case 'Casual Leave (CL)':
+    case 'On Leave':
+    case 'Leave':
+      return {
+        dotClass: 'bg-blue-500',
+        badgeClass: 'bg-blue-50 text-blue-800 border border-blue-300',
+        shortLabel: 'Casual Leave (CL)',
+      };
+    case 'Medical Leave (ML)':
+      return {
+        dotClass: 'bg-sky-500',
+        badgeClass: 'bg-sky-50 text-sky-800 border border-sky-300',
+        shortLabel: 'Medical Leave (ML)',
+      };
+    case 'On Duty (OD)':
+    case 'Official Duty':
+    case 'On_Duty':
+      return {
+        dotClass: 'bg-indigo-500',
+        badgeClass: 'bg-indigo-50 text-indigo-800 border border-indigo-300',
+        shortLabel: 'On Duty (OD)',
+      };
+    case 'Half Day':
+      return {
+        dotClass: 'bg-amber-500',
+        badgeClass: 'bg-amber-50 text-amber-800 border border-amber-300',
+        shortLabel: 'Half Day',
+      };
+    case 'Late Arrival':
+    case 'Late':
+      return {
+        dotClass: 'bg-orange-500',
+        badgeClass: 'bg-orange-50 text-orange-800 border border-orange-300',
+        shortLabel: 'Late Arrival',
+      };
+    default:
+      return {
+        dotClass: 'bg-slate-500',
+        badgeClass: 'bg-slate-100 text-slate-800 border border-slate-300',
+        shortLabel: String(status || 'Other'),
+      };
+  }
+}
+
+function getAttendanceStatusBadgeStyle(status: TeacherAttendanceStatus): string {
+  return getAttendanceStatusMeta(status).badgeClass;
+}
+
+function escapeCsvCell(value: unknown): string {
+  const raw = value === null || value === undefined ? '' : String(value);
+  const safe = /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
+  if (/[",\r\n]/.test(safe)) {
+    return `"${safe.replace(/"/g, '""')}"`;
+  }
+  return safe;
 }
 
 interface TeacherManagementProps {
@@ -401,6 +539,20 @@ export const TeacherManagement: React.FC<TeacherManagementProps> = ({
     e.preventDefault();
     if (!name.trim() || !empId.trim() || !isAdminUser) return;
 
+    const normalizedNewCpis = empId.trim().replace(/\s+/g, ' ').toUpperCase();
+    const compactNewCpis = normalizedNewCpis.replace(/[^A-Z0-9]/g, '');
+    const duplicateHolder = teachers.find(
+      (tc) =>
+        tc.id !== editingTeacher?.id &&
+        (tc.employeeId || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase() === compactNewCpis
+    );
+    if (duplicateHolder) {
+      showToast(
+        `Duplicate CPIS Code "${normalizedNewCpis}" blocked — already assigned to ${duplicateHolder.name}.`
+      );
+      return;
+    }
+
     // J&K CSR 60-Year Superannuation Date
     const retInfo = calculateJKRetirementDate(dob);
     const computedPasswordHash = passwordInput.trim()
@@ -408,9 +560,14 @@ export const TeacherManagement: React.FC<TeacherManagementProps> = ({
       : editingTeacher?.passwordHash;
 
     if (editingTeacher) {
+      const cpisChanged =
+        (editingTeacher.employeeId || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase() !== compactNewCpis;
       const updated: TeacherProfile = {
         ...editingTeacher,
-        employeeId: empId,
+        employeeId: normalizedNewCpis,
+        previousCpisCode: cpisChanged
+          ? editingTeacher.employeeId
+          : editingTeacher.previousCpisCode,
         name: name.trim(),
         fatherName: fatherName.trim(),
         fatherSpouseName: fatherName.trim(),
@@ -710,7 +867,8 @@ export const TeacherManagement: React.FC<TeacherManagementProps> = ({
       'Attendance Status',
       'Arrival Time',
       'Departure Time',
-      'Remarks',
+      'Remarks by HOI',
+      'Last Updated By',
       'Campus Geofence Verification',
     ];
 
@@ -720,17 +878,18 @@ export const TeacherManagement: React.FC<TeacherManagementProps> = ({
         attendanceDate,
         tc.employeeId,
         tc.name,
-        tc.designation,
-        rec?.status || 'Pending / Unmarked',
+        rec?.designation || tc.designation,
+        rec?.status || 'Present',
         rec?.checkInTime || '09:00 AM',
         rec?.checkOutTime || '04:00 PM',
-        rec?.remarks || 'Routine academic duty',
+        rec?.remarksByHoi ?? rec?.remarks ?? tc.latestHoiRemarks ?? '',
+        rec?.updatedBy || '—',
         rec?.checkInLocation?.isWithinGeofence ? 'Verified On-Campus' : 'Standard Manual Roll',
       ];
     });
 
     const ws = XLSX.utils.aoa_to_sheet([
-      [`${school.name} - DAILY FACULTY ATTENDANCE REGISTER`],
+      [`${school.name} - DAILY FACULTY ATTENDANCE & SERVICE REGISTER`],
       [`Date: ${attendanceDate} | District: ${school.district || 'Srinagar'}, J&K | School: ${school.name}`],
       [],
       headers,
@@ -743,22 +902,339 @@ export const TeacherManagement: React.FC<TeacherManagementProps> = ({
     showToast(`Daily Faculty Attendance for ${attendanceDate} exported!`);
   };
 
+  // Export Structured CSV of Teacher Attendance History & Service Book Records
+  const exportTeacherAttendanceAndServiceCsv = () => {
+    const lines: string[] = [];
+    const pushRow = (cols: unknown[]) => {
+      lines.push(cols.map(escapeCsvCell).join(','));
+    };
+
+    pushRow([`${school.name} - TEACHER ATTENDANCE HISTORY & SERVICE BOOK REGISTER (CSV)`]);
+    pushRow([
+      `U-DISE: ${school.code}`,
+      `District: ${school.district || 'Srinagar'}`,
+      `Academic Session: ${school.academicSession}`,
+      `Exported On: ${new Date().toISOString().slice(0, 10)}`,
+    ]);
+    pushRow([]);
+
+    // Section 1: Service Book & Teacher Profile Records
+    pushRow(['SECTION 1: TEACHER SERVICE BOOK & PROFILE RECORDS']);
+    pushRow([
+      'Employee ID (CPIS)',
+      'Teacher Full Name',
+      'Designation',
+      'Subject Specialization',
+      'Employment Status',
+      'Employment Type',
+      'Date of Birth',
+      'Initial Appointment Date',
+      'Dept Joining Date',
+      'Present School Joining Date',
+      'Calculated Retirement Date',
+      'Casual Leave Balance',
+      'Medical Leave Balance',
+      'Earned Leave Balance',
+      'Latest Remarks by HOI',
+      'Contact Number',
+      'Residential Address',
+    ]);
+
+    teachers.forEach((tc) => {
+      const latestRec = getLatestAttendanceRecordForTeacher(tc);
+      const retDate = tc.retirementDate || calculateJKRetirementDate(tc.dob || '1984-05-15').retirementDate;
+      pushRow([
+        tc.employeeId,
+        tc.name,
+        latestRec?.designation || tc.designation,
+        tc.subjectSpecialization || 'General',
+        tc.employmentStatus || 'Regular',
+        tc.employmentType || 'Permanent (Non-Gazetted)',
+        tc.dob || '',
+        tc.dateOfInitialAppointment || '',
+        tc.dateOfJoiningDepartment || tc.dateOfJoining || '',
+        tc.dateOfJoiningPresentSchool || '',
+        retDate,
+        tc.casualLeaveBalance,
+        tc.medicalLeaveBalance,
+        tc.earnedLeaveBalance,
+        latestRec?.remarksByHoi ?? latestRec?.remarks ?? tc.latestHoiRemarks ?? '',
+        tc.contactNumber || '',
+        tc.residentialAddress || '',
+      ]);
+    });
+
+    pushRow([]);
+    // Section 2: Date-Wise Teacher Attendance History
+    pushRow(['SECTION 2: TEACHER ATTENDANCE HISTORY (DATE-WISE)']);
+    pushRow([
+      'Date',
+      'Employee ID (CPIS)',
+      'Teacher Full Name',
+      'Designation',
+      'Attendance Status',
+      'Arrival Time',
+      'Departure Time',
+      'Remarks by HOI',
+      'Last Updated By',
+      'Last Updated At',
+      'Change Log Count',
+    ]);
+
+    const sortedAttendanceHistory = [...teacherAttendance].sort((a, b) => {
+      const dateCmp = b.date.localeCompare(a.date);
+      if (dateCmp !== 0) return dateCmp;
+      return (a.teacherName || '').localeCompare(b.teacherName || '');
+    });
+
+    if (sortedAttendanceHistory.length > 0) {
+      sortedAttendanceHistory.forEach((rec) => {
+        const matchedTeacher = teachers.find((tc) => tc.id === rec.teacherId);
+        pushRow([
+          rec.date,
+          rec.employeeId || matchedTeacher?.employeeId || '',
+          rec.teacherName || matchedTeacher?.name || '',
+          rec.designation || matchedTeacher?.designation || '',
+          rec.status || 'Present',
+          rec.checkInTime || '09:00 AM',
+          rec.checkOutTime || '04:00 PM',
+          rec.remarksByHoi ?? rec.remarks ?? '',
+          rec.updatedBy || 'HOI',
+          rec.updatedAt || '',
+          rec.changeHistory ? rec.changeHistory.length : 0,
+        ]);
+      });
+    } else {
+      teachers.forEach((tc) => {
+        pushRow([
+          attendanceDate,
+          tc.employeeId,
+          tc.name,
+          tc.designation,
+          'Present',
+          '09:00 AM',
+          '04:00 PM',
+          tc.latestHoiRemarks || '',
+          currentUser.name,
+          new Date().toISOString(),
+          0,
+        ]);
+      });
+    }
+
+    const csvBlob = new Blob([`\uFEFF${lines.join('\r\n')}`], {
+      type: 'text/csv;charset=utf-8;',
+    });
+    const url = URL.createObjectURL(csvBlob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `Teacher_Attendance_Service_Records_${school.code || 'School'}_${attendanceDate}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    showToast('Teacher attendance history & service records exported as CSV!');
+  };
+
+  // Per-field inline Edit / Save / Cancel State for Attendance & Service Book Daily Register
+  type EditableAttendanceField =
+    | 'arrivalTime'
+    | 'departureTime'
+    | 'designation'
+    | 'status'
+    | 'remarksByHoi';
+
+  const [editingAttendanceField, setEditingAttendanceField] = useState<{
+    teacherId: string;
+    field: EditableAttendanceField;
+  } | null>(null);
+  const [draftArrival24, setDraftArrival24] = useState<string>('09:00');
+  const [draftDeparture24, setDraftDeparture24] = useState<string>('16:00');
+  const [draftDesignationSelect, setDraftDesignationSelect] = useState<string>('');
+  const [draftDesignationCustom, setDraftDesignationCustom] = useState<string>('');
+  const [draftAttendanceStatus, setDraftAttendanceStatus] = useState<TeacherAttendanceStatus>('Present');
+  const [draftHoiRemarks, setDraftHoiRemarks] = useState<string>('');
+  const [expandedHistoryTeacherId, setExpandedHistoryTeacherId] = useState<string | null>(null);
+  const [openStatusDropdownTeacherId, setOpenStatusDropdownTeacherId] = useState<string | null>(null);
+  const [isFilterStatusDropdownOpen, setIsFilterStatusDropdownOpen] = useState<boolean>(false);
+
+  // Service Book HOI Remarks inline editor state
+  const [isEditingServiceBookHoiRemarks, setIsEditingServiceBookHoiRemarks] = useState<boolean>(false);
+  const [serviceBookHoiRemarksDraft, setServiceBookHoiRemarksDraft] = useState<string>('');
+
+  const getAttendanceRecordForDate = (tc: TeacherProfile, dateIso: string): TeacherAttendanceRecord | undefined =>
+    teacherAttendance.find((r) => r.teacherId === tc.id && r.date === dateIso);
+
+  const getLatestAttendanceRecordForTeacher = (tc: TeacherProfile): TeacherAttendanceRecord | undefined =>
+    teacherAttendance
+      .filter((r) => r.teacherId === tc.id)
+      .sort((a, b) => b.date.localeCompare(a.date))[0];
+
+  const startEditingAttendanceField = (tc: TeacherProfile, field: EditableAttendanceField) => {
+    if (!isAdminUser) {
+      showToast('Only Head of Institution / Authorized Admin can edit attendance fields.');
+      return;
+    }
+    const rec = getAttendanceRecordForDate(tc, attendanceDate);
+    if (field === 'arrivalTime') {
+      setDraftArrival24(parseTo24HourTime(rec?.checkInTime, '09:00'));
+    } else if (field === 'departureTime') {
+      setDraftDeparture24(parseTo24HourTime(rec?.checkOutTime, '16:00'));
+    } else if (field === 'designation') {
+      const currentDesig = (rec?.designation || tc.designation || '').trim();
+      if (STANDARD_TEACHER_DESIGNATIONS.includes(currentDesig)) {
+        setDraftDesignationSelect(currentDesig);
+        setDraftDesignationCustom('');
+      } else {
+        setDraftDesignationSelect('__CUSTOM__');
+        setDraftDesignationCustom(currentDesig);
+      }
+    } else if (field === 'status') {
+      const rawStatus = rec?.status || 'Present';
+      if (rawStatus === 'On Leave' || rawStatus === 'Leave') {
+        setDraftAttendanceStatus('Casual Leave (CL)');
+      } else if (rawStatus === 'Official Duty' || rawStatus === 'On_Duty') {
+        setDraftAttendanceStatus('On Duty (OD)');
+      } else if (rawStatus === 'Late') {
+        setDraftAttendanceStatus('Late Arrival');
+      } else {
+        setDraftAttendanceStatus(rawStatus);
+      }
+    } else if (field === 'remarksByHoi') {
+      setDraftHoiRemarks(rec?.remarksByHoi ?? rec?.remarks ?? tc.latestHoiRemarks ?? '');
+    }
+    setEditingAttendanceField({ teacherId: tc.id, field });
+  };
+
+  const cancelEditingAttendanceField = () => {
+    setEditingAttendanceField(null);
+  };
+
+  const saveEditingAttendanceField = (tc: TeacherProfile, field: EditableAttendanceField) => {
+    if (!onSaveTeacherAttendance || !isAdminUser) return;
+    const existing = getAttendanceRecordForDate(tc, attendanceDate);
+    const nowIso = new Date().toISOString();
+    const actorRole = effectiveRole || currentUser.role || 'admin';
+    const baseRecord: TeacherAttendanceRecord = {
+      id: existing ? existing.id : `att-${tc.id}-${attendanceDate}`,
+      date: attendanceDate,
+      teacherId: tc.id,
+      employeeId: tc.employeeId,
+      teacherName: tc.name,
+      designation: existing?.designation || tc.designation,
+      status: existing?.status || 'Present',
+      checkInTime: existing?.checkInTime || '09:00 AM',
+      checkOutTime: existing?.checkOutTime || '04:00 PM',
+      checkInLocation: existing?.checkInLocation,
+      remarks: existing?.remarks || '',
+      remarksByHoi: existing?.remarksByHoi ?? existing?.remarks ?? tc.latestHoiRemarks ?? '',
+      changeHistory: existing?.changeHistory ? [...existing.changeHistory] : [],
+      updatedAt: nowIso,
+      updatedBy: currentUser.name,
+    };
+
+    let fieldLabel: TeacherAttendanceChangeLogEntry['field'] = 'Attendance Status';
+    let previousValue = '';
+    let newValue = '';
+
+    if (field === 'arrivalTime') {
+      fieldLabel = 'Arrival Time';
+      previousValue = baseRecord.checkInTime || 'Not Set';
+      newValue = formatTo12HourAmPm(draftArrival24);
+      baseRecord.checkInTime = newValue;
+    } else if (field === 'departureTime') {
+      fieldLabel = 'Departure Time';
+      previousValue = baseRecord.checkOutTime || 'Not Set';
+      newValue = formatTo12HourAmPm(draftDeparture24);
+      baseRecord.checkOutTime = newValue;
+    } else if (field === 'designation') {
+      const resolvedDesig =
+        draftDesignationSelect === '__CUSTOM__'
+          ? draftDesignationCustom.trim()
+          : draftDesignationSelect.trim();
+      if (!resolvedDesig) {
+        showToast('Please select or enter a valid designation before saving.');
+        return;
+      }
+      fieldLabel = 'Designation';
+      previousValue = baseRecord.designation || tc.designation;
+      newValue = resolvedDesig;
+      baseRecord.designation = resolvedDesig;
+      // Persist permanently to Teacher Profile & Service Book Register
+      onUpdateTeacher({
+        ...tc,
+        designation: resolvedDesig,
+        updatedAt: nowIso,
+      });
+    } else if (field === 'status') {
+      fieldLabel = 'Attendance Status';
+      previousValue = baseRecord.status;
+      newValue = draftAttendanceStatus;
+      baseRecord.status = draftAttendanceStatus;
+    } else if (field === 'remarksByHoi') {
+      fieldLabel = 'Remarks by HOI';
+      previousValue = (baseRecord.remarksByHoi || '').trim() || '—';
+      newValue = draftHoiRemarks.trim();
+      baseRecord.remarksByHoi = newValue;
+      baseRecord.remarks = newValue;
+      // Sync latest HOI remarks to Teacher Profile & Service Book Register
+      onUpdateTeacher({
+        ...tc,
+        latestHoiRemarks: newValue,
+        latestHoiRemarksUpdatedAt: nowIso,
+        updatedAt: nowIso,
+      });
+    }
+
+    const logEntry: TeacherAttendanceChangeLogEntry = {
+      id: `chg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      field: fieldLabel,
+      previousValue,
+      newValue: newValue || '—',
+      changedBy: currentUser.name,
+      changedByRole: actorRole,
+      changedAt: nowIso,
+    };
+
+    baseRecord.changeHistory = [logEntry, ...(baseRecord.changeHistory || [])].slice(0, 50);
+    onSaveTeacherAttendance(baseRecord);
+    setEditingAttendanceField(null);
+    showToast(`${fieldLabel} saved for ${tc.name} (${attendanceDate})!`);
+  };
+
   // Bulk Mark All Present
   const handleBulkMarkAllPresent = () => {
     if (!onSaveTeacherAttendance) return;
+    const nowIso = new Date().toISOString();
     let count = 0;
     teachers.forEach((tc) => {
+      const existing = getAttendanceRecordForDate(tc, attendanceDate);
       const rec: TeacherAttendanceRecord = {
-        id: `att-${tc.id}-${attendanceDate}`,
+        id: existing ? existing.id : `att-${tc.id}-${attendanceDate}`,
         date: attendanceDate,
         teacherId: tc.id,
         employeeId: tc.employeeId,
         teacherName: tc.name,
-        designation: tc.designation,
+        designation: existing?.designation || tc.designation,
         status: 'Present',
-        checkInTime: '09:00 AM',
-        checkOutTime: '04:00 PM',
-        remarks: 'Bulk marked Present by HOI',
+        checkInTime: existing?.checkInTime || '09:00 AM',
+        checkOutTime: existing?.checkOutTime || '04:00 PM',
+        remarks: existing?.remarks || 'Bulk marked Present by HOI',
+        remarksByHoi: existing?.remarksByHoi ?? existing?.remarks ?? tc.latestHoiRemarks ?? '',
+        updatedAt: nowIso,
+        updatedBy: currentUser.name,
+        changeHistory: [
+          {
+            id: `chg-bulk-${Date.now()}-${count}`,
+            field: 'Attendance Status' as const,
+            previousValue: existing?.status || 'Unmarked',
+            newValue: 'Present',
+            changedBy: currentUser.name,
+            changedByRole: effectiveRole || currentUser.role || 'admin',
+            changedAt: nowIso,
+          },
+          ...(existing?.changeHistory || []),
+        ].slice(0, 50),
       };
       onSaveTeacherAttendance(rec);
       count++;
@@ -766,24 +1242,41 @@ export const TeacherManagement: React.FC<TeacherManagementProps> = ({
     showToast(`Successfully marked all ${count} teachers as Present for ${attendanceDate}!`);
   };
 
-  // Single Teacher Attendance update
+  // Single Teacher Attendance Quick Status update (preserves times, designation, HOI remarks & audit log)
   const handleSetSingleTeacherStatus = (tc: TeacherProfile, status: TeacherAttendanceStatus) => {
     if (!onSaveTeacherAttendance) return;
-    const existing = teacherAttendance.find((r) => r.teacherId === tc.id && r.date === attendanceDate);
+    const existing = getAttendanceRecordForDate(tc, attendanceDate);
+    const nowIso = new Date().toISOString();
     const rec: TeacherAttendanceRecord = {
       id: existing ? existing.id : `att-${tc.id}-${attendanceDate}`,
       date: attendanceDate,
       teacherId: tc.id,
       employeeId: tc.employeeId,
       teacherName: tc.name,
-      designation: tc.designation,
+      designation: existing?.designation || tc.designation,
       status,
-      checkInTime: status === 'Present' || status === 'Late' ? (existing?.checkInTime || '09:00 AM') : undefined,
-      checkOutTime: status === 'Present' ? (existing?.checkOutTime || '04:00 PM') : undefined,
-      remarks: existing?.remarks || `Status updated to ${status}`,
+      checkInTime: existing?.checkInTime || '09:00 AM',
+      checkOutTime: existing?.checkOutTime || '04:00 PM',
+      remarks: existing?.remarks || '',
+      remarksByHoi: existing?.remarksByHoi ?? existing?.remarks ?? tc.latestHoiRemarks ?? '',
       checkInLocation: existing?.checkInLocation,
+      updatedAt: nowIso,
+      updatedBy: currentUser.name,
+      changeHistory: [
+        {
+          id: `chg-qs-${Date.now()}`,
+          field: 'Attendance Status' as const,
+          previousValue: existing?.status || 'Present',
+          newValue: status,
+          changedBy: currentUser.name,
+          changedByRole: effectiveRole || currentUser.role || 'admin',
+          changedAt: nowIso,
+        },
+        ...(existing?.changeHistory || []),
+      ].slice(0, 50),
     };
     onSaveTeacherAttendance(rec);
+    showToast(`Attendance Status updated to "${status}" for ${tc.name} (${attendanceDate}).`);
   };
 
   // Print Daily Attendance Sheet
@@ -796,10 +1289,48 @@ export const TeacherManagement: React.FC<TeacherManagementProps> = ({
     return teacherAttendance.filter((r) => r.date === attendanceDate);
   }, [teacherAttendance, attendanceDate]);
 
-  const attPresentCount = selectedDateRecords.filter((r) => r.status === 'Present').length;
+  const attPresentCount = selectedDateRecords.filter(
+    (r) => r.status === 'Present' || r.status === 'Half Day' || r.status === 'Late Arrival' || r.status === 'Late'
+  ).length;
   const attAbsentCount = selectedDateRecords.filter((r) => r.status === 'Absent').length;
-  const attLeaveCount = selectedDateRecords.filter((r) => r.status === 'Leave' || r.status === 'On Leave').length;
-  const attDutyCount = selectedDateRecords.filter((r) => r.status === 'Official Duty' || r.status === 'On_Duty').length;
+  const attLeaveCount = selectedDateRecords.filter(
+    (r) =>
+      r.status === 'Casual Leave (CL)' ||
+      r.status === 'Medical Leave (ML)' ||
+      r.status === 'Leave' ||
+      r.status === 'On Leave'
+  ).length;
+  const attDutyCount = selectedDateRecords.filter(
+    (r) => r.status === 'On Duty (OD)' || r.status === 'Official Duty' || r.status === 'On_Duty'
+  ).length;
+
+  const filteredAttendanceTeachers = useMemo(() => {
+    const q = searchTerm.trim().toLowerCase();
+    return teachers.filter((tc) => {
+      if (q) {
+        const matchesQuery =
+          tc.name.toLowerCase().includes(q) ||
+          (tc.employeeId || '').toLowerCase().includes(q) ||
+          (tc.designation || '').toLowerCase().includes(q);
+        if (!matchesQuery) return false;
+      }
+      if (attendanceFilterStatus === 'all') return true;
+      const rec = teacherAttendance.find((r) => r.teacherId === tc.id && r.date === attendanceDate);
+      const st = rec?.status || 'Present';
+      return st === attendanceFilterStatus;
+    });
+  }, [teachers, teacherAttendance, attendanceDate, attendanceFilterStatus, searchTerm]);
+
+  const filteredServiceBookTeachers = useMemo(() => {
+    const q = searchTerm.trim().toLowerCase();
+    if (!q) return teachers;
+    return teachers.filter(
+      (tc) =>
+        tc.name.toLowerCase().includes(q) ||
+        (tc.employeeId || '').toLowerCase().includes(q) ||
+        (tc.designation || '').toLowerCase().includes(q)
+    );
+  }, [teachers, searchTerm]);
 
   return (
     <div className="space-y-6">
@@ -881,6 +1412,15 @@ export const TeacherManagement: React.FC<TeacherManagementProps> = ({
               <span>Print Official Service Book</span>
             </button>
           )}
+
+          <button
+            type="button"
+            onClick={exportTeacherAttendanceAndServiceCsv}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-extrabold bg-teal-50 text-teal-800 border border-teal-300 hover:bg-teal-100 transition-colors shadow-2xs"
+          >
+            <Download className="w-4 h-4 text-teal-700" />
+            <span>Export CSV</span>
+          </button>
 
           {isAdminUser && (
             <button
@@ -983,15 +1523,26 @@ export const TeacherManagement: React.FC<TeacherManagementProps> = ({
             <div className="flex flex-wrap items-center gap-3 flex-1 min-w-[260px]">
               
               {/* Search Bar */}
-              <div className="relative flex-1 min-w-[200px]">
+              <div className="relative flex-1 min-w-[220px]">
                 <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
                 <input
                   type="text"
-                  placeholder="Search by teacher name, CPIS code, designation, subject..."
+                  aria-label="Search teachers by name or employee ID"
+                  placeholder="Search teacher by Name or Employee ID (CPIS)..."
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
-                  className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-xl font-medium focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                  className="w-full pl-9 pr-8 py-2 border border-slate-300 rounded-xl font-medium focus:ring-2 focus:ring-indigo-500 focus:outline-none"
                 />
+                {searchTerm && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchTerm('')}
+                    aria-label="Clear teacher search"
+                    className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-700"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
               </div>
 
               {/* Status Filter */}
@@ -1258,24 +1809,69 @@ export const TeacherManagement: React.FC<TeacherManagementProps> = ({
           
           {/* Teacher Selector Toolbar */}
           <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-sm flex flex-wrap items-center justify-between gap-3 text-xs no-print">
-            <div className="flex items-center gap-3">
-              <label className="font-bold text-slate-600 uppercase text-[11px] tracking-wider">
-                Select Teacher for Service Book:
-              </label>
-              <select
-                value={selectedServiceBookTeacherId}
-                onChange={(e) => setSelectedServiceBookTeacherId(e.target.value)}
-                className="px-3 py-2 border border-slate-300 rounded-xl font-bold text-indigo-800 bg-indigo-50/50"
-              >
-                {teachers.map((tc) => (
-                  <option key={tc.id} value={tc.id}>
-                    {tc.name} ({tc.employeeId} - {tc.designation})
-                  </option>
-                ))}
-              </select>
+            <div className="flex flex-wrap items-center gap-3 flex-1">
+              <div className="relative min-w-[210px] flex-1 max-w-xs">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                <input
+                  type="text"
+                  aria-label="Find teacher in Service Book by name or employee ID"
+                  placeholder="Find by Teacher Name or Employee ID..."
+                  value={searchTerm}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setSearchTerm(val);
+                    const q = val.trim().toLowerCase();
+                    if (q) {
+                      const firstMatch = teachers.find(
+                        (tc) =>
+                          tc.name.toLowerCase().includes(q) ||
+                          (tc.employeeId || '').toLowerCase().includes(q)
+                      );
+                      if (firstMatch) setSelectedServiceBookTeacherId(firstMatch.id);
+                    }
+                  }}
+                  className="w-full pl-9 pr-8 py-2 border border-slate-300 rounded-xl font-medium bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                />
+                {searchTerm && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchTerm('')}
+                    aria-label="Clear Service Book search"
+                    className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-700"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <label className="font-bold text-slate-600 uppercase text-[11px] tracking-wider">
+                  Service Book:
+                </label>
+                <select
+                  value={selectedServiceBookTeacherId}
+                  onChange={(e) => setSelectedServiceBookTeacherId(e.target.value)}
+                  className="px-3 py-2 border border-slate-300 rounded-xl font-bold text-indigo-800 bg-indigo-50/50"
+                >
+                  {(filteredServiceBookTeachers.length > 0 ? filteredServiceBookTeachers : teachers).map((tc) => (
+                    <option key={tc.id} value={tc.id}>
+                      {tc.name} ({tc.employeeId} - {tc.designation})
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={exportTeacherAttendanceAndServiceCsv}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-extrabold bg-teal-600 text-white hover:bg-teal-700 transition-all shadow-sm"
+              >
+                <Download className="w-4 h-4" />
+                <span>Export CSV</span>
+              </button>
+
               <button
                 onClick={() => openModalForTeacher(selectedServiceBookTeacher)}
                 className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-extrabold bg-amber-500 text-white hover:bg-amber-600 transition-all shadow-sm"
@@ -1461,6 +2057,139 @@ export const TeacherManagement: React.FC<TeacherManagementProps> = ({
               </div>
             </div>
 
+            {/* PART III-B: HOI Remarks & Latest Daily Attendance / Service Record */}
+            {(() => {
+              const latestRec = getLatestAttendanceRecordForTeacher(selectedServiceBookTeacher);
+              const displayedHoiRemarks =
+                latestRec?.remarksByHoi ??
+                latestRec?.remarks ??
+                selectedServiceBookTeacher.latestHoiRemarks ??
+                '';
+              return (
+                <div className="space-y-3">
+                  <h3 className="text-xs font-black uppercase tracking-wider bg-slate-100 p-2 rounded-lg border border-slate-200 flex items-center justify-between">
+                    <span>PART III-B: REMARKS BY HOI (HEAD OF INSTITUTION) &amp; DAILY ATTENDANCE SNAPSHOT</span>
+                    <span className="font-mono text-[10px] text-slate-500">
+                      {latestRec ? `Latest Record: ${latestRec.date}` : `Date: ${attendanceDate}`}
+                    </span>
+                  </h3>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                    <div className="border p-2.5 rounded-xl bg-slate-50/60">
+                      <span className="text-[10px] font-bold text-slate-500 block uppercase">Current Designation</span>
+                      <span className="font-bold text-slate-900">
+                        {latestRec?.designation || selectedServiceBookTeacher.designation}
+                      </span>
+                    </div>
+                    <div className="border p-2.5 rounded-xl bg-slate-50/60">
+                      <span className="text-[10px] font-bold text-slate-500 block uppercase">Latest Attendance Status</span>
+                      <span className="font-bold text-indigo-800">{latestRec?.status || 'Present'}</span>
+                    </div>
+                    <div className="border p-2.5 rounded-xl bg-slate-50/60">
+                      <span className="text-[10px] font-bold text-slate-500 block uppercase">Arrival Time</span>
+                      <span className="font-mono font-bold text-slate-900">{latestRec?.checkInTime || '09:00 AM'}</span>
+                    </div>
+                    <div className="border p-2.5 rounded-xl bg-slate-50/60">
+                      <span className="text-[10px] font-bold text-slate-500 block uppercase">Departure Time</span>
+                      <span className="font-mono font-bold text-slate-900">{latestRec?.checkOutTime || '04:00 PM'}</span>
+                    </div>
+                  </div>
+
+                  <div className="p-3.5 rounded-2xl border border-amber-200 bg-amber-50/40 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10.5px] font-black uppercase text-amber-900 tracking-wider">
+                        Remarks by HOI (Head of Institution)
+                      </span>
+                      {isAdminUser && !isEditingServiceBookHoiRemarks && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setServiceBookHoiRemarksDraft(displayedHoiRemarks);
+                            setIsEditingServiceBookHoiRemarks(true);
+                          }}
+                          className="no-print inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-bold"
+                        >
+                          <Edit2 className="w-3 h-3" /> Edit HOI Remarks
+                        </button>
+                      )}
+                    </div>
+
+                    {isEditingServiceBookHoiRemarks ? (
+                      <div className="space-y-2 no-print">
+                        <textarea
+                          rows={3}
+                          value={serviceBookHoiRemarksDraft}
+                          onChange={(e) => setServiceBookHoiRemarksDraft(e.target.value)}
+                          placeholder="Enter official administrative remarks, late arrival explanation, duty note, or HOI observation..."
+                          className="w-full p-2.5 rounded-xl border border-amber-300 bg-white text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                        />
+                        <div className="flex items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setIsEditingServiceBookHoiRemarks(false)}
+                            className="px-3 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-bold"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const targetDate = latestRec?.date || attendanceDate;
+                              const nowIso = new Date().toISOString();
+                              const cleanText = serviceBookHoiRemarksDraft.trim();
+                              onUpdateTeacher({
+                                ...selectedServiceBookTeacher,
+                                latestHoiRemarks: cleanText,
+                                latestHoiRemarksUpdatedAt: nowIso,
+                                updatedAt: nowIso,
+                              });
+                              if (onSaveTeacherAttendance) {
+                                onSaveTeacherAttendance({
+                                  id: latestRec ? latestRec.id : `att-${selectedServiceBookTeacher.id}-${targetDate}`,
+                                  date: targetDate,
+                                  teacherId: selectedServiceBookTeacher.id,
+                                  employeeId: selectedServiceBookTeacher.employeeId,
+                                  teacherName: selectedServiceBookTeacher.name,
+                                  designation: latestRec?.designation || selectedServiceBookTeacher.designation,
+                                  status: latestRec?.status || 'Present',
+                                  checkInTime: latestRec?.checkInTime || '09:00 AM',
+                                  checkOutTime: latestRec?.checkOutTime || '04:00 PM',
+                                  remarks: cleanText,
+                                  remarksByHoi: cleanText,
+                                  updatedAt: nowIso,
+                                  updatedBy: currentUser.name,
+                                  changeHistory: [
+                                    {
+                                      id: `chg-sb-${Date.now()}`,
+                                      field: 'Remarks by HOI' as const,
+                                      previousValue: displayedHoiRemarks || '—',
+                                      newValue: cleanText || '—',
+                                      changedBy: currentUser.name,
+                                      changedByRole: effectiveRole || currentUser.role || 'admin',
+                                      changedAt: nowIso,
+                                    },
+                                    ...(latestRec?.changeHistory || []),
+                                  ].slice(0, 50),
+                                });
+                              }
+                              setIsEditingServiceBookHoiRemarks(false);
+                              showToast(`Remarks by HOI saved for ${selectedServiceBookTeacher.name}!`);
+                            }}
+                            className="inline-flex items-center gap-1 px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold"
+                          >
+                            <Save className="w-3.5 h-3.5" /> Save Remarks
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-slate-700 whitespace-pre-wrap leading-relaxed">
+                        {displayedHoiRemarks || 'No HOI remarks recorded yet. Click "Edit HOI Remarks" to add administrative comments or duty notes.'}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* PART IV: Official Verification & Attestation */}
             <div className="pt-6 border-t-2 border-slate-900 grid grid-cols-2 gap-8 text-xs">
               <div>
@@ -1638,14 +2367,37 @@ export const TeacherManagement: React.FC<TeacherManagementProps> = ({
       {activeSubTab === 'attendance' && (
         <div className="space-y-4">
           
-          {/* Date Picker & Quick Actions Toolbar */}
+          {/* Date Picker, Teacher Search Bar, Color-Coded Status Filter & Quick Actions Toolbar */}
           <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-sm flex flex-wrap items-center justify-between gap-3 text-xs no-print">
-            <div className="flex flex-wrap items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3 flex-1 min-w-[260px]">
               
+              {/* Search Bar for Teacher Name or Employee ID */}
+              <div className="relative flex-1 min-w-[210px] max-w-xs">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2" />
+                <input
+                  type="text"
+                  aria-label="Search attendance register by teacher name or employee ID"
+                  placeholder="Search teacher by Name or Employee ID..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="w-full pl-9 pr-8 py-1.5 border border-slate-300 rounded-xl font-medium bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                />
+                {searchTerm && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchTerm('')}
+                    aria-label="Clear search"
+                    className="absolute right-2.5 top-2 text-slate-400 hover:text-slate-700"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+
               {/* Date Input */}
               <div className="flex items-center gap-2">
                 <Calendar className="w-4 h-4 text-indigo-600" />
-                <span className="font-bold text-slate-700">Attendance Date:</span>
+                <span className="font-bold text-slate-700">Date:</span>
                 <input
                   type="date"
                   value={attendanceDate}
@@ -1654,28 +2406,112 @@ export const TeacherManagement: React.FC<TeacherManagementProps> = ({
                 />
               </div>
 
-              {/* Status Filter */}
-              <select
-                value={attendanceFilterStatus}
-                onChange={(e) => setAttendanceFilterStatus(e.target.value)}
-                className="px-3 py-1.5 border border-slate-300 rounded-xl font-semibold text-slate-700 bg-slate-50"
-              >
-                <option value="all">All Turnouts</option>
-                <option value="Present">Present Only</option>
-                <option value="Absent">Absent Only</option>
-                <option value="On Leave">On Leave</option>
-                <option value="Official Duty">Official Duty</option>
-              </select>
+              {/* Color-Coded Status Filter Dropdown (All 8 Attendance Status Options) */}
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setIsFilterStatusDropdownOpen((prev) => !prev)}
+                  className="inline-flex items-center justify-between gap-2 min-w-[190px] px-3 py-1.5 border border-slate-300 rounded-xl font-semibold text-slate-700 bg-slate-50 hover:bg-slate-100 transition-colors"
+                >
+                  <span className="inline-flex items-center gap-2 truncate">
+                    {attendanceFilterStatus === 'all' ? (
+                      <>
+                        <span className="w-2.5 h-2.5 rounded-full bg-gradient-to-r from-emerald-500 via-blue-500 to-rose-500 shrink-0" />
+                        <span>All Attendance Statuses</span>
+                      </>
+                    ) : (
+                      <>
+                        <span
+                          className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+                            getAttendanceStatusMeta(attendanceFilterStatus).dotClass
+                          }`}
+                        />
+                        <span>{attendanceFilterStatus}</span>
+                      </>
+                    )}
+                  </span>
+                  <ChevronDown className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                </button>
+
+                {isFilterStatusDropdownOpen && (
+                  <div className="absolute left-0 mt-1.5 w-56 rounded-2xl bg-white border border-slate-200 shadow-xl z-40 py-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAttendanceFilterStatus('all');
+                        setIsFilterStatusDropdownOpen(false);
+                      }}
+                      className={`w-full px-3 py-2 text-left text-xs font-bold flex items-center justify-between hover:bg-slate-50 ${
+                        attendanceFilterStatus === 'all' ? 'bg-indigo-50 text-indigo-800' : 'text-slate-700'
+                      }`}
+                    >
+                      <span className="inline-flex items-center gap-2">
+                        <span className="w-2.5 h-2.5 rounded-full bg-gradient-to-r from-emerald-500 via-blue-500 to-rose-500" />
+                        <span>All Attendance Statuses</span>
+                      </span>
+                      {attendanceFilterStatus === 'all' && <Check className="w-3.5 h-3.5 text-indigo-600" />}
+                    </button>
+                    {ATTENDANCE_STATUS_OPTIONS.map((opt) => {
+                      const meta = getAttendanceStatusMeta(opt);
+                      const isSelected = attendanceFilterStatus === opt;
+                      return (
+                        <button
+                          key={opt}
+                          type="button"
+                          onClick={() => {
+                            setAttendanceFilterStatus(opt);
+                            setIsFilterStatusDropdownOpen(false);
+                          }}
+                          className={`w-full px-3 py-2 text-left text-xs font-bold flex items-center justify-between hover:bg-slate-50 ${
+                            isSelected ? 'bg-slate-100 text-slate-950' : 'text-slate-700'
+                          }`}
+                        >
+                          <span className="inline-flex items-center gap-2">
+                            <span className={`w-2.5 h-2.5 rounded-full ${meta.dotClass}`} />
+                            <span>{opt}</span>
+                          </span>
+                          {isSelected && <Check className="w-3.5 h-3.5 text-indigo-600" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
 
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <button
                 onClick={handleBulkMarkAllPresent}
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-extrabold bg-emerald-600 text-white hover:bg-emerald-700 transition-all shadow-sm"
               >
                 <Check className="w-4 h-4" />
                 <span>Mark All Present</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={exportTeacherAttendanceAndServiceCsv}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-extrabold bg-teal-600 text-white hover:bg-teal-700 transition-colors shadow-sm"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Export CSV</span>
+              </button>
+
+              <button
+                onClick={exportDailyTeacherAttendance}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-slate-100 text-slate-800 border border-slate-300 hover:bg-slate-200 transition-colors"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
+                <span>Export Excel</span>
+              </button>
+
+              <button
+                onClick={handlePrintDailyAttendance}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-slate-100 text-slate-800 border border-slate-300 hover:bg-slate-200 transition-colors"
+              >
+                <Printer className="w-3.5 h-3.5 text-indigo-700" />
+                <span>Print Register</span>
               </button>
 
               <button
@@ -1691,7 +2527,7 @@ export const TeacherManagement: React.FC<TeacherManagementProps> = ({
           {/* Turnout Statistics Banner */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div className="bg-emerald-50 border border-emerald-200 p-3.5 rounded-2xl">
-              <span className="text-[10px] font-bold text-emerald-800 uppercase tracking-wider block">Present Today</span>
+              <span className="text-[10px] font-bold text-emerald-800 uppercase tracking-wider block">Present / On Campus</span>
               <div className="mt-1 text-2xl font-black text-emerald-900 font-mono">
                 {attPresentCount} / {teachers.length}
               </div>
@@ -1705,23 +2541,23 @@ export const TeacherManagement: React.FC<TeacherManagementProps> = ({
               <div className="mt-1 text-2xl font-black text-rose-900 font-mono">
                 {attAbsentCount}
               </div>
-              <span className="text-[10.5px] text-rose-700 font-semibold block mt-0.5">Unexcused Absences</span>
+              <span className="text-[10.5px] text-rose-700 font-semibold block mt-0.5">Marked Absent</span>
             </div>
 
             <div className="bg-amber-50 border border-amber-200 p-3.5 rounded-2xl">
-              <span className="text-[10px] font-bold text-amber-800 uppercase tracking-wider block">On Approved Leave</span>
+              <span className="text-[10px] font-bold text-amber-800 uppercase tracking-wider block">Leave (CL / ML)</span>
               <div className="mt-1 text-2xl font-black text-amber-900 font-mono">
                 {attLeaveCount}
               </div>
-              <span className="text-[10.5px] text-amber-700 font-semibold block mt-0.5">Casual / Medical</span>
+              <span className="text-[10.5px] text-amber-700 font-semibold block mt-0.5">Casual / Medical Leave</span>
             </div>
 
             <div className="bg-indigo-50 border border-indigo-200 p-3.5 rounded-2xl">
-              <span className="text-[10px] font-bold text-indigo-800 uppercase tracking-wider block">Official Duty</span>
+              <span className="text-[10px] font-bold text-indigo-800 uppercase tracking-wider block">On Duty (OD)</span>
               <div className="mt-1 text-2xl font-black text-indigo-900 font-mono">
                 {attDutyCount}
               </div>
-              <span className="text-[10.5px] text-indigo-700 font-semibold block mt-0.5">ZEO / Training Duty</span>
+              <span className="text-[10.5px] text-indigo-700 font-semibold block mt-0.5">Official / ZEO Duty</span>
             </div>
           </div>
 
@@ -1743,143 +2579,516 @@ export const TeacherManagement: React.FC<TeacherManagementProps> = ({
             </div>
           )}
 
-          {/* Daily Manual Attendance Register Table */}
+          {/* Daily Editable Attendance & Service Book Register (Per-Field Edit / Save / Cancel + Change Audit History) */}
           <div className="bg-white rounded-3xl border border-slate-200/90 shadow-sm overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs border-collapse">
-                <thead>
-                  <tr className="bg-slate-900 text-white text-[11px] font-bold uppercase tracking-wider">
-                    <th className="py-3.5 px-4">Employee CPIS & Name</th>
-                    <th className="py-3.5 px-4">Designation</th>
-                    <th className="py-3.5 px-4">Attendance Status</th>
-                    <th className="py-3.5 px-4">Arrival Time</th>
-                    <th className="py-3.5 px-4">Departure Time</th>
-                    <th className="py-3.5 px-4">Remarks</th>
-                    <th className="py-3.5 px-4 text-center">Status Action</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {teachers.map((tc) => {
-                    const rec = teacherAttendance.find((r) => r.teacherId === tc.id && r.date === attendanceDate);
-                    const currentStatus = rec?.status || 'Present';
+            <div className="px-5 py-3.5 bg-slate-900 text-white flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <h3 className="text-xs font-black uppercase tracking-wider">
+                  Date-Wise Teacher Attendance &amp; Daily Service Register — {attendanceDate}
+                </h3>
+                <p className="text-[11px] text-slate-300">
+                  Click the individual <strong>Edit</strong> button next to Arrival Time, Departure Time, Designation, Attendance Status, or Remarks by HOI to update &amp; save permanently with full audit history.
+                </p>
+              </div>
+              <span className="px-2.5 py-1 rounded-lg bg-slate-800 border border-slate-700 text-[11px] font-mono text-amber-300 self-start sm:self-center">
+                {filteredAttendanceTeachers.length} Staff Shown
+              </span>
+            </div>
 
-                    return (
-                      <tr key={tc.id} className="hover:bg-slate-50 transition-colors">
-                        
-                        <td className="py-3.5 px-4">
-                          <div className="font-extrabold text-slate-900 text-sm">{tc.name}</div>
-                          <div className="font-mono text-[10px] text-slate-500">{tc.employeeId}</div>
-                        </td>
+            <div className="divide-y divide-slate-200">
+              {filteredAttendanceTeachers.length === 0 ? (
+                <div className="p-8 text-center text-xs text-slate-500">
+                  No teacher records match the selected status filter for {attendanceDate}.
+                </div>
+              ) : (
+                filteredAttendanceTeachers.map((tc) => {
+                  const rec = getAttendanceRecordForDate(tc, attendanceDate);
+                  const currentStatus: TeacherAttendanceStatus = rec?.status || 'Present';
+                  const currentDesignation = rec?.designation || tc.designation;
+                  const currentArrival = rec?.checkInTime || '09:00 AM';
+                  const currentDeparture = rec?.checkOutTime || '04:00 PM';
+                  const currentHoiRemarks = rec?.remarksByHoi ?? rec?.remarks ?? tc.latestHoiRemarks ?? '';
+                  const historyEntries = rec?.changeHistory || [];
 
-                        <td className="py-3.5 px-4">
-                          <span className="font-bold text-slate-800">{tc.designation}</span>
-                        </td>
+                  const isEditingArrival =
+                    editingAttendanceField?.teacherId === tc.id && editingAttendanceField?.field === 'arrivalTime';
+                  const isEditingDeparture =
+                    editingAttendanceField?.teacherId === tc.id && editingAttendanceField?.field === 'departureTime';
+                  const isEditingDesignation =
+                    editingAttendanceField?.teacherId === tc.id && editingAttendanceField?.field === 'designation';
+                  const isEditingStatus =
+                    editingAttendanceField?.teacherId === tc.id && editingAttendanceField?.field === 'status';
+                  const isEditingRemarks =
+                    editingAttendanceField?.teacherId === tc.id && editingAttendanceField?.field === 'remarksByHoi';
+                  const showHistory = expandedHistoryTeacherId === tc.id;
 
-                        <td className="py-3.5 px-4">
-                          <div className="flex items-center gap-1">
-                            <span
-                              className={`px-2.5 py-1 rounded-lg font-extrabold text-xs inline-flex items-center gap-1 ${
-                                currentStatus === 'Present'
-                                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
-                                  : currentStatus === 'Absent'
-                                  ? 'bg-rose-100 text-rose-800 border border-rose-300'
-                                  : currentStatus === 'On Leave' || currentStatus === 'Leave'
-                                  ? 'bg-amber-100 text-amber-800 border border-amber-300'
-                                  : 'bg-indigo-100 text-indigo-800 border border-indigo-300'
-                              }`}
+                  return (
+                    <div key={tc.id} className="p-4 sm:p-5 hover:bg-slate-50/60 transition-colors space-y-3.5">
+                      {/* Teacher Identity Row + Quick History Toggle */}
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2.5 border-b border-slate-100">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-200 flex items-center justify-center font-black text-indigo-700 text-sm shrink-0">
+                            {tc.name.charAt(0).toUpperCase()}
+                          </div>
+                          <div>
+                            <div className="font-extrabold text-slate-900 text-sm">{tc.name}</div>
+                            <div className="font-mono text-[11px] text-slate-500 flex flex-wrap items-center gap-2">
+                              <span>CPIS: {tc.employeeId}</span>
+                              <span>•</span>
+                              <span>Date: {attendanceDate}</span>
+                              {rec?.updatedAt && (
+                                <>
+                                  <span>•</span>
+                                  <span className="text-emerald-700 font-semibold">
+                                    Updated by {rec.updatedBy || 'HOI'}
+                                  </span>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 flex-wrap no-print">
+                          {/* Quick One-Tap Presets */}
+                          <div className="inline-flex items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200">
+                            {(
+                              [
+                                { label: 'P', status: 'Present', activeCls: 'bg-emerald-600 text-white' },
+                                { label: 'A', status: 'Absent', activeCls: 'bg-rose-600 text-white' },
+                                { label: 'CL', status: 'Casual Leave (CL)', activeCls: 'bg-amber-600 text-white' },
+                                { label: 'ML', status: 'Medical Leave (ML)', activeCls: 'bg-teal-600 text-white' },
+                                { label: 'OD', status: 'On Duty (OD)', activeCls: 'bg-indigo-600 text-white' },
+                              ] as const
+                            ).map((preset) => (
+                              <button
+                                key={preset.label}
+                                type="button"
+                                disabled={!isAdminUser}
+                                onClick={() => handleSetSingleTeacherStatus(tc, preset.status)}
+                                title={`Quick set status: ${preset.status}`}
+                                className={`px-2 py-1 rounded-lg text-[10.5px] font-extrabold transition-all ${
+                                  currentStatus === preset.status
+                                    ? `${preset.activeCls} shadow-xs`
+                                    : 'text-slate-600 hover:bg-white'
+                                } disabled:opacity-50`}
+                              >
+                                {preset.label}
+                              </button>
+                            ))}
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpandedHistoryTeacherId(showHistory ? null : tc.id)
+                            }
+                            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-[11px] font-bold border transition-colors ${
+                              showHistory
+                                ? 'bg-slate-900 text-white border-slate-900'
+                                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                            }`}
+                          >
+                            <History className="w-3.5 h-3.5" />
+                            <span>Change History ({historyEntries.length})</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* 4 Structured Editable Fields Grid: Arrival Time, Departure Time, Designation, Attendance Status */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 text-xs">
+                        {/* 1. ARRIVAL TIME */}
+                        <div className="p-3 rounded-2xl border border-slate-200 bg-white space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[10px] font-black uppercase tracking-wider text-slate-500 flex items-center gap-1">
+                              <Clock className="w-3 h-3 text-emerald-600" />
+                              Arrival Time
+                            </span>
+                            {isAdminUser && !isEditingArrival && (
+                              <button
+                                type="button"
+                                onClick={() => startEditingAttendanceField(tc, 'arrivalTime')}
+                                className="no-print inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-[10.5px] font-bold"
+                              >
+                                <Edit2 className="w-2.5 h-2.5" /> Edit
+                              </button>
+                            )}
+                          </div>
+
+                          {isEditingArrival ? (
+                            <div className="space-y-2 no-print">
+                              <input
+                                type="time"
+                                value={draftArrival24}
+                                onChange={(e) => setDraftArrival24(e.target.value)}
+                                className="w-full px-2.5 py-1.5 rounded-xl border border-indigo-300 font-mono font-bold text-slate-900 bg-indigo-50/30"
+                              />
+                              <div className="text-[10px] text-slate-500 font-mono">
+                                Preview: <strong>{formatTo12HourAmPm(draftArrival24)}</strong>
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => saveEditingAttendanceField(tc, 'arrivalTime')}
+                                  className="flex-1 inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold"
+                                >
+                                  <Save className="w-3 h-3" /> Save
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={cancelEditingAttendanceField}
+                                  className="px-2.5 py-1.5 rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-700 text-[11px] font-bold"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="font-mono font-black text-slate-900 text-sm">
+                              {currentArrival}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* 2. DEPARTURE TIME */}
+                        <div className="p-3 rounded-2xl border border-slate-200 bg-white space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[10px] font-black uppercase tracking-wider text-slate-500 flex items-center gap-1">
+                              <Clock className="w-3 h-3 text-amber-600" />
+                              Departure Time
+                            </span>
+                            {isAdminUser && !isEditingDeparture && (
+                              <button
+                                type="button"
+                                onClick={() => startEditingAttendanceField(tc, 'departureTime')}
+                                className="no-print inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-[10.5px] font-bold"
+                              >
+                                <Edit2 className="w-2.5 h-2.5" /> Edit
+                              </button>
+                            )}
+                          </div>
+
+                          {isEditingDeparture ? (
+                            <div className="space-y-2 no-print">
+                              <input
+                                type="time"
+                                value={draftDeparture24}
+                                onChange={(e) => setDraftDeparture24(e.target.value)}
+                                className="w-full px-2.5 py-1.5 rounded-xl border border-indigo-300 font-mono font-bold text-slate-900 bg-indigo-50/30"
+                              />
+                              <div className="text-[10px] text-slate-500 font-mono">
+                                Preview: <strong>{formatTo12HourAmPm(draftDeparture24)}</strong>
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => saveEditingAttendanceField(tc, 'departureTime')}
+                                  className="flex-1 inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold"
+                                >
+                                  <Save className="w-3 h-3" /> Save
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={cancelEditingAttendanceField}
+                                  className="px-2.5 py-1.5 rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-700 text-[11px] font-bold"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="font-mono font-black text-slate-900 text-sm">
+                              {currentDeparture}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* 3. DESIGNATION (Dropdown + Manual Custom Entry) */}
+                        <div className="p-3 rounded-2xl border border-slate-200 bg-white space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[10px] font-black uppercase tracking-wider text-slate-500 flex items-center gap-1">
+                              <Briefcase className="w-3 h-3 text-indigo-600" />
+                              Designation
+                            </span>
+                            {isAdminUser && !isEditingDesignation && (
+                              <button
+                                type="button"
+                                onClick={() => startEditingAttendanceField(tc, 'designation')}
+                                className="no-print inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-[10.5px] font-bold"
+                              >
+                                <Edit2 className="w-2.5 h-2.5" /> Edit
+                              </button>
+                            )}
+                          </div>
+
+                          {isEditingDesignation ? (
+                            <div className="space-y-2 no-print">
+                              <select
+                                value={draftDesignationSelect}
+                                onChange={(e) => setDraftDesignationSelect(e.target.value)}
+                                className="w-full px-2.5 py-1.5 rounded-xl border border-indigo-300 text-xs font-bold bg-white"
+                              >
+                                {STANDARD_TEACHER_DESIGNATIONS.map((d) => (
+                                  <option key={d} value={d}>
+                                    {d}
+                                  </option>
+                                ))}
+                                <option value="__CUSTOM__">Other / Custom Designation...</option>
+                              </select>
+                              {draftDesignationSelect === '__CUSTOM__' && (
+                                <input
+                                  type="text"
+                                  value={draftDesignationCustom}
+                                  onChange={(e) => setDraftDesignationCustom(e.target.value)}
+                                  placeholder="Type custom designation..."
+                                  className="w-full px-2.5 py-1.5 rounded-xl border border-indigo-300 text-xs font-semibold bg-indigo-50/20"
+                                />
+                              )}
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => saveEditingAttendanceField(tc, 'designation')}
+                                  className="flex-1 inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold"
+                                >
+                                  <Save className="w-3 h-3" /> Save
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={cancelEditingAttendanceField}
+                                  className="px-2.5 py-1.5 rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-700 text-[11px] font-bold"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="font-extrabold text-slate-900 text-xs leading-snug">
+                              {currentDesignation}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* 4. ATTENDANCE STATUS (Color-Coded 8-Option Dropdown) */}
+                        <div className="p-3 rounded-2xl border border-slate-200 bg-white space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[10px] font-black uppercase tracking-wider text-slate-500 flex items-center gap-1">
+                              <CheckCircle2 className="w-3 h-3 text-indigo-600" />
+                              Attendance Status
+                            </span>
+                            {isAdminUser && !isEditingStatus && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  startEditingAttendanceField(tc, 'status');
+                                  setOpenStatusDropdownTeacherId(tc.id);
+                                }}
+                                className="no-print inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-[10.5px] font-bold"
+                              >
+                                <Edit2 className="w-2.5 h-2.5" /> Edit
+                              </button>
+                            )}
+                          </div>
+
+                          {isEditingStatus ? (
+                            <div className="space-y-2 no-print relative">
+                              {/* Color-Coded Custom Status Dropdown */}
+                              <button
+                                type="button"
+                                aria-haspopup="listbox"
+                                aria-expanded={openStatusDropdownTeacherId === tc.id}
+                                onClick={() =>
+                                  setOpenStatusDropdownTeacherId(
+                                    openStatusDropdownTeacherId === tc.id ? null : tc.id
+                                  )
+                                }
+                                className={`w-full px-2.5 py-1.5 rounded-xl text-xs font-extrabold flex items-center justify-between gap-2 transition-colors ${
+                                  getAttendanceStatusMeta(draftAttendanceStatus).badgeClass
+                                }`}
+                              >
+                                <span className="inline-flex items-center gap-2 truncate">
+                                  <span
+                                    className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+                                      getAttendanceStatusMeta(draftAttendanceStatus).dotClass
+                                    }`}
+                                  />
+                                  <span className="truncate">{draftAttendanceStatus}</span>
+                                </span>
+                                <ChevronDown className="w-3.5 h-3.5 shrink-0 opacity-75" />
+                              </button>
+
+                              {openStatusDropdownTeacherId === tc.id && (
+                                <div
+                                  role="listbox"
+                                  className="absolute left-0 right-0 mt-1 rounded-2xl bg-white border border-slate-200 shadow-xl z-40 py-1 max-h-60 overflow-y-auto"
+                                >
+                                  {ATTENDANCE_STATUS_OPTIONS.map((opt) => {
+                                    const optMeta = getAttendanceStatusMeta(opt);
+                                    const isSelected = draftAttendanceStatus === opt;
+                                    return (
+                                      <button
+                                        key={opt}
+                                        type="button"
+                                        role="option"
+                                        aria-selected={isSelected}
+                                        onClick={() => {
+                                          setDraftAttendanceStatus(opt);
+                                          setOpenStatusDropdownTeacherId(null);
+                                        }}
+                                        className={`w-full px-3 py-2 text-left text-xs font-bold flex items-center justify-between gap-2 hover:bg-slate-50 transition-colors ${
+                                          isSelected ? 'bg-slate-100 text-slate-950' : 'text-slate-700'
+                                        }`}
+                                      >
+                                        <span className="inline-flex items-center gap-2">
+                                          <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${optMeta.dotClass}`} />
+                                          <span>{opt}</span>
+                                        </span>
+                                        {isSelected && <Check className="w-3.5 h-3.5 text-indigo-600 shrink-0" />}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              )}
+
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setOpenStatusDropdownTeacherId(null);
+                                    saveEditingAttendanceField(tc, 'status');
+                                  }}
+                                  className="flex-1 inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold"
+                                >
+                                  <Save className="w-3 h-3" /> Save
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setOpenStatusDropdownTeacherId(null);
+                                    cancelEditingAttendanceField();
+                                  }}
+                                  className="px-2.5 py-1.5 rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-700 text-[11px] font-bold"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <div>
+                              <span
+                                className={`px-2.5 py-1 rounded-lg font-extrabold text-xs inline-flex items-center gap-1.5 ${getAttendanceStatusBadgeStyle(
+                                  currentStatus
+                                )}`}
+                              >
+                                <span
+                                  className={`w-2 h-2 rounded-full shrink-0 ${
+                                    getAttendanceStatusMeta(currentStatus).dotClass
+                                  }`}
+                                />
+                                <span>{currentStatus}</span>
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* 5. REMARKS BY HOI (Separate Multiline Text Box with Edit / Save / Cancel) */}
+                      <div className="p-3.5 rounded-2xl border border-amber-200 bg-amber-50/40 space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10.5px] font-black uppercase tracking-wider text-amber-900 flex items-center gap-1.5">
+                            <FileText className="w-3.5 h-3.5 text-amber-700" />
+                            Remarks by HOI (Head of Institution)
+                          </span>
+                          {isAdminUser && !isEditingRemarks && (
+                            <button
+                              type="button"
+                              onClick={() => startEditingAttendanceField(tc, 'remarksByHoi')}
+                              className="no-print inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-[10.5px] font-bold"
                             >
-                              <span>{currentStatus}</span>
+                              <Edit2 className="w-3 h-3" /> Edit Remarks
+                            </button>
+                          )}
+                        </div>
+
+                        {isEditingRemarks ? (
+                          <div className="space-y-2 no-print">
+                            <textarea
+                              rows={3}
+                              value={draftHoiRemarks}
+                              onChange={(e) => setDraftHoiRemarks(e.target.value)}
+                              placeholder="Enter official remarks by Head of Institution (late arrival explanation, duty note, administrative comment)..."
+                              className="w-full px-3 py-2 rounded-xl border border-amber-300 bg-white text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                            />
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                type="button"
+                                onClick={cancelEditingAttendanceField}
+                                className="px-3 py-1.5 rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-bold"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => saveEditingAttendanceField(tc, 'remarksByHoi')}
+                                className="inline-flex items-center gap-1 px-4 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold"
+                              >
+                                <Save className="w-3.5 h-3.5" /> Save Remarks by HOI
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <p className="text-xs text-slate-700 whitespace-pre-wrap leading-relaxed">
+                            {currentHoiRemarks || (
+                              <span className="italic text-slate-400">
+                                No HOI remarks recorded for {attendanceDate}. Click &ldquo;Edit Remarks&rdquo; to add administrative notes.
+                              </span>
+                            )}
+                          </p>
+                        )}
+                      </div>
+
+                      {/* Collapsible Change History Audit Log */}
+                      {showHistory && (
+                        <div className="p-3.5 rounded-2xl border border-slate-200 bg-slate-50 space-y-2 no-print">
+                          <div className="flex items-center justify-between">
+                            <h4 className="text-[11px] font-black uppercase tracking-wider text-slate-800 flex items-center gap-1.5">
+                              <History className="w-3.5 h-3.5 text-indigo-600" />
+                              Change History Audit Log ({attendanceDate})
+                            </h4>
+                            <span className="text-[10px] font-mono text-slate-500">
+                              Preserved permanently per date
                             </span>
                           </div>
-                        </td>
-
-                        <td className="py-3.5 px-4">
-                          <span className="font-mono font-bold text-slate-700">
-                            {rec?.checkInTime || '09:00 AM'}
-                          </span>
-                        </td>
-
-                        <td className="py-3.5 px-4">
-                          <span className="font-mono font-bold text-slate-700">
-                            {rec?.checkOutTime || '04:00 PM'}
-                          </span>
-                        </td>
-
-                        <td className="py-3.5 px-4">
-                          <input
-                            type="text"
-                            placeholder="Enter remarks..."
-                            defaultValue={rec?.remarks || ''}
-                            onBlur={(e) => {
-                              if (onSaveTeacherAttendance) {
-                                onSaveTeacherAttendance({
-                                  id: rec ? rec.id : `att-${tc.id}-${attendanceDate}`,
-                                  date: attendanceDate,
-                                  teacherId: tc.id,
-                                  employeeId: tc.employeeId,
-                                  teacherName: tc.name,
-                                  designation: tc.designation,
-                                  status: currentStatus,
-                                  checkInTime: rec?.checkInTime || '09:00 AM',
-                                  checkOutTime: rec?.checkOutTime || '04:00 PM',
-                                  remarks: e.target.value,
-                                });
-                              }
-                            }}
-                            className="px-2.5 py-1 border border-slate-300 rounded-lg text-xs w-full max-w-[180px]"
-                          />
-                        </td>
-
-                        <td className="py-3.5 px-4 text-center">
-                          <div className="flex items-center justify-center gap-1">
-                            <button
-                              onClick={() => handleSetSingleTeacherStatus(tc, 'Present')}
-                              className={`px-2 py-1 rounded text-[11px] font-bold ${
-                                currentStatus === 'Present'
-                                  ? 'bg-emerald-600 text-white shadow-2xs'
-                                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                              }`}
-                            >
-                              P
-                            </button>
-                            <button
-                              onClick={() => handleSetSingleTeacherStatus(tc, 'Absent')}
-                              className={`px-2 py-1 rounded text-[11px] font-bold ${
-                                currentStatus === 'Absent'
-                                  ? 'bg-rose-600 text-white shadow-2xs'
-                                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                              }`}
-                            >
-                              A
-                            </button>
-                            <button
-                              onClick={() => handleSetSingleTeacherStatus(tc, 'On Leave')}
-                              className={`px-2 py-1 rounded text-[11px] font-bold ${
-                                currentStatus === 'On Leave' || currentStatus === 'Leave'
-                                  ? 'bg-amber-600 text-white shadow-2xs'
-                                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                              }`}
-                            >
-                              L
-                            </button>
-                            <button
-                              onClick={() => handleSetSingleTeacherStatus(tc, 'Official Duty')}
-                              className={`px-2 py-1 rounded text-[11px] font-bold ${
-                                currentStatus === 'Official Duty'
-                                  ? 'bg-indigo-600 text-white shadow-2xs'
-                                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                              }`}
-                            >
-                              OD
-                            </button>
-                          </div>
-                        </td>
-
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+                          {historyEntries.length === 0 ? (
+                            <p className="text-xs text-slate-500 italic">
+                              No edits recorded for {tc.name} on {attendanceDate} yet. Every field save is automatically logged with timestamp and user details.
+                            </p>
+                          ) : (
+                            <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                              {historyEntries.map((entry) => (
+                                <div
+                                  key={entry.id}
+                                  className="p-2.5 rounded-xl bg-white border border-slate-200 text-[11px] flex flex-col sm:flex-row sm:items-center justify-between gap-1.5"
+                                >
+                                  <div>
+                                    <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-800 font-extrabold text-[10px] mr-1.5">
+                                      {entry.field}
+                                    </span>
+                                    <span className="text-slate-500 line-through mr-1">{entry.previousValue}</span>
+                                    <span className="text-slate-400 mr-1">→</span>
+                                    <span className="font-bold text-emerald-800">{entry.newValue}</span>
+                                  </div>
+                                  <div className="text-[10px] font-mono text-slate-500 shrink-0">
+                                    {entry.changedBy} ({entry.changedByRole}) • {new Date(entry.changedAt).toLocaleString()}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
             </div>
           </div>
 
@@ -2448,7 +3657,7 @@ export const TeacherManagement: React.FC<TeacherManagementProps> = ({
                     type="text"
                     value={residentialAddress}
                     onChange={(e) => setResidentialAddress(e.target.value)}
-                    placeholder="Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017."
+                    placeholder="Pamposh Colony, Palapora Zone, Iddgah"
                     className="w-full px-3 py-2 border border-slate-300 rounded-xl font-semibold text-slate-900"
                   />
                 </div>
@@ -2660,11 +3869,11 @@ export const TeacherManagement: React.FC<TeacherManagementProps> = ({
                     setEditedTeacherAddressValue(e.target.value);
                     setTeacherAddressEditError(null);
                   }}
-                  placeholder="Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017."
+                  placeholder="Pamposh Colony, Palapora Zone, Iddgah"
                   className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 leading-relaxed"
                 />
                 <p className="text-[10.5px] text-slate-500 mt-1">
-                  Standard format: <span className="font-semibold text-slate-700">Pamposh Colony, Palpora, Tehsil Iddgah, District Srinagar, Jammu & Kashmir – 190017.</span>
+                  Standard format: <span className="font-semibold text-slate-700">Pamposh Colony, Palapora Zone, Iddgah</span>
                 </p>
               </div>
 
@@ -2784,6 +3993,33 @@ export const TeacherManagement: React.FC<TeacherManagementProps> = ({
                 <span className="text-[10px] font-bold uppercase text-slate-400 block">Residential Address</span>
                 <p className="font-semibold text-slate-800 mt-0.5">{viewingTeacherProfile.residentialAddress}</p>
               </div>
+
+              {/* Latest Attendance Snapshot & Remarks by HOI inside Teacher Profile */}
+              {(() => {
+                const latestProfileAtt = getLatestAttendanceRecordForTeacher(viewingTeacherProfile);
+                const profileHoiRemarks =
+                  latestProfileAtt?.remarksByHoi ??
+                  latestProfileAtt?.remarks ??
+                  viewingTeacherProfile.latestHoiRemarks ??
+                  '';
+                return (
+                  <div className="p-3.5 rounded-2xl bg-amber-50/50 border border-amber-200 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] font-black uppercase text-amber-900">
+                        Remarks by HOI (Head of Institution) &amp; Daily Attendance
+                      </span>
+                      {latestProfileAtt && (
+                        <span className="text-[10px] font-mono text-amber-800">
+                          {latestProfileAtt.date} • {latestProfileAtt.status} ({latestProfileAtt.checkInTime || '09:00 AM'} – {latestProfileAtt.checkOutTime || '04:00 PM'})
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-slate-700 whitespace-pre-wrap">
+                      {profileHoiRemarks || 'No HOI remarks recorded yet. Update remarks in the Teacher Attendance Register or Service Book.'}
+                    </p>
+                  </div>
+                );
+              })()}
             </div>
             <div className="p-4 border-t border-slate-100 flex justify-end gap-2 bg-slate-50">
               {isAdminUser && (

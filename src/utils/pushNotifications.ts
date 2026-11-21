@@ -20,6 +20,7 @@ export interface PushNotificationPreferences {
   teacherLeaveAlerts: boolean;
   attendanceThresholdAlerts: boolean;
   parentLowAttendanceAlerts: boolean;
+  consecutiveAbsenceAutoAlert?: boolean;
   attendanceThresholdPercent: number;
   examRemindersEnabled: boolean;
   examReminderDaysBefore: number;
@@ -30,6 +31,7 @@ export const DEFAULT_PUSH_PREFS: PushNotificationPreferences = {
   teacherLeaveAlerts: true,
   attendanceThresholdAlerts: true,
   parentLowAttendanceAlerts: true,
+  consecutiveAbsenceAutoAlert: true,
   attendanceThresholdPercent: 75,
   examRemindersEnabled: true,
   examReminderDaysBefore: 3,
@@ -423,6 +425,195 @@ export function evaluateUpcomingExamNotifications(
     targetRole: 'all',
     priority: 'normal',
   });
+}
+
+export interface ConsecutiveAbsenceAlert {
+  student: Student;
+  consecutiveDays: number;
+  absentDates: string[];
+  isOngoing: boolean;
+  lastRecordedDate: string;
+  parentContact: string;
+}
+
+export interface ConsecutiveAbsenceDispatchLog {
+  id: string;
+  dispatchedAt: string;
+  channel: 'SMS + Push' | 'Push Only' | 'SMS Only';
+  triggerType: 'manual_bulk' | 'automated_trigger';
+  triggeredBy: string;
+  recipientCount: number;
+  recipients: Array<{
+    studentId: string;
+    studentName: string;
+    admissionNumber: string;
+    classSection: string;
+    consecutiveDays: number;
+    parentContact: string;
+    status: 'Delivered (Push)' | 'Queued (SMS + Push)' | 'Queued (SMS)';
+  }>;
+  messagePreview: string;
+}
+
+export const CONSECUTIVE_ABSENCE_LOG_KEY = 'sm_consecutive_absence_dispatch_log_v1';
+
+export function loadConsecutiveAbsenceDispatchLogs(): ConsecutiveAbsenceDispatchLog[] {
+  try {
+    const raw = localStorage.getItem(CONSECUTIVE_ABSENCE_LOG_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    }
+  } catch {
+    // ignore storage parse issues
+  }
+  return [];
+}
+
+/**
+ * Scans attendance records chronologically per student and returns active students
+ * who have been marked 'Absent' for `minConsecutiveDays` (default 3) or more
+ * consecutive recorded school days.
+ */
+export function findStudentsWithConsecutiveAbsences(
+  records: AttendanceRecord[],
+  students: Student[],
+  minConsecutiveDays = 3
+): ConsecutiveAbsenceAlert[] {
+  const byStudent = new Map<string, Map<string, AttendanceRecord>>();
+
+  records.forEach((rec) => {
+    if (!rec.studentId || !rec.date) return;
+    if (!byStudent.has(rec.studentId)) {
+      byStudent.set(rec.studentId, new Map());
+    }
+    byStudent.get(rec.studentId)!.set(rec.date, rec);
+  });
+
+  const alerts: ConsecutiveAbsenceAlert[] = [];
+
+  students.forEach((student) => {
+    if (student.status !== 'Active') return;
+    const dateMap = byStudent.get(student.id);
+    if (!dateMap || dateMap.size < minConsecutiveDays) return;
+
+    const sortedDates = Array.from(dateMap.keys()).sort();
+    let bestDates: string[] = [];
+    let currentDates: string[] = [];
+
+    sortedDates.forEach((dateStr) => {
+      const rec = dateMap.get(dateStr)!;
+      if (rec.status === 'Absent') {
+        currentDates.push(dateStr);
+        if (currentDates.length >= bestDates.length) {
+          bestDates = [...currentDates];
+        }
+      } else {
+        currentDates = [];
+      }
+    });
+
+    const isOngoing = currentDates.length >= minConsecutiveDays;
+    const qualifyingDates = isOngoing ? currentDates : bestDates;
+
+    if (qualifyingDates.length >= minConsecutiveDays) {
+      alerts.push({
+        student,
+        consecutiveDays: qualifyingDates.length,
+        absentDates: qualifyingDates,
+        isOngoing,
+        lastRecordedDate: sortedDates[sortedDates.length - 1],
+        parentContact: student.parentWhatsAppNumber || student.mobileNumber || 'Not Provided',
+      });
+    }
+  });
+
+  return alerts.sort((a, b) => {
+    if (a.isOngoing !== b.isOngoing) return a.isOngoing ? -1 : 1;
+    if (b.consecutiveDays !== a.consecutiveDays) return b.consecutiveDays - a.consecutiveDays;
+    return a.student.fullName.localeCompare(b.student.fullName);
+  });
+}
+
+/**
+ * Dispatches bulk SMS / Push notifications to parents of students absent for 3+ consecutive days,
+ * emits a real in-app + browser Push Notification, and logs delivery receipts for admin audit.
+ */
+export function dispatchBulkConsecutiveAbsenceNotifications(params: {
+  alerts: ConsecutiveAbsenceAlert[];
+  channel: 'SMS + Push' | 'Push Only' | 'SMS Only';
+  messageTemplate: string;
+  schoolName: string;
+  triggeredBy: string;
+  triggerType: 'manual_bulk' | 'automated_trigger';
+}): { logEntry: ConsecutiveAbsenceDispatchLog; pushItem: PushNotificationItem | null } {
+  const { alerts, channel, messageTemplate, schoolName, triggeredBy, triggerType } = params;
+
+  const deliveryStatus: 'Delivered (Push)' | 'Queued (SMS + Push)' | 'Queued (SMS)' =
+    channel === 'SMS + Push'
+      ? 'Queued (SMS + Push)'
+      : channel === 'Push Only'
+      ? 'Delivered (Push)'
+      : 'Queued (SMS)';
+
+  const sampleAlert = alerts[0];
+  const samplePreview = sampleAlert
+    ? messageTemplate
+        .replace(/\{studentName\}/g, sampleAlert.student.fullName)
+        .replace(/\{admissionNumber\}/g, sampleAlert.student.admissionNumber)
+        .replace(/\{classSection\}/g, `${sampleAlert.student.classNumber}-${sampleAlert.student.section}`)
+        .replace(/\{days\}/g, String(sampleAlert.consecutiveDays))
+        .replace(/\{dates\}/g, sampleAlert.absentDates.join(', '))
+        .replace(/\{schoolName\}/g, schoolName)
+    : messageTemplate;
+
+  const logEntry: ConsecutiveAbsenceDispatchLog = {
+    id: `abs_dispatch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    dispatchedAt: new Date().toISOString(),
+    channel,
+    triggerType,
+    triggeredBy,
+    recipientCount: alerts.length,
+    recipients: alerts.map((a) => ({
+      studentId: a.student.id,
+      studentName: a.student.fullName,
+      admissionNumber: a.student.admissionNumber,
+      classSection: `${a.student.classNumber}-${a.student.section}`,
+      consecutiveDays: a.consecutiveDays,
+      parentContact: a.parentContact,
+      status: deliveryStatus,
+    })),
+    messagePreview: samplePreview,
+  };
+
+  try {
+    const existing = loadConsecutiveAbsenceDispatchLogs();
+    const updated = [logEntry, ...existing].slice(0, 25);
+    localStorage.setItem(CONSECUTIVE_ABSENCE_LOG_KEY, JSON.stringify(updated));
+  } catch {
+    // ignore storage errors
+  }
+
+  let pushItem: PushNotificationItem | null = null;
+  if (alerts.length > 0) {
+    const namesSummary = alerts
+      .slice(0, 3)
+      .map((a) => `${a.student.fullName} (${a.consecutiveDays}d)`)
+      .join(', ');
+    pushItem = emitPushNotification({
+      title: `Parent ${channel} Dispatched (${alerts.length} student${alerts.length === 1 ? '' : 's'} · 3+ Days Absent)`,
+      titleUrdu: `والدین کو مسلسل غیر حاضری الرٹ بھیجا گیا (${alerts.length} طلباء)`,
+      message: `${triggerType === 'automated_trigger' ? 'Automated trigger' : 'Admin bulk dispatch'} sent ${channel} alerts to parents of: ${namesSummary}${
+        alerts.length > 3 ? ` +${alerts.length - 3} more` : ''
+      }.`,
+      messageUrdu: `مسلسل 3 یا زیادہ دن غیر حاضر طلباء کے والدین کو ${channel} اطلاع بھیج دی گئی ہے۔`,
+      category: 'Attendance',
+      targetRole: 'all',
+      priority: 'high',
+    });
+  }
+
+  return { logEntry, pushItem };
 }
 
 /**

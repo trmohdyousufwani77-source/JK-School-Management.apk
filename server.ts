@@ -1,9 +1,122 @@
 import express from 'express';
+import fs from 'fs';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 
 const PORT = 3000;
+const JKEPM_STORE_PATH = path.resolve(process.cwd(), '.jkepm-portal-store.json');
+const LEAVE_STORE_PATH = path.resolve(process.cwd(), '.teacher-leave-store.json');
+const TEACHER_ATTENDANCE_STORE_PATH = path.resolve(process.cwd(), '.teacher-attendance-store.json');
+
+interface JkepmServerStore {
+  reports: any[];
+  cpisMigrations: any[];
+  auditLogs: any[];
+  updatedAt: string;
+}
+
+interface TeacherLeaveServerStore {
+  leaves: any[];
+  auditLogs: any[];
+  updatedAt: string;
+}
+
+interface TeacherAttendanceServerStore {
+  records: any[];
+  updatedAt: string;
+}
+
+function readJkepmStore(): JkepmServerStore {
+  try {
+    if (fs.existsSync(JKEPM_STORE_PATH)) {
+      const parsed = JSON.parse(fs.readFileSync(JKEPM_STORE_PATH, 'utf-8'));
+      return {
+        reports: Array.isArray(parsed.reports) ? parsed.reports : [],
+        cpisMigrations: Array.isArray(parsed.cpisMigrations) ? parsed.cpisMigrations : [],
+        auditLogs: Array.isArray(parsed.auditLogs) ? parsed.auditLogs : [],
+        updatedAt: parsed.updatedAt || new Date().toISOString(),
+      };
+    }
+  } catch (err) {
+    console.warn('JKEPM store read warning:', err);
+  }
+  return { reports: [], cpisMigrations: [], auditLogs: [], updatedAt: new Date().toISOString() };
+}
+
+function writeJkepmStore(store: JkepmServerStore): void {
+  try {
+    store.updatedAt = new Date().toISOString();
+    fs.writeFileSync(JKEPM_STORE_PATH, JSON.stringify(store, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn('JKEPM store write warning:', err);
+  }
+}
+
+function readLeaveStore(): TeacherLeaveServerStore {
+  try {
+    if (fs.existsSync(LEAVE_STORE_PATH)) {
+      const parsed = JSON.parse(fs.readFileSync(LEAVE_STORE_PATH, 'utf-8'));
+      return {
+        leaves: Array.isArray(parsed.leaves) ? parsed.leaves : [],
+        auditLogs: Array.isArray(parsed.auditLogs) ? parsed.auditLogs : [],
+        updatedAt: parsed.updatedAt || new Date().toISOString(),
+      };
+    }
+  } catch (err) {
+    console.warn('Leave store read warning:', err);
+  }
+  return { leaves: [], auditLogs: [], updatedAt: new Date().toISOString() };
+}
+
+function writeLeaveStore(store: TeacherLeaveServerStore): void {
+  try {
+    store.updatedAt = new Date().toISOString();
+    fs.writeFileSync(LEAVE_STORE_PATH, JSON.stringify(store, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn('Leave store write warning:', err);
+  }
+}
+
+function readTeacherAttendanceStore(): TeacherAttendanceServerStore {
+  try {
+    if (fs.existsSync(TEACHER_ATTENDANCE_STORE_PATH)) {
+      const parsed = JSON.parse(fs.readFileSync(TEACHER_ATTENDANCE_STORE_PATH, 'utf-8'));
+      return {
+        records: Array.isArray(parsed.records) ? parsed.records : [],
+        updatedAt: parsed.updatedAt || new Date().toISOString(),
+      };
+    }
+  } catch (err) {
+    console.warn('Teacher attendance store read warning:', err);
+  }
+  return { records: [], updatedAt: new Date().toISOString() };
+}
+
+function writeTeacherAttendanceStore(store: TeacherAttendanceServerStore): void {
+  try {
+    store.updatedAt = new Date().toISOString();
+    fs.writeFileSync(TEACHER_ATTENDANCE_STORE_PATH, JSON.stringify(store, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn('Teacher attendance store write warning:', err);
+  }
+}
+
+function hasOverlappingActiveLeave(
+  leaves: any[],
+  employeeId: string,
+  startDate: string,
+  endDate: string,
+  excludeId?: string
+): any | undefined {
+  const normEmp = String(employeeId || '').trim().toUpperCase();
+  return leaves.find((l) => {
+    if (excludeId && l.id === excludeId) return false;
+    if (l.deletedStatus === 'Deleted' || l.status === 'Rejected') return false;
+    if (String(l.employeeId || '').trim().toUpperCase() !== normEmp) return false;
+    return l.startDate <= endDate && l.endDate >= startDate;
+  });
+}
 
 async function startServer() {
   const app = express();
@@ -23,6 +136,253 @@ async function startServer() {
 
   app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  });
+
+  // =========================================================================
+  // JKEPM QUARTERLY APPRAISAL & CPIS CODE MIGRATION REST API
+  // =========================================================================
+  app.get('/api/jkepm/state', (_req, res) => {
+    const store = readJkepmStore();
+    res.json(store);
+  });
+
+  app.get('/api/jkepm/submissions', (req, res) => {
+    const store = readJkepmStore();
+    const { teacherId, cpisCode, quarter, status, udise } = req.query as Record<string, string | undefined>;
+    let list = store.reports.filter((r) => !r.isArchivedDeleted);
+    if (teacherId) list = list.filter((r) => r.teacherId === teacherId);
+    if (cpisCode) list = list.filter((r) => String(r.cpisCode || '').toLowerCase().includes(cpisCode.toLowerCase()));
+    if (quarter) list = list.filter((r) => r.quarter === quarter);
+    if (status) list = list.filter((r) => r.status === status);
+    if (udise) list = list.filter((r) => String(r.schoolUdiseCode || '').includes(udise));
+    res.json({ count: list.length, submissions: list });
+  });
+
+  app.post('/api/jkepm/submissions', (req, res) => {
+    const payload = req.body;
+    if (!payload || !payload.id || !payload.teacherId || !payload.cpisCode) {
+      return res.status(400).json({ error: 'Invalid JKEPM appraisal payload: id, teacherId, and cpisCode are required.' });
+    }
+    const store = readJkepmStore();
+    const idx = store.reports.findIndex((r) => r.id === payload.id);
+    if (idx >= 0) {
+      store.reports[idx] = { ...store.reports[idx], ...payload, updatedAt: new Date().toISOString() };
+    } else {
+      store.reports.unshift({ ...payload, createdAt: payload.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString() });
+    }
+    writeJkepmStore(store);
+    return res.status(idx >= 0 ? 200 : 201).json({ ok: true, report: idx >= 0 ? store.reports[idx] : store.reports[0] });
+  });
+
+  app.put('/api/jkepm/submissions/:id', (req, res) => {
+    const { id } = req.params;
+    const payload = req.body;
+    const store = readJkepmStore();
+    const idx = store.reports.findIndex((r) => r.id === id);
+    if (idx < 0) {
+      store.reports.unshift({ ...payload, id, updatedAt: new Date().toISOString() });
+    } else {
+      store.reports[idx] = { ...store.reports[idx], ...payload, id, updatedAt: new Date().toISOString() };
+    }
+    writeJkepmStore(store);
+    return res.json({ ok: true, report: store.reports[idx >= 0 ? idx : 0] });
+  });
+
+  app.delete('/api/jkepm/submissions/:id', (req, res) => {
+    const { id } = req.params;
+    const { authorizedAdmin } = req.query as { authorizedAdmin?: string };
+    const store = readJkepmStore();
+    const idx = store.reports.findIndex((r) => r.id === id);
+    if (idx < 0) return res.status(404).json({ error: 'Submission not found.' });
+    const target = store.reports[idx];
+    if (target.status !== 'Draft' && authorizedAdmin !== 'true') {
+      return res.status(403).json({ error: 'Submitted reports cannot be permanently deleted without administrative authorization.' });
+    }
+    if (target.status === 'Draft') {
+      store.reports.splice(idx, 1);
+    } else {
+      store.reports[idx] = { ...target, isArchivedDeleted: true, updatedAt: new Date().toISOString() };
+    }
+    writeJkepmStore(store);
+    return res.json({ ok: true });
+  });
+
+  app.post('/api/jkepm/cpis-migrations', (req, res) => {
+    const migration = req.body;
+    if (!migration || !migration.id || !migration.oldCpisCode || !migration.newCpisCode) {
+      return res.status(400).json({ error: 'Invalid CPIS migration payload.' });
+    }
+    const store = readJkepmStore();
+    const normalizedNew = String(migration.newCpisCode).trim().toUpperCase();
+    const duplicate = store.cpisMigrations.find(
+      (m) =>
+        m.id !== migration.id &&
+        m.teacherId !== migration.teacherId &&
+        m.status !== 'Rejected' &&
+        String(m.newCpisCode || '').trim().toUpperCase() === normalizedNew
+    );
+    if (duplicate) {
+      return res.status(409).json({
+        error: `Duplicate CPIS Code "${migration.newCpisCode}" is already assigned to ${duplicate.teacherName}.`,
+      });
+    }
+    const idx = store.cpisMigrations.findIndex((m) => m.id === migration.id);
+    if (idx >= 0) {
+      store.cpisMigrations[idx] = { ...store.cpisMigrations[idx], ...migration };
+    } else {
+      store.cpisMigrations.unshift(migration);
+    }
+    writeJkepmStore(store);
+    return res.json({ ok: true, migration });
+  });
+
+  app.post('/api/jkepm/audit', (req, res) => {
+    const entry = req.body;
+    if (!entry || !entry.id || !entry.action) {
+      return res.status(400).json({ error: 'Invalid audit entry.' });
+    }
+    const store = readJkepmStore();
+    store.auditLogs = [entry, ...store.auditLogs.filter((a) => a.id !== entry.id)].slice(0, 500);
+    writeJkepmStore(store);
+    return res.status(201).json({ ok: true });
+  });
+
+  // =========================================================================
+  // TEACHER LEAVE MANAGEMENT REST API (CRUD, REVIEW, APPROVE, REJECT, AUDIT)
+  // =========================================================================
+  app.get('/api/leaves', (req, res) => {
+    const store = readLeaveStore();
+    const { employeeId, status, includeDeleted } = req.query as Record<string, string | undefined>;
+    let list = store.leaves;
+    if (includeDeleted !== 'true') {
+      list = list.filter((l) => l.deletedStatus !== 'Deleted');
+    }
+    if (employeeId) {
+      list = list.filter((l) => String(l.employeeId || '').toUpperCase() === employeeId.toUpperCase());
+    }
+    if (status) {
+      list = list.filter((l) => l.status === status);
+    }
+    res.json({ count: list.length, leaves: list, auditLogs: store.auditLogs });
+  });
+
+  app.post('/api/leaves', (req, res) => {
+    const payload = req.body;
+    if (!payload || !payload.id || !payload.employeeId || !payload.startDate || !payload.endDate || !payload.reason) {
+      return res.status(400).json({ error: 'Missing required leave application fields.' });
+    }
+    if (payload.endDate < payload.startDate) {
+      return res.status(400).json({ error: 'End date cannot be earlier than start date.' });
+    }
+    const store = readLeaveStore();
+    const overlap = hasOverlappingActiveLeave(store.leaves, payload.employeeId, payload.startDate, payload.endDate, payload.id);
+    if (overlap) {
+      return res.status(409).json({
+        error: `Overlapping leave application (${overlap.startDate} to ${overlap.endDate}) already exists.`,
+      });
+    }
+    const now = new Date().toISOString();
+    const record = {
+      ...payload,
+      status: payload.status || 'Pending',
+      deletedStatus: payload.deletedStatus || 'Active',
+      createdAt: payload.createdAt || now,
+      updatedAt: now,
+    };
+    const idx = store.leaves.findIndex((l) => l.id === record.id);
+    if (idx >= 0) {
+      store.leaves[idx] = record;
+    } else {
+      store.leaves.unshift(record);
+    }
+    writeLeaveStore(store);
+    return res.status(idx >= 0 ? 200 : 201).json({ ok: true, leave: record });
+  });
+
+  app.put('/api/leaves/:id', (req, res) => {
+    const { id } = req.params;
+    const payload = req.body;
+    const store = readLeaveStore();
+    const idx = store.leaves.findIndex((l) => l.id === id);
+    const existing = idx >= 0 ? store.leaves[idx] : null;
+    const isAdminActor = req.query.isHeadmaster === 'true';
+    if (existing && (existing.status === 'Approved' || existing.status === 'Rejected') && !isAdminActor) {
+      return res.status(403).json({ error: 'Approved or rejected leave applications are read-only.' });
+    }
+    if (payload.startDate && payload.endDate && payload.endDate < payload.startDate) {
+      return res.status(400).json({ error: 'End date cannot be earlier than start date.' });
+    }
+    if (payload.employeeId && payload.startDate && payload.endDate) {
+      const overlap = hasOverlappingActiveLeave(store.leaves, payload.employeeId, payload.startDate, payload.endDate, id);
+      if (overlap) {
+        return res.status(409).json({
+          error: `Dates overlap with existing application (${overlap.startDate} to ${overlap.endDate}).`,
+        });
+      }
+    }
+    const now = new Date().toISOString();
+    const updated = { ...(existing || {}), ...payload, id, updatedAt: now };
+    if (idx >= 0) {
+      store.leaves[idx] = updated;
+    } else {
+      store.leaves.unshift(updated);
+    }
+    writeLeaveStore(store);
+    return res.json({ ok: true, leave: updated });
+  });
+
+  app.post('/api/leaves/:id/decision', (req, res) => {
+    const { id } = req.params;
+    const { status, actorName, headmasterRemarks, rejectionReason } = req.body || {};
+    if (!['Under_Review', 'Approved', 'Rejected'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid decision status.' });
+    }
+    if (status === 'Rejected' && !String(rejectionReason || '').trim()) {
+      return res.status(400).json({ error: 'Mandatory rejection reason is required.' });
+    }
+    const store = readLeaveStore();
+    const idx = store.leaves.findIndex((l) => l.id === id);
+    if (idx < 0) return res.status(404).json({ error: 'Leave application not found.' });
+    const now = new Date().toISOString();
+    const today = now.slice(0, 10);
+    store.leaves[idx] = {
+      ...store.leaves[idx],
+      status,
+      approvedBy: status === 'Under_Review' ? store.leaves[idx].approvedBy : actorName || 'Headmaster',
+      reviewedBy: actorName || 'Headmaster',
+      reviewDate: today,
+      approvalDate: status === 'Under_Review' ? store.leaves[idx].approvalDate : today,
+      decisionDate: status === 'Under_Review' ? store.leaves[idx].decisionDate : today,
+      headmasterRemarks: headmasterRemarks || store.leaves[idx].headmasterRemarks || '',
+      remarks: headmasterRemarks || rejectionReason || store.leaves[idx].remarks || '',
+      rejectionReason: status === 'Rejected' ? String(rejectionReason).trim() : store.leaves[idx].rejectionReason,
+      updatedAt: now,
+    };
+    writeLeaveStore(store);
+    return res.json({ ok: true, leave: store.leaves[idx] });
+  });
+
+  app.delete('/api/leaves/:id', (req, res) => {
+    const { id } = req.params;
+    const { deletedBy, reason } = req.body || {};
+    const store = readLeaveStore();
+    const idx = store.leaves.findIndex((l) => l.id === id);
+    if (idx < 0) return res.status(404).json({ error: 'Leave application not found.' });
+    const target = store.leaves[idx];
+    if (target.status === 'Approved' || target.status === 'Rejected') {
+      return res.status(403).json({ error: 'Approved or rejected applications cannot be deleted.' });
+    }
+    const now = new Date().toISOString();
+    store.leaves[idx] = {
+      ...target,
+      deletedStatus: 'Deleted',
+      deletedAt: now,
+      deletedBy: deletedBy || 'Teacher',
+      deletionReason: reason || 'Withdrawn by applicant',
+      updatedAt: now,
+    };
+    writeLeaveStore(store);
+    return res.json({ ok: true, leave: store.leaves[idx] });
   });
 
   app.post('/api/ocr/extract-students', async (req, res) => {
@@ -136,6 +496,65 @@ async function startServer() {
       console.error('OCR API Error:', message);
       return res.status(500).json({ error: message });
     }
+  });
+
+  // =========================================================================
+  // TEACHER ATTENDANCE & SERVICE BOOK DAILY REGISTER API (DATE-WISE SYNC)
+  // =========================================================================
+  app.get('/api/teacher-attendance', (req, res) => {
+    const store = readTeacherAttendanceStore();
+    const { teacherId, date } = req.query as { teacherId?: string; date?: string };
+    let list = store.records;
+    if (teacherId) list = list.filter((r) => r.teacherId === teacherId);
+    if (date) list = list.filter((r) => r.date === date);
+    return res.json({ count: list.length, records: list });
+  });
+
+  app.post('/api/teacher-attendance', (req, res) => {
+    const payload = req.body;
+    if (!payload || !payload.teacherId || !payload.date || !payload.status) {
+      return res.status(400).json({ error: 'Missing required teacher attendance fields (teacherId, date, status).' });
+    }
+    const store = readTeacherAttendanceStore();
+    const now = new Date().toISOString();
+    const id = payload.id || `att-${payload.teacherId}-${payload.date}`;
+    const idx = store.records.findIndex((r) => r.teacherId === payload.teacherId && r.date === payload.date);
+    const mergedRecord = {
+      ...(idx >= 0 ? store.records[idx] : {}),
+      ...payload,
+      id,
+      updatedAt: now,
+    };
+    if (idx >= 0) {
+      store.records[idx] = mergedRecord;
+    } else {
+      store.records.unshift(mergedRecord);
+    }
+    writeTeacherAttendanceStore(store);
+    return res.status(idx >= 0 ? 200 : 201).json({ ok: true, record: mergedRecord });
+  });
+
+  app.put('/api/teacher-attendance/:id', (req, res) => {
+    const { id } = req.params;
+    const payload = req.body;
+    const store = readTeacherAttendanceStore();
+    const now = new Date().toISOString();
+    const idx = store.records.findIndex(
+      (r) => r.id === id || (payload?.teacherId && payload?.date && r.teacherId === payload.teacherId && r.date === payload.date)
+    );
+    const mergedRecord = {
+      ...(idx >= 0 ? store.records[idx] : {}),
+      ...payload,
+      id,
+      updatedAt: now,
+    };
+    if (idx >= 0) {
+      store.records[idx] = mergedRecord;
+    } else {
+      store.records.unshift(mergedRecord);
+    }
+    writeTeacherAttendanceStore(store);
+    return res.json({ ok: true, record: mergedRecord });
   });
 
   if (process.env.NODE_ENV !== 'production') {

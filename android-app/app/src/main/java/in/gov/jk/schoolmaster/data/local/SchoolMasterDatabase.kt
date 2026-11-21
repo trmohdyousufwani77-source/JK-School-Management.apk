@@ -19,9 +19,10 @@ import java.util.Locale
         BiometricAuditLogEntity::class,
         TeacherAttendanceEntity::class,
         ScannerHistoryEntity::class,
-        HpcCardEntity::class
+        HpcCardEntity::class,
+        LeaveAuditLogEntity::class
     ],
-    version = 4,
+    version = 6,
     exportSchema = false
 )
 abstract class SchoolMasterDatabase : RoomDatabase() {
@@ -150,13 +151,45 @@ class SchoolMasterRepository(private val db: SchoolMasterDatabase) {
     suspend fun queueOfflineTeacherAttendance(teacherName: String, teacherId: String, dateIso: String) {
         db.teacherAttendanceDao().upsert(
             TeacherAttendanceEntity(
-                id = "ATT-${System.currentTimeMillis()}",
+                id = "ATT-$teacherId-$dateIso",
                 teacherId = teacherId,
                 teacherName = teacherName,
                 dateIso = dateIso,
                 status = "Present",
                 syncStatus = "PENDING",
                 lastModified = System.currentTimeMillis()
+            )
+        )
+    }
+
+    suspend fun saveEditableTeacherAttendanceRecord(
+        teacherId: String,
+        teacherName: String,
+        dateIso: String,
+        status: String,
+        arrivalTime: String,
+        departureTime: String,
+        designation: String,
+        remarksByHoi: String,
+        updatedBy: String,
+        changeHistoryJson: String = "[]"
+    ) {
+        val now = System.currentTimeMillis()
+        db.teacherAttendanceDao().upsert(
+            TeacherAttendanceEntity(
+                id = "ATT-$teacherId-$dateIso",
+                teacherId = teacherId,
+                teacherName = teacherName,
+                dateIso = dateIso,
+                status = status,
+                arrivalTime = arrivalTime,
+                departureTime = departureTime,
+                designation = designation,
+                remarksByHoi = remarksByHoi,
+                updatedBy = updatedBy,
+                changeHistoryJson = changeHistoryJson,
+                syncStatus = "PENDING",
+                lastModified = now
             )
         )
     }
@@ -213,14 +246,120 @@ class SchoolMasterRepository(private val db: SchoolMasterDatabase) {
         db.teacherDao().upsert(teacher.copy(updatedAtMillis = System.currentTimeMillis()))
     }
 
-    suspend fun submitLeaveRequest(leave: TeacherLeaveEntity) {
-        db.protectedModulesDao().insertLeave(leave)
+    suspend fun submitLeaveRequest(leave: TeacherLeaveEntity): Boolean {
+        val overlap = db.protectedModulesDao().findOverlappingLeave(
+            teacherId = leave.teacherId,
+            startDate = leave.startDate,
+            endDate = leave.endDate,
+            excludeId = leave.id
+        )
+        if (overlap != null) return false
+        val now = System.currentTimeMillis()
+        db.protectedModulesDao().insertLeave(leave.copy(updatedAtMillis = now))
+        db.protectedModulesDao().insertLeaveAuditLog(
+            LeaveAuditLogEntity(
+                applicationId = leave.id,
+                action = "CREATE",
+                actorName = leave.teacherName,
+                actorRole = "teacher",
+                summary = "Submitted ${leave.leaveType} (${leave.startDate} to ${leave.endDate}, ${leave.totalDays}d)",
+                timestampMillis = now
+            )
+        )
+        return true
     }
 
-    suspend fun decideLeave(leaveId: String, approved: Boolean) {
-        db.protectedModulesDao().updateLeaveStatus(
+    suspend fun editPendingLeave(leave: TeacherLeaveEntity, actorName: String): Boolean {
+        if (leave.status != "Pending") return false
+        val overlap = db.protectedModulesDao().findOverlappingLeave(
+            teacherId = leave.teacherId,
+            startDate = leave.startDate,
+            endDate = leave.endDate,
+            excludeId = leave.id
+        )
+        if (overlap != null) return false
+        val now = System.currentTimeMillis()
+        db.protectedModulesDao().insertLeave(leave.copy(updatedAtMillis = now))
+        db.protectedModulesDao().insertLeaveAuditLog(
+            LeaveAuditLogEntity(
+                applicationId = leave.id,
+                action = "EDIT",
+                actorName = actorName,
+                actorRole = "teacher",
+                summary = "Edited pending leave (${leave.startDate} to ${leave.endDate}, ${leave.totalDays}d)",
+                timestampMillis = now
+            )
+        )
+        return true
+    }
+
+    suspend fun deletePendingLeave(leaveId: String, actorName: String, reason: String) {
+        val now = System.currentTimeMillis()
+        db.protectedModulesDao().softDeletePendingLeave(leaveId, actorName, reason, now)
+        db.protectedModulesDao().insertLeaveAuditLog(
+            LeaveAuditLogEntity(
+                applicationId = leaveId,
+                action = "DELETE",
+                actorName = actorName,
+                actorRole = "teacher",
+                summary = "Soft-deleted pending leave for audit trail: $reason",
+                timestampMillis = now
+            )
+        )
+    }
+
+    suspend fun decideLeave(
+        leaveId: String,
+        approved: Boolean,
+        actorName: String = "Mohd Yousuf Wani",
+        remarks: String = "",
+        rejectionReason: String = ""
+    ) {
+        val status = if (approved) "Approved" else "Rejected"
+        val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Calendar.getInstance().time)
+        val now = System.currentTimeMillis()
+        db.protectedModulesDao().recordLeaveDecision(
             leaveId = leaveId,
-            status = if (approved) "Approved" else "Rejected"
+            status = status,
+            remarks = remarks,
+            rejectionReason = if (approved) "" else rejectionReason,
+            decidedBy = actorName,
+            decisionDate = today,
+            nowMillis = now
+        )
+        db.protectedModulesDao().insertLeaveAuditLog(
+            LeaveAuditLogEntity(
+                applicationId = leaveId,
+                action = if (approved) "APPROVE" else "REJECT",
+                actorName = actorName,
+                actorRole = "headmaster",
+                summary = if (approved) "Approved by $actorName: $remarks" else "Rejected by $actorName: $rejectionReason",
+                timestampMillis = now
+            )
+        )
+    }
+
+    suspend fun markLeaveUnderReview(leaveId: String, actorName: String, remarks: String) {
+        val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Calendar.getInstance().time)
+        val now = System.currentTimeMillis()
+        db.protectedModulesDao().recordLeaveDecision(
+            leaveId = leaveId,
+            status = "Under_Review",
+            remarks = remarks,
+            rejectionReason = "",
+            decidedBy = actorName,
+            decisionDate = today,
+            nowMillis = now
+        )
+        db.protectedModulesDao().insertLeaveAuditLog(
+            LeaveAuditLogEntity(
+                applicationId = leaveId,
+                action = "REVIEW",
+                actorName = actorName,
+                actorRole = "headmaster",
+                summary = "Marked Under Review by $actorName: $remarks",
+                timestampMillis = now
+            )
         )
     }
 
@@ -292,7 +431,7 @@ class SchoolMasterRepository(private val db: SchoolMasterDatabase) {
                 listOf(
                     TeacherEntity(
                         id = "TCH-2026-001",
-                        employeeCode = "JKEDU-T-104",
+                        employeeCode = "KHYEDU 00220000",
                         fullName = "Nazir Ahmad Dar",
                         designation = "Senior Teacher",
                         subject = "Mathematics & Science",
@@ -427,7 +566,7 @@ class SchoolMasterRepository(private val db: SchoolMasterDatabase) {
                         fatherName = "Rajesh Sharma",
                         dob = "2015-05-14",
                         gender = "Male",
-                        address = "Pamposh Colony, Palpora, Srinagar, J&K 190017",
+                        address = "Pamposh Colony, Palapora Zone, Iddgah",
                         mobileNumber = "9810001101",
                         bloodGroup = "B+",
                         includeQr = true,
@@ -441,7 +580,7 @@ class SchoolMasterRepository(private val db: SchoolMasterDatabase) {
                         fatherName = "Tariq Mir",
                         dob = "2015-09-22",
                         gender = "Female",
-                        address = "Pamposh Colony, Palpora, Srinagar, J&K 190017",
+                        address = "Pamposh Colony, Palapora Zone, Iddgah",
                         mobileNumber = "9810001103",
                         bloodGroup = "O+",
                         includeQr = true,

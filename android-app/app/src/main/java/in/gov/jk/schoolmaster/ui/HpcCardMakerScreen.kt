@@ -189,7 +189,7 @@ fun HpcCardMakerScreen(
     var fatherName by remember { mutableStateOf("") }
     var dob by remember { mutableStateOf("2015-05-15") }
     var gender by remember { mutableStateOf("Male") }
-    var address by remember { mutableStateOf("Pamposh Colony, Palpora, Srinagar, J&K 190017") }
+    var address by remember { mutableStateOf("Pamposh Colony, Palapora Zone, Iddgah") }
     var mobileNumber by remember { mutableStateOf("") }
     var bloodGroup by remember { mutableStateOf("B+") }
     var photoPath by remember { mutableStateOf("") }
@@ -1347,19 +1347,42 @@ fun renderHpcCardSideBitmap(
     }
 
     val headerTextStartX = if (officialLogo != null) {
+        val frameLeft = 24f
+        val frameTop = 18f
+        val frameRight = 114f
+        val frameBottom = 108f
         val logoBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = android.graphics.Color.WHITE }
-        canvas.drawRoundRect(RectF(26f, 20f, 112f, 106f), 14f, 14f, logoBg)
-        canvas.drawBitmap(officialLogo, null, RectF(32f, 26f, 106f, 100f), null)
-        132f
+        canvas.drawRoundRect(RectF(frameLeft, frameTop, frameRight, frameBottom), 14f, 14f, logoBg)
+
+        // Preserve original aspect ratio inside padded logo frame without cropping or distortion
+        val pad = 8f
+        val maxW = (frameRight - frameLeft) - pad * 2f
+        val maxH = (frameBottom - frameTop) - pad * 2f
+        val bmpW = officialLogo.width.coerceAtLeast(1).toFloat()
+        val bmpH = officialLogo.height.coerceAtLeast(1).toFloat()
+        val scale = minOf(maxW / bmpW, maxH / bmpH)
+        val drawW = bmpW * scale
+        val drawH = bmpH * scale
+        val drawLeft = frameLeft + ((frameRight - frameLeft) - drawW) / 2f
+        val drawTop = frameTop + ((frameBottom - frameTop) - drawH) / 2f
+
+        canvas.drawBitmap(
+            officialLogo,
+            null,
+            RectF(drawLeft, drawTop, drawLeft + drawW, drawTop + drawH),
+            Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        )
+        136f
     } else {
         34f
     }
 
-    canvas.drawText(card.schoolName.uppercase(), headerTextStartX, 60f, titlePaint)
+    canvas.drawText(card.schoolName.uppercase(), headerTextStartX, 54f, titlePaint)
+    canvas.drawText("Pamposh Colony, Palapora Zone, Iddgah", headerTextStartX, 82f, subTitlePaint)
     canvas.drawText(
         if (isBackSide) "HOLISTIC PERSONAL CARD (BACK SIDE)" else "OFFICIAL HPC PROFILE CARD • ${card.hpcId}",
         headerTextStartX,
-        98f,
+        106f,
         subTitlePaint
     )
 

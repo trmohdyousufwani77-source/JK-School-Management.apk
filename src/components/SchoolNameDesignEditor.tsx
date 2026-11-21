@@ -113,7 +113,7 @@ export const URDU_WORD_DICTIONARY: Record<string, UrduWordDetail> = {
     urduMeaning: 'کنول کا پھول / نیلوفر (کشمیری زبان کی قدیم علامت برائے پاکیزگی و علم)',
     partOfSpeech: 'اسمِ معرفہ (Proper Noun / Cultural Identity)',
     rootOrEtymology: 'Traditional Kashmiri word: "Pam" (fresh spring/lake water) + "Posh" (flower / radiant bloom)',
-    educationalNote: 'The sacred lotus that blooms in Kashmir’s Dal and Wular lakes; an enduring Kashmiri symbol of resilience, purity rising above mud, tranquility, and intellectual illumination. Pamposh Colony is located in Palpora, Tehsil Iddgah, District Srinagar (PIN 190017).',
+    educationalNote: 'The sacred lotus that blooms in Kashmir’s Dal and Wular lakes; an enduring Kashmiri symbol of resilience, purity rising above mud, tranquility, and intellectual illumination. Located at Pamposh Colony, Palapora Zone, Iddgah.',
   },
   'پمپوش': {
     word: 'پمپوش',
@@ -131,7 +131,7 @@ export const URDU_WORD_DICTIONARY: Record<string, UrduWordDetail> = {
     urduMeaning: 'آبادی / بستی / رہائشی محلہ / بستیِ سکونت',
     partOfSpeech: 'اسم (Noun / Locality identifier)',
     rootOrEtymology: 'Urban locality term standardized in South Asian revenue maps to denote residential quarters',
-    educationalNote: 'Specifies the Pamposh Colony residential locality situated within Palpora, Tehsil Iddgah, District Srinagar (PIN 190017).',
+    educationalNote: 'Specifies the residential locality at Pamposh Colony, Palapora Zone, Iddgah.',
   },
 };
 

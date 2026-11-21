@@ -73,53 +73,43 @@ export function deduplicateMarksEntries(entries: StudentMarkEntry[]): StudentMar
   return Array.from(map.values());
 }
 
+export const OFFICIAL_SCHOOL_ADDRESS = 'Pamposh Colony, Palapora Zone, Iddgah';
+
+export function isLegacySchoolAddress(address?: string | null): boolean {
+  if (!address) return false;
+  const lower = address.trim().toLowerCase();
+  if (!lower) return false;
+  return (
+    (lower.includes('pamposh colony') &&
+      (lower.includes('palpora') ||
+        lower.includes('tehsil iddgah') ||
+        lower.includes('190017') ||
+        lower.includes('district srinagar'))) ||
+    lower === 'pamposh colony, srinagar'
+  );
+}
+
 /**
- * Formats the school address cleanly so "Srinagar, Jammu and Kashmir - 190017"
- * is never repeated twice when `school.address` already contains the district/state/PIN.
+ * Formats the school address cleanly.
+ * Automatically normalizes the legacy Pamposh Colony / Palpora / 190017 address
+ * to the updated official address: "Pamposh Colony, Palapora Zone, Iddgah".
  */
 export function formatSchoolAddressOnce(
   school: Pick<SchoolProfile, 'address' | 'district' | 'state' | 'pinCode'>
 ): string {
-  const rawAddress = (school.address || '').trim();
-  const district = (school.district || '').trim();
-  const state = (school.state || '').trim();
-  const pinCode = (school.pinCode || '').trim();
+  const rawAddress = (school.address || '').trim().replace(/\s+/g, ' ');
+  const lowerRaw = rawAddress.toLowerCase();
 
-  if (!rawAddress) {
-    const base = [district, state].filter(Boolean).join(', ');
-    return pinCode ? (base ? `${base} - ${pinCode}` : pinCode) : base;
+  if (
+    !rawAddress ||
+    lowerRaw === OFFICIAL_SCHOOL_ADDRESS.toLowerCase() ||
+    lowerRaw === `${OFFICIAL_SCHOOL_ADDRESS.toLowerCase()}.` ||
+    isLegacySchoolAddress(rawAddress)
+  ) {
+    return OFFICIAL_SCHOOL_ADDRESS;
   }
 
-  // Collapse any accidental repeated ", District, State - PIN" suffix in stored addresses
-  let cleanAddress = rawAddress.replace(/\s+/g, ' ').trim();
-  if (district && pinCode) {
-    const dupSuffixPattern = new RegExp(
-      `([,;\\s]+(?:District\\s+)?${district.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')},?\\s*(?:Jammu\\s*(?:&|and)\\s*Kashmir|${state.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})?\\s*[-–]?\\s*${pinCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.?){2,}$`,
-      'i'
-    );
-    cleanAddress = cleanAddress.replace(dupSuffixPattern, (match) => {
-      // Keep only a single clean occurrence
-      const parts = match.split(new RegExp(`(?=(?:District\\s+)?${district})`, 'i')).filter(Boolean);
-      return parts[0] || match;
-    });
-  }
-
-  const lower = cleanAddress.toLowerCase();
-  const hasDistrict = district ? lower.includes(district.toLowerCase()) : false;
-  const hasState = state
-    ? lower.includes(state.toLowerCase()) || lower.includes('jammu & kashmir') || lower.includes('jammu and kashmir') || lower.includes('j&k')
-    : false;
-  const hasPin = pinCode ? lower.includes(pinCode.toLowerCase()) : false;
-
-  const extras: string[] = [];
-  if (district && !hasDistrict) extras.push(district);
-  if (state && !hasState) extras.push(state);
-  const baseWithLocation =
-    extras.length > 0 ? `${cleanAddress.replace(/\.$/, '')}, ${extras.join(', ')}` : cleanAddress;
-  if (pinCode && !hasPin) {
-    return `${baseWithLocation.replace(/\.$/, '')} - ${pinCode}`;
-  }
-  return baseWithLocation;
+  return rawAddress.replace(/\.$/, '');
 }
 
 /**

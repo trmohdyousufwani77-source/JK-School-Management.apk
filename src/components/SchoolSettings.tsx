@@ -97,6 +97,12 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
   const [headmasterSignatureDataUrl, setHeadmasterSignatureDataUrl] = useState(school.headmasterSignatureDataUrl || '');
   const [logoDataUrl, setLogoDataUrl] = useState(school.logoDataUrl || '');
   const [showLogoPreviewModal, setShowLogoPreviewModal] = useState<boolean>(false);
+  const [showLogoEditModal, setShowLogoEditModal] = useState<boolean>(false);
+  const [logoEditSourceUrl, setLogoEditSourceUrl] = useState<string>('');
+  const [logoEditScale, setLogoEditScale] = useState<number>(100);
+  const [logoEditPadding, setLogoEditPadding] = useState<number>(8);
+  const [logoEditBg, setLogoEditBg] = useState<'transparent' | '#ffffff' | '#fffbeb' | '#0f172a'>('#ffffff');
+  const [logoEditShape, setLogoEditShape] = useState<'rounded' | 'circle' | 'square'>('rounded');
   const [confirmDeleteLogo, setConfirmDeleteLogo] = useState<boolean>(false);
   const [logoStatusMessage, setLogoStatusMessage] = useState<string | null>(null);
   const [principalDesignation, setPrincipalDesignation] = useState<'Headmaster' | 'Principal' | 'Headmistress' | 'Officiating Principal' | 'In-Charge Headmaster'>(
@@ -118,7 +124,7 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
   const [longitude, setLongitude] = useState<number>(school.longitude ?? 79.4304);
   const [geofenceRadiusMeters, setGeofenceRadiusMeters] = useState<number>(school.geofenceRadiusMeters ?? 250);
   const [locationAddress, setLocationAddress] = useState<string>(
-    school.locationAddress || 'Campus Main Gate 1, Pamposh Colony, Palpora, Srinagar'
+    school.locationAddress || 'Campus Main Gate, Pamposh Colony, Palapora Zone, Iddgah'
   );
   const [requireLocationForAttendance, setRequireLocationForAttendance] = useState<boolean>(
     school.requireLocationForAttendance ?? true
@@ -750,8 +756,8 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
                 {isAuthorizedAdmin ? (
                   <>
                     <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-xs transition-colors">
-                      {logoDataUrl ? <Edit3 className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
-                      <span>{logoDataUrl ? 'Edit Logo' : 'Add Logo'}</span>
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>{logoDataUrl ? 'Upload New' : 'Upload Logo'}</span>
                       <input
                         type="file"
                         accept="image/*"
@@ -764,6 +770,22 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
                         }}
                       />
                     </label>
+                    <button
+                      type="button"
+                      disabled={!logoDataUrl}
+                      onClick={() => {
+                        setLogoEditSourceUrl(logoDataUrl);
+                        setLogoEditScale(100);
+                        setLogoEditPadding(8);
+                        setLogoEditBg('#ffffff');
+                        setLogoEditShape('rounded');
+                        setShowLogoEditModal(true);
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-amber-50 hover:bg-amber-100 disabled:opacity-40 text-amber-800 border border-amber-300 font-bold text-xs transition-colors"
+                    >
+                      <Edit3 className="w-3.5 h-3.5" />
+                      <span>Edit Logo</span>
+                    </button>
                     <button
                       type="button"
                       disabled={!logoDataUrl}
@@ -822,6 +844,220 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
                   >
                     Cancel
                   </button>
+                </div>
+              </div>
+            )}
+
+            {showLogoEditModal && logoEditSourceUrl && isAuthorizedAdmin && (
+              <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+                <div className="bg-white rounded-3xl border border-slate-200 shadow-2xl max-w-md w-full p-5 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h4 className="font-black text-slate-900 text-sm">Edit Official School Logo</h4>
+                      <p className="text-[11px] text-slate-500">
+                        Adjust scale, padding, frame shape, and backdrop before saving to School Profile
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowLogoEditModal(false)}
+                      className="p-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  <div className="flex justify-center">
+                    <div
+                      className={`w-44 h-44 border border-slate-200 shadow-inner flex items-center justify-center overflow-hidden ${
+                        logoEditShape === 'circle'
+                          ? 'rounded-full'
+                          : logoEditShape === 'rounded'
+                          ? 'rounded-3xl'
+                          : 'rounded-none'
+                      }`}
+                      style={{
+                        backgroundColor: logoEditBg === 'transparent' ? '#f8fafc' : logoEditBg,
+                        padding: `${logoEditPadding}%`,
+                      }}
+                    >
+                      <img
+                        src={logoEditSourceUrl}
+                        alt="Edited Logo Preview"
+                        className="w-full h-full object-contain transition-transform"
+                        style={{ transform: `scale(${logoEditScale / 100})` }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-3 text-xs">
+                    <div>
+                      <div className="flex justify-between font-bold text-slate-700 mb-1">
+                        <span>Scale / Zoom</span>
+                        <span className="font-mono">{logoEditScale}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={60}
+                        max={140}
+                        value={logoEditScale}
+                        onChange={(e) => setLogoEditScale(Number(e.target.value))}
+                        className="w-full accent-indigo-600"
+                      />
+                    </div>
+
+                    <div>
+                      <div className="flex justify-between font-bold text-slate-700 mb-1">
+                        <span>Inner Padding</span>
+                        <span className="font-mono">{logoEditPadding}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={24}
+                        value={logoEditPadding}
+                        onChange={(e) => setLogoEditPadding(Number(e.target.value))}
+                        className="w-full accent-indigo-600"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <span className="block font-bold text-slate-700 mb-1">Frame Shape</span>
+                        <div className="flex gap-1.5">
+                          {(['rounded', 'circle', 'square'] as const).map((shape) => (
+                            <button
+                              key={shape}
+                              type="button"
+                              onClick={() => setLogoEditShape(shape)}
+                              className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold capitalize border ${
+                                logoEditShape === shape
+                                  ? 'bg-indigo-600 text-white border-indigo-600'
+                                  : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                              }`}
+                            >
+                              {shape}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <span className="block font-bold text-slate-700 mb-1">Background</span>
+                        <div className="flex gap-1.5">
+                          {[
+                            { val: '#ffffff' as const, label: 'White' },
+                            { val: '#fffbeb' as const, label: 'Cream' },
+                            { val: '#0f172a' as const, label: 'Navy' },
+                            { val: 'transparent' as const, label: 'None' },
+                          ].map((bg) => (
+                            <button
+                              key={bg.val}
+                              type="button"
+                              onClick={() => setLogoEditBg(bg.val)}
+                              className={`flex-1 py-1.5 rounded-lg text-[10px] font-bold border ${
+                                logoEditBg === bg.val
+                                  ? 'bg-indigo-600 text-white border-indigo-600'
+                                  : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                              }`}
+                            >
+                              {bg.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between pt-2 border-t border-slate-100">
+                    <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs">
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>Replace Image</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => {
+                          handleAdminImageUpload(e, (url) => setLogoEditSourceUrl(url));
+                          e.target.value = '';
+                        }}
+                      />
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowLogoEditModal(false)}
+                        className="px-3 py-2 rounded-xl border border-slate-200 text-slate-700 font-bold text-xs hover:bg-slate-50"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const img = new window.Image();
+                          img.onload = () => {
+                            const size = 512;
+                            const canvas = document.createElement('canvas');
+                            canvas.width = size;
+                            canvas.height = size;
+                            const ctx = canvas.getContext('2d');
+                            if (!ctx) return;
+
+                            ctx.save();
+                            if (logoEditShape === 'circle') {
+                              ctx.beginPath();
+                              ctx.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2);
+                              ctx.clip();
+                            } else if (logoEditShape === 'rounded') {
+                              const r = 64;
+                              ctx.beginPath();
+                              ctx.moveTo(r, 0);
+                              ctx.lineTo(size - r, 0);
+                              ctx.quadraticCurveTo(size, 0, size, r);
+                              ctx.lineTo(size, size - r);
+                              ctx.quadraticCurveTo(size, size, size - r, size);
+                              ctx.lineTo(r, size);
+                              ctx.quadraticCurveTo(0, size, 0, size - r);
+                              ctx.lineTo(0, r);
+                              ctx.quadraticCurveTo(0, 0, r, 0);
+                              ctx.closePath();
+                              ctx.clip();
+                            }
+
+                            if (logoEditBg !== 'transparent') {
+                              ctx.fillStyle = logoEditBg;
+                              ctx.fillRect(0, 0, size, size);
+                            }
+
+                            const padPx = (logoEditPadding / 100) * size;
+                            const avail = size - padPx * 2;
+                            const scaleFactor = logoEditScale / 100;
+                            const ratio = Math.min(avail / img.width, avail / img.height) * scaleFactor;
+                            const drawW = img.width * ratio;
+                            const drawH = img.height * ratio;
+                            ctx.drawImage(
+                              img,
+                              (size - drawW) / 2,
+                              (size - drawH) / 2,
+                              drawW,
+                              drawH
+                            );
+                            ctx.restore();
+
+                            const rendered = canvas.toDataURL('image/png');
+                            handleSaveOfficialLogo(
+                              rendered,
+                              'Edited Official School Logo saved & applied across all widgets.'
+                            );
+                            setShowLogoEditModal(false);
+                          };
+                          img.src = logoEditSourceUrl;
+                        }}
+                        className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-xs"
+                      >
+                        Apply Edited Logo
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
             )}

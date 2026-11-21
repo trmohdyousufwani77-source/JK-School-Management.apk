@@ -29,20 +29,44 @@ data class TeacherEntity(
     val mobileNumber: String,
     val leaveBalanceDays: Int = 12,
     val status: String = "Active",
+    val latestHoiRemarks: String = "",
     val updatedAtMillis: Long = System.currentTimeMillis()
 )
 
 @Entity(tableName = "teacher_leaves")
 data class TeacherLeaveEntity(
-    @PrimaryKey val id: String,
-    val teacherId: String,
+    @PrimaryKey val id: String, // Application ID
+    val teacherId: String, // Teacher ID
     val teacherName: String,
-    val leaveType: String,
-    val startDate: String,
-    val endDate: String,
+    val leaveType: String, // Casual_Leave, Medical_Leave, etc.
+    val startDate: String, // From Date (YYYY-MM-DD)
+    val endDate: String, // To Date (YYYY-MM-DD)
     val totalDays: Int,
     val reason: String,
-    val status: String = "Pending"
+    val status: String = "Pending", // Pending, Under_Review, Approved, Rejected
+    val employeeId: String = "", // CPIS / Employee ID
+    val applicationDate: String = "",
+    val medicalDocumentUrl: String = "", // Uploaded PDF, JPG, PNG URI/path
+    val headmasterRemarks: String = "",
+    val rejectionReason: String = "",
+    val decidedBy: String = "", // Approved / Rejected By
+    val decisionDate: String = "", // Approval / Rejection Date
+    val createdAtMillis: Long = System.currentTimeMillis(),
+    val updatedAtMillis: Long = System.currentTimeMillis(),
+    val deletedStatus: String = "Active", // Active or Deleted (audit record preserved)
+    val deletedBy: String = "",
+    val deletionReason: String = ""
+)
+
+@Entity(tableName = "leave_audit_logs")
+data class LeaveAuditLogEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val applicationId: String,
+    val action: String, // CREATE, EDIT, UPLOAD_DOC, REVIEW, APPROVE, REJECT, DELETE
+    val actorName: String,
+    val actorRole: String,
+    val summary: String,
+    val timestampMillis: Long = System.currentTimeMillis()
 )
 
 @Entity(tableName = "examinations")
@@ -77,7 +101,13 @@ data class TeacherAttendanceEntity(
     val teacherId: String,
     val teacherName: String,
     val dateIso: String, // YYYY-MM-DD
-    val status: String = "Present", // Present / Late / Leave / Absent
+    val status: String = "Present", // Present, Absent, Casual Leave (CL), Medical Leave (ML), On Duty (OD), Half Day, Late Arrival, Other
+    val arrivalTime: String = "09:00 AM",
+    val departureTime: String = "04:00 PM",
+    val designation: String = "",
+    val remarksByHoi: String = "",
+    val updatedBy: String = "",
+    val changeHistoryJson: String = "[]",
     val syncStatus: String = "PENDING", // "PENDING" or "SYNCED"
     val lastModified: Long = System.currentTimeMillis()
 )

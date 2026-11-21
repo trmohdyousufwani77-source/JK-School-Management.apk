@@ -123,21 +123,63 @@ export function generateBatchClassProgressCardsPdf(options: BatchClassProgressCa
     doc.rect(margin - 2.5, 7.5, contentWidth + 5, pageHeight - 15);
 
     // ------------------------------------------------------------------------
-    // 2. HEADER BANNER: School Information & School Logo
+    // 2. HEADER BANNER: School Information & School Logo (Aspect-Ratio Safe, Zero Overlap)
     // ------------------------------------------------------------------------
-    doc.setFillColor(30, 41, 59); // slate-800
-    doc.rect(margin, 10, contentWidth, 18, 'F');
+    doc.setFillColor(15, 41, 74); // deep navy #0f294a
+    doc.rect(margin, 10, contentWidth, 20, 'F');
+
+    let headerTextCenterX = pageWidth / 2;
+    let headerTextMaxWidth = contentWidth - 10;
 
     if (school.logoDataUrl) {
       try {
+        const frameX = margin + 3;
+        const frameY = 11.5;
+        const frameSize = 17;
+        const innerPad = 1.4;
+        const availSize = frameSize - innerPad * 2;
+
+        // Crisp white rounded container so logo is clearly visible and never covered
+        doc.setFillColor(255, 255, 255);
+        doc.setDrawColor(251, 191, 36); // amber accent border
+        doc.setLineWidth(0.35);
+        doc.roundedRect(frameX, frameY, frameSize, frameSize, 1.8, 1.8, 'FD');
+
+        let drawW = availSize;
+        let drawH = availSize;
+        try {
+          const props = doc.getImageProperties(school.logoDataUrl);
+          if (props && props.width > 0 && props.height > 0) {
+            const aspect = props.width / props.height;
+            if (aspect >= 1) {
+              drawW = availSize;
+              drawH = availSize / aspect;
+            } else {
+              drawH = availSize;
+              drawW = availSize * aspect;
+            }
+          }
+        } catch {
+          // Keep square fallback if metadata unavailable
+        }
+
+        const drawX = frameX + (frameSize - drawW) / 2;
+        const drawY = frameY + (frameSize - drawH) / 2;
+
         doc.addImage(
           school.logoDataUrl,
           inferImageFormat(school.logoDataUrl),
-          margin + 2.5,
-          11.5,
-          15,
-          15
+          drawX,
+          drawY,
+          drawW,
+          drawH
         );
+
+        // Shift text zone cleanly to the right of the logo frame with generous spacing
+        const textZoneLeft = frameX + frameSize + 4;
+        const textZoneRight = margin + contentWidth - 3;
+        headerTextMaxWidth = textZoneRight - textZoneLeft;
+        headerTextCenterX = textZoneLeft + headerTextMaxWidth / 2;
       } catch {
         // Fallback if invalid logo data URL
       }
@@ -145,29 +187,36 @@ export function generateBatchClassProgressCardsPdf(options: BatchClassProgressCa
 
     doc.setTextColor(255, 255, 255);
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(12);
-    doc.text(school.name.toUpperCase(), pageWidth / 2, 16, { align: 'center' });
+    doc.setFontSize(11.5);
+    doc.text(school.name.toUpperCase(), headerTextCenterX, 16.2, {
+      align: 'center',
+      maxWidth: headerTextMaxWidth,
+    });
 
-    doc.setFontSize(7.5);
+    doc.setFontSize(7.6);
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(226, 232, 240); // slate-200
     doc.text(
-      `${formattedAddressOnce} | U-DISE: ${school.code}`,
-      pageWidth / 2,
-      21,
-      { align: 'center' }
+      `${formattedAddressOnce}  |  U-DISE: ${school.code}`,
+      headerTextCenterX,
+      21.8,
+      { align: 'center', maxWidth: headerTextMaxWidth }
     );
+    doc.setTextColor(253, 230, 138); // warm amber
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.2);
     doc.text(
-      `ACADEMIC SESSION: ${school.academicSession} | EXAMINATION: ${examination.name.toUpperCase()}`,
-      pageWidth / 2,
-      25,
-      { align: 'center' }
+      `ACADEMIC SESSION: ${school.academicSession}  |  EXAMINATION: ${examination.name.toUpperCase()}`,
+      headerTextCenterX,
+      26.4,
+      { align: 'center', maxWidth: headerTextMaxWidth }
     );
 
     // Subheader Ribbon: Holistic Progress Card Title
     doc.setFillColor(241, 245, 249); // slate-100
     doc.setDrawColor(203, 213, 225); // slate-300
-    doc.rect(margin, 30, contentWidth, 7, 'FD');
+    doc.setLineWidth(0.2);
+    doc.rect(margin, 31.2, contentWidth, 6.4, 'FD');
 
     doc.setTextColor(15, 23, 42); // slate-900
     doc.setFont('helvetica', 'bold');
@@ -433,15 +482,39 @@ export function generateBatchClassProgressCardsPdf(options: BatchClassProgressCa
     doc.setTextColor(51, 65, 85);
     doc.text(doc.splitTextToSize(hol.areasForImprovement, boxW - 5), margin + boxW + 6.5, obsY + 7);
 
-    // Box 3: Teacher's General Remarks
+    // Box 3: Teacher's General Remarks (single-line auto-fit layout)
     doc.setFillColor(248, 250, 252);
     doc.rect(margin, obsY + 16, boxW, 14, 'FD');
-    doc.setFont('helvetica', 'bold');
-    doc.setTextColor(30, 41, 59);
-    doc.text("Class Teacher's General Remarks:", margin + 2.5, obsY + 19.5);
+    const teacherRemarkBody = (
+      hol.teacherRemarks ||
+      'Diligent learner demonstrating steady holistic growth across academic and Co-Scholastic activities.'
+    )
+      .replace(/\s+/g, ' ')
+      .trim();
+    const remarkPrefix = /^teacher remarks:/i.test(teacherRemarkBody) ? '' : 'Teacher Remarks: ';
+    const fullRemarkSingleLine = `${remarkPrefix}${teacherRemarkBody}`;
+    const maxRemarkWidth = boxW - 5;
+    let remarkFontSize = 7.2;
     doc.setFont('helvetica', 'normal');
-    doc.setTextColor(51, 65, 85);
-    doc.text(doc.splitTextToSize(hol.teacherRemarks, boxW - 5), margin + 2.5, obsY + 23);
+    doc.setFontSize(remarkFontSize);
+    while (remarkFontSize > 4.2 && doc.getTextWidth(fullRemarkSingleLine) > maxRemarkWidth) {
+      remarkFontSize = Number((remarkFontSize - 0.15).toFixed(2));
+      doc.setFontSize(remarkFontSize);
+    }
+    if (remarkPrefix) {
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(30, 41, 59);
+      doc.text(remarkPrefix, margin + 2.5, obsY + 23.8);
+      const prefixWidth = doc.getTextWidth(remarkPrefix);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(51, 65, 85);
+      doc.text(teacherRemarkBody, margin + 2.5 + prefixWidth, obsY + 23.8);
+    } else {
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(51, 65, 85);
+      doc.text(fullRemarkSingleLine, margin + 2.5, obsY + 23.8);
+    }
+    doc.setFontSize(6.5);
 
     // Box 4: Suggestions for Parents & Next Term Goals
     doc.setFillColor(248, 250, 252);
@@ -630,32 +703,67 @@ export async function generateHpcCardsJpegBatch(
     ctx.lineWidth = 1.5;
     ctx.strokeRect(48, 48, canvas.width - 96, canvas.height - 96);
 
-    // School Header Banner
+    // School Header Banner (Aspect-Ratio Safe Logo + Dedicated Non-Overlapping Text Area)
     ctx.fillStyle = '#0f294a';
-    ctx.fillRect(68, 68, canvas.width - 136, 155);
+    ctx.fillRect(68, 68, canvas.width - 136, 162);
+
+    let textAreaLeft = 92;
+    const textAreaRight = canvas.width - 92;
 
     if (schoolLogoImg) {
       ctx.save();
+      const boxX = 88;
+      const boxY = 86;
+      const boxSize = 126;
+      const innerPad = 10;
+      const maxLogoDim = boxSize - innerPad * 2;
+
       ctx.fillStyle = '#ffffff';
-      ctx.fillRect(88, 86, 118, 118);
-      ctx.drawImage(schoolLogoImg, 94, 92, 106, 106);
+      ctx.fillRect(boxX, boxY, boxSize, boxSize);
+      ctx.strokeStyle = '#fbbf24';
+      ctx.lineWidth = 3;
+      ctx.strokeRect(boxX, boxY, boxSize, boxSize);
+
+      const natW = schoolLogoImg.naturalWidth || schoolLogoImg.width || maxLogoDim;
+      const natH = schoolLogoImg.naturalHeight || schoolLogoImg.height || maxLogoDim;
+      const aspect = natW / natH;
+      let drawW = maxLogoDim;
+      let drawH = maxLogoDim;
+      if (aspect >= 1) {
+        drawW = maxLogoDim;
+        drawH = maxLogoDim / aspect;
+      } else {
+        drawH = maxLogoDim;
+        drawW = maxLogoDim * aspect;
+      }
+
+      const drawX = boxX + (boxSize - drawW) / 2;
+      const drawY = boxY + (boxSize - drawH) / 2;
+      ctx.drawImage(schoolLogoImg, drawX, drawY, drawW, drawH);
       ctx.restore();
+
+      // Reserve clear margin to the right of the logo box so text never overlaps
+      textAreaLeft = boxX + boxSize + 28;
     }
+
+    const textAreaWidth = textAreaRight - textAreaLeft;
+    const textCenterX = textAreaLeft + textAreaWidth / 2;
 
     ctx.fillStyle = '#ffffff';
     ctx.textAlign = 'center';
-    ctx.font = 'bold 34px sans-serif';
-    ctx.fillText(school.name.toUpperCase(), canvas.width / 2 + 24, 126);
+    ctx.font = 'bold 33px sans-serif';
+    ctx.fillText(school.name.toUpperCase(), textCenterX, 128, textAreaWidth);
 
     ctx.fillStyle = '#e2e8f0';
     ctx.font = '20px sans-serif';
-    ctx.fillText(`${formattedAddress} | U-DISE: ${school.code}`, canvas.width / 2 + 24, 162);
+    ctx.fillText(`${formattedAddress}  |  U-DISE: ${school.code}`, textCenterX, 166, textAreaWidth);
     ctx.fillStyle = '#fde68a';
-    ctx.font = 'bold 19px sans-serif';
+    ctx.font = 'bold 18px sans-serif';
     ctx.fillText(
       `HOLISTIC PROGRESS CARD (HPC) • SESSION ${school.academicSession} • ${examination.name.toUpperCase()}`,
-      canvas.width / 2 + 24,
-      198
+      textCenterX,
+      204,
+      textAreaWidth
     );
 
     // Student Profile Card + Photograph
@@ -789,12 +897,33 @@ export async function generateHpcCardsJpegBatch(
       ctx.fillText(val, x + 280, y);
     });
 
-    ctx.fillStyle = '#334155';
-    ctx.font = '18px sans-serif';
-    const remarksText = `Teacher Remarks: ${hol?.teacherRemarks || 'Diligent learner demonstrating steady holistic growth across academic and co-scholastic activities.'}`;
-    ctx.fillText(remarksText.slice(0, 96), 92, cursorY + 188);
-    if (remarksText.length > 96) {
-      ctx.fillText(remarksText.slice(96, 192), 92, cursorY + 216);
+    const remarkBodyCanvas = (
+      hol?.teacherRemarks ||
+      'Diligent learner demonstrating steady holistic growth across academic and Co-Scholastic activities.'
+    )
+      .replace(/\s+/g, ' ')
+      .trim();
+    const remarkPrefixCanvas = /^teacher remarks:/i.test(remarkBodyCanvas) ? '' : 'Teacher Remarks: ';
+    const remarksText = `${remarkPrefixCanvas}${remarkBodyCanvas}`;
+    const maxCanvasRemarksWidth = canvas.width - 184;
+    let canvasRemarkSize = 18;
+    ctx.font = `${canvasRemarkSize}px sans-serif`;
+    while (canvasRemarkSize > 10 && ctx.measureText(remarksText).width > maxCanvasRemarksWidth) {
+      canvasRemarkSize -= 0.5;
+      ctx.font = `${canvasRemarkSize}px sans-serif`;
+    }
+    if (remarkPrefixCanvas) {
+      ctx.fillStyle = '#1e293b';
+      ctx.font = `bold ${canvasRemarkSize}px sans-serif`;
+      ctx.fillText(remarkPrefixCanvas, 92, cursorY + 196);
+      const prefixW = ctx.measureText(remarkPrefixCanvas).width;
+      ctx.fillStyle = '#334155';
+      ctx.font = `${canvasRemarkSize}px sans-serif`;
+      ctx.fillText(remarkBodyCanvas, 92 + prefixW, cursorY + 196);
+    } else {
+      ctx.fillStyle = '#334155';
+      ctx.font = `${canvasRemarkSize}px sans-serif`;
+      ctx.fillText(remarksText, 92, cursorY + 196);
     }
 
     // Signatures Footer (ONLY Headmaster's Name — NO developer name)

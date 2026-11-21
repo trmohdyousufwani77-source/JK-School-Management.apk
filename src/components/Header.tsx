@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   School,
   Globe2,
@@ -27,9 +27,12 @@ import {
   Laptop,
   Download,
   Sliders,
+  Search,
+  ArrowRight,
 } from 'lucide-react';
 import { Language, translations } from '../utils/translations';
-import { DeveloperAdminProfile, SchoolProfile, User } from '../types';
+import { DeveloperAdminProfile, SchoolProfile, Student, User } from '../types';
+import { deduplicateStudentsByAdmissionNumber, formatSchoolAddressOnce } from '../utils/calculations';
 import { SchoolEmblem } from './SchoolEmblem';
 import {
   loadPushPreferences,
@@ -60,6 +63,8 @@ interface HeaderProps {
   activeDevAdmin?: DeveloperAdminProfile;
   onOpenAboutUs?: () => void;
   onRunNotificationChecks?: () => void;
+  students?: Student[];
+  onNavigateToStudent?: (student: Student) => void;
 }
 
 export interface NotificationItem {
@@ -143,8 +148,115 @@ export const Header: React.FC<HeaderProps> = ({
   activeDevAdmin,
   onOpenAboutUs,
   onRunNotificationChecks,
+  students = [],
+  onNavigateToStudent,
 }) => {
   const t = translations[language];
+
+  // Global Persistent Student Search Bar State
+  const [globalSearchQuery, setGlobalSearchQuery] = useState<string>('');
+  const [isSearchDropdownOpen, setIsSearchDropdownOpen] = useState<boolean>(false);
+  const [highlightedSearchIdx, setHighlightedSearchIdx] = useState<number>(0);
+  const globalSearchContainerRef = useRef<HTMLDivElement>(null);
+  const globalSearchInputRef = useRef<HTMLInputElement>(null);
+
+  const uniqueSearchableStudents = useMemo(
+    () => deduplicateStudentsByAdmissionNumber(students),
+    [students]
+  );
+
+  const globalSearchResults = useMemo(() => {
+    const q = globalSearchQuery.trim().toLowerCase();
+    if (!q) return [];
+    return uniqueSearchableStudents
+      .filter((s) => {
+        const adm = (s.admissionNumber || '').toLowerCase();
+        const name = (s.fullName || '').toLowerCase();
+        const id = (s.id || '').toLowerCase();
+        const father = (s.fatherName || '').toLowerCase();
+        return (
+          adm.includes(q) ||
+          name.includes(q) ||
+          id.includes(q) ||
+          father.includes(q)
+        );
+      })
+      .sort((a, b) => {
+        const aExactAdm = (a.admissionNumber || '').toLowerCase().startsWith(q) ? 0 : 1;
+        const bExactAdm = (b.admissionNumber || '').toLowerCase().startsWith(q) ? 0 : 1;
+        if (aExactAdm !== bExactAdm) return aExactAdm - bExactAdm;
+        const aStartsName = (a.fullName || '').toLowerCase().startsWith(q) ? 0 : 1;
+        const bStartsName = (b.fullName || '').toLowerCase().startsWith(q) ? 0 : 1;
+        if (aStartsName !== bStartsName) return aStartsName - bStartsName;
+        return a.fullName.localeCompare(b.fullName);
+      })
+      .slice(0, 8);
+  }, [uniqueSearchableStudents, globalSearchQuery]);
+
+  useEffect(() => {
+    setHighlightedSearchIdx(0);
+  }, [globalSearchQuery]);
+
+  // Ctrl+K / Cmd+K global shortcut to focus header student search
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        globalSearchInputRef.current?.focus();
+        setIsSearchDropdownOpen(true);
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, []);
+
+  // Close search dropdown on click outside
+  useEffect(() => {
+    const handleOutside = (event: MouseEvent) => {
+      if (
+        globalSearchContainerRef.current &&
+        !globalSearchContainerRef.current.contains(event.target as Node)
+      ) {
+        setIsSearchDropdownOpen(false);
+      }
+    };
+    if (isSearchDropdownOpen) {
+      document.addEventListener('mousedown', handleOutside);
+    }
+    return () => document.removeEventListener('mousedown', handleOutside);
+  }, [isSearchDropdownOpen]);
+
+  const handleSelectGlobalStudent = (student: Student) => {
+    setIsSearchDropdownOpen(false);
+    setGlobalSearchQuery('');
+    if (onNavigateToStudent) {
+      onNavigateToStudent(student);
+    }
+  };
+
+  const handleGlobalSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Escape') {
+      setIsSearchDropdownOpen(false);
+      (e.target as HTMLInputElement).blur();
+      return;
+    }
+    if (!isSearchDropdownOpen && globalSearchQuery.trim()) {
+      setIsSearchDropdownOpen(true);
+    }
+    if (globalSearchResults.length === 0) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setHighlightedSearchIdx((prev) => (prev + 1) % globalSearchResults.length);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setHighlightedSearchIdx((prev) => (prev - 1 + globalSearchResults.length) % globalSearchResults.length);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const target = globalSearchResults[highlightedSearchIdx] || globalSearchResults[0];
+      if (target) handleSelectGlobalStudent(target);
+    }
+  };
 
   // Dark Mode State
   const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
@@ -284,10 +396,14 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="flex items-center justify-between h-16 sm:h-20 gap-2">
           
           {/* Left: Brand & School info */}
-          <div className="flex items-center space-x-3 min-w-0">
+          <div className="flex items-center gap-3.5 min-w-0">
             {school.logoDataUrl ? (
-              <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-xl bg-white flex items-center justify-center shadow-lg shrink-0 ring-2 ring-amber-400/50 overflow-hidden">
-                <img src={school.logoDataUrl} alt={school.name} className="w-full h-full object-cover" />
+              <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-xl bg-white flex items-center justify-center shadow-lg shrink-0 ring-2 ring-amber-400/50 overflow-hidden p-1.5">
+                <img
+                  src={school.logoDataUrl}
+                  alt={`${school.name} Official Logo`}
+                  className="max-w-full max-h-full w-auto h-auto object-contain"
+                />
               </div>
             ) : (
               <SchoolEmblem size={44} />
@@ -297,7 +413,7 @@ export const Header: React.FC<HeaderProps> = ({
                 <span className="font-extrabold text-base sm:text-lg tracking-tight bg-gradient-to-r from-amber-200 via-white to-orange-200 bg-clip-text text-transparent truncate">
                   {language === 'ur' ? (school.nameUrdu || school.name) : school.name}
                 </span>
-                <span className="hidden md:inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                <span className="hidden md:inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shrink-0">
                   U-DISE: {school.code}
                 </span>
               </div>
@@ -306,7 +422,7 @@ export const Header: React.FC<HeaderProps> = ({
                 <span className="hidden xl:inline text-slate-600">•</span>
                 <span className="text-indigo-400 font-medium">Session: {school.academicSession}</span>
                 <span className="hidden sm:inline text-slate-500">•</span>
-                <span className="hidden sm:inline text-slate-300">{school.district}, {school.state} (J&amp;K)</span>
+                <span className="hidden sm:inline text-slate-300">{formatSchoolAddressOnce(school)}</span>
               </p>
             </div>
           </div>
@@ -726,6 +842,139 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
 
         </div>
+
+        {/* Global Persistent Student Search Bar (Quick Profile Navigation from Any Screen) */}
+        {onNavigateToStudent && (
+          <div className="pb-2.5 pt-0.5" ref={globalSearchContainerRef}>
+            <div className="relative max-w-2xl mx-auto">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                ref={globalSearchInputRef}
+                type="text"
+                value={globalSearchQuery}
+                onFocus={() => setIsSearchDropdownOpen(true)}
+                onChange={(e) => {
+                  setGlobalSearchQuery(e.target.value);
+                  setIsSearchDropdownOpen(true);
+                }}
+                onKeyDown={handleGlobalSearchKeyDown}
+                placeholder={
+                  language === 'ur'
+                    ? 'کسی بھی اسکرین سے طالب علم تلاش کریں (داخلہ نمبر یا نام)...'
+                    : 'Quick search student by Admission No. or Name to open profile from any screen...'
+                }
+                aria-label="Global student search by admission number or name"
+                className="w-full pl-10 pr-24 py-2 rounded-xl bg-slate-800/90 hover:bg-slate-800 focus:bg-slate-950 border border-slate-700/90 focus:border-indigo-500 text-xs sm:text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 transition-all"
+              />
+              <div className="absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-1.5">
+                {globalSearchQuery ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setGlobalSearchQuery('');
+                      globalSearchInputRef.current?.focus();
+                    }}
+                    className="p-1 rounded-md text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
+                    title="Clear search"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                ) : (
+                  <span className="hidden sm:inline-flex items-center px-1.5 py-0.5 rounded bg-slate-900/90 border border-slate-700 text-[10px] font-mono text-slate-400">
+                    Ctrl+K
+                  </span>
+                )}
+                <span className="hidden md:inline-flex items-center px-2 py-0.5 rounded-md bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-[10px] font-bold">
+                  {uniqueSearchableStudents.length} Students
+                </span>
+              </div>
+
+              {/* Search Results Floating Dropdown */}
+              {isSearchDropdownOpen && globalSearchQuery.trim().length > 0 && (
+                <div className="absolute left-0 right-0 mt-1.5 rounded-2xl bg-slate-900 border border-slate-700/90 shadow-2xl z-50 overflow-hidden animate-in fade-in slide-in-from-top-1 duration-150">
+                  <div className="px-3.5 py-2 bg-slate-950/80 border-b border-slate-800 flex items-center justify-between text-[11px] text-slate-400">
+                    <span>
+                      {globalSearchResults.length > 0
+                        ? `Showing ${globalSearchResults.length} matching student${globalSearchResults.length === 1 ? '' : 's'}`
+                        : 'No matching students'}
+                    </span>
+                    <span className="hidden sm:inline font-mono text-[10px] text-slate-500">
+                      ↑↓ navigate • Enter to open profile
+                    </span>
+                  </div>
+
+                  {globalSearchResults.length === 0 ? (
+                    <div className="px-4 py-6 text-center text-xs text-slate-400">
+                      No student found matching &ldquo;<span className="text-white font-semibold">{globalSearchQuery}</span>&rdquo;. Try searching by Admission Number (e.g., ADM-2026-001) or student name.
+                    </div>
+                  ) : (
+                    <ul className="max-h-72 overflow-y-auto divide-y divide-slate-800/80">
+                      {globalSearchResults.map((student, idx) => {
+                        const isHighlighted = idx === highlightedSearchIdx;
+                        const initials = student.fullName
+                          .split(' ')
+                          .map((p) => p[0])
+                          .join('')
+                          .slice(0, 2)
+                          .toUpperCase();
+                        return (
+                          <li key={student.id}>
+                            <button
+                              type="button"
+                              onMouseEnter={() => setHighlightedSearchIdx(idx)}
+                              onClick={() => handleSelectGlobalStudent(student)}
+                              className={`w-full px-3.5 py-2.5 flex items-center justify-between gap-3 text-left transition-colors ${
+                                isHighlighted ? 'bg-indigo-600/25' : 'hover:bg-slate-800/80'
+                              }`}
+                            >
+                              <div className="flex items-center gap-3 min-w-0">
+                                {student.photoDataUrl ? (
+                                  <img
+                                    src={student.photoDataUrl}
+                                    alt={student.fullName}
+                                    className="w-9 h-9 rounded-xl object-cover border border-slate-700 shrink-0"
+                                  />
+                                ) : (
+                                  <div className="w-9 h-9 rounded-xl bg-indigo-500/20 border border-indigo-400/30 text-indigo-200 flex items-center justify-center font-extrabold text-xs shrink-0">
+                                    {initials}
+                                  </div>
+                                )}
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="text-xs sm:text-sm font-bold text-white truncate">
+                                      {student.fullName}
+                                    </span>
+                                    <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-mono font-bold shrink-0">
+                                      {student.admissionNumber}
+                                    </span>
+                                    {student.status !== 'Active' && (
+                                      <span className="px-1.5 py-0.5 rounded bg-slate-700 text-slate-300 text-[10px] font-semibold">
+                                        {student.status}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p className="text-[11px] text-slate-400 truncate mt-0.5">
+                                    Class {student.classNumber}-{student.section} • Roll #{student.rollNumber}
+                                    {student.fatherName ? ` • S/D of ${student.fatherName}` : ''}
+                                  </p>
+                                </div>
+                              </div>
+
+                              <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-500/20 text-indigo-200 border border-indigo-400/30 text-[10px] font-bold shrink-0">
+                                <span>Profile</span>
+                                <ArrowRight className="w-3 h-3" />
+                              </span>
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </header>
 

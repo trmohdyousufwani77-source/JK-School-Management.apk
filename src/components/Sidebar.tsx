@@ -22,6 +22,7 @@ import {
   Type,
   Info,
   IdCard,
+  ClipboardCheck,
 } from 'lucide-react';
 import { Language, translations } from '../utils/translations';
 import { UserRole } from '../types';
@@ -54,6 +55,7 @@ export type TabType =
   | 'excel-template-mapping'
   | 'id-card-maker'
   | 'principal-management'
+  | 'jkepm-appraisal'
   | 'about-us';
 
 interface SidebarProps {
@@ -107,6 +109,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: Type,
     },
     { id: 'reports' as TabType, label: t.reports || 'Reports & Analytics', icon: FileSpreadsheet },
+    {
+      id: 'jkepm-appraisal' as TabType,
+      label: language === 'ur' ? 'جے کے ای پی ایم اپریزل و سی پی آئی ایس' : 'JKEPM Appraisal & CPIS',
+      icon: ClipboardCheck,
+    },
     {
       id: 'teacher-leave' as TabType,
       label: t.teacherLeave || 'Teacher Leave',

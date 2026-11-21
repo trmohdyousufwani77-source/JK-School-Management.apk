@@ -8,6 +8,7 @@ import {
   Award,
   ArrowRight,
   TrendingUp,
+  TrendingDown,
   Clock,
   CheckCircle,
   XCircle,
@@ -53,6 +54,7 @@ import { NooriPrintPreviewModal, extractUrduFromNooriContainer } from './NooriPr
 import { NooriLigatureText } from './NooriLigatureText';
 import { NooriFontToolsPanel } from './NooriFontToolsPanel';
 import { SchoolEmblem } from './SchoolEmblem';
+import { AndroidAppDownloadCard } from './AndroidAppDownloadCard';
 import {
   NastaleeqOverlapDiagnostic,
   scanNastaleeqOverlappingLigatures,
@@ -78,6 +80,7 @@ import {
   Tooltip,
   Legend,
   Cell,
+  ReferenceLine,
 } from 'recharts';
 import { TabType } from './Sidebar';
 import { Language, translations } from '../utils/translations';
@@ -561,6 +564,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   const [attendanceTrendClass, setAttendanceTrendClass] = useState<string>('all');
   const [attendanceTrendMode, setAttendanceTrendMode] = useState<'rate' | 'counts'>('rate');
+  const [attendanceTrendGranularity, setAttendanceTrendGranularity] = useState<'weekly30' | 'daily'>('weekly30');
 
   const attendanceTrendData = useMemo(() => {
     // Filter records by selected class if specified
@@ -587,7 +591,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     const monthNamesEn = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     const monthNamesUr = ['جنوری', 'فروری', 'مارچ', 'اپریل', 'مئی', 'جون', 'جولائی', 'اگست', 'ستمبر', 'اکتوبر', 'نومبر', 'دسمبر'];
 
-    return sortedDates.map((dateStr) => {
+    return sortedDates.map((dateStr, idx) => {
       const stats = dateMap.get(dateStr)!;
       const rate = stats.total > 0 ? Math.round((stats.present / stats.total) * 1000) / 10 : 0;
       const day = dateStr.slice(8, 10);
@@ -596,46 +600,199 @@ export const Dashboard: React.FC<DashboardProps> = ({
         ? `${day} ${monthNamesUr[monthIdx] || 'اکتوبر'}`
         : `${day} ${monthNamesEn[monthIdx] || 'Oct'}`;
 
+      const prevStats = idx > 0 ? dateMap.get(sortedDates[idx - 1]) : null;
+      const prevRate = prevStats && prevStats.total > 0
+        ? Math.round((prevStats.present / prevStats.total) * 1000) / 10
+        : null;
+      const deltaFromPrev = prevRate !== null ? Math.round((rate - prevRate) * 10) / 10 : null;
+
       return {
         date: dateStr,
         displayDate,
+        rangeLabel: dateStr,
         rate,
         present: stats.present,
         absent: stats.absent,
         leave: stats.leave,
         total: stats.total,
+        schoolDays: 1,
+        deltaFromPrev,
+        isDip: (deltaFromPrev !== null && deltaFromPrev <= -2) || rate < 85,
         target: 85, // RTE statutory benchmark
       };
     });
   }, [attendanceRecords, attendanceTrendClass, language]);
 
+  // Weekly Attendance Trends over the Last 30 Days (for Principal dip detection)
+  const weeklyAttendanceTrendData = useMemo(() => {
+    const filteredRecords = attendanceTrendClass === 'all'
+      ? attendanceRecords
+      : attendanceRecords.filter((r) => r.classNumber === attendanceTrendClass);
+
+    if (filteredRecords.length === 0) return [];
+
+    const validDates = filteredRecords
+      .map((r) => r.date)
+      .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d))
+      .sort();
+
+    if (validDates.length === 0) return [];
+
+    const anchorDateStr = validDates[validDates.length - 1];
+    const anchorMs = new Date(`${anchorDateStr}T00:00:00`).getTime();
+    const windowStartMs = anchorMs - 29 * 86400000; // Inclusive 30-day window
+
+    const monthNamesEn = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const monthNamesUr = ['جنوری', 'فروری', 'مارچ', 'اپریل', 'مئی', 'جون', 'جولائی', 'اگست', 'ستمبر', 'اکتوبر', 'نومبر', 'دسمبر'];
+
+    const fmtShort = (ms: number) => {
+      const d = new Date(ms);
+      const dd = String(d.getDate()).padStart(2, '0');
+      const mm = language === 'ur' ? monthNamesUr[d.getMonth()] : monthNamesEn[d.getMonth()];
+      return `${dd} ${mm}`;
+    };
+
+    const bucketMap = new Map<
+      number,
+      {
+        weekIdx: number;
+        startMs: number;
+        endMs: number;
+        present: number;
+        absent: number;
+        leave: number;
+        total: number;
+        dates: Set<string>;
+      }
+    >();
+
+    filteredRecords.forEach((rec) => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(rec.date)) return;
+      const recMs = new Date(`${rec.date}T00:00:00`).getTime();
+      if (recMs < windowStartMs || recMs > anchorMs) return;
+
+      const dayOffset = Math.floor((recMs - windowStartMs) / 86400000);
+      const weekIdx = Math.floor(dayOffset / 7); // 0..4 spanning 30 days
+      const bucketStartMs = windowStartMs + weekIdx * 7 * 86400000;
+      const bucketEndMs = Math.min(anchorMs, bucketStartMs + 6 * 86400000);
+
+      const entry = bucketMap.get(weekIdx) || {
+        weekIdx,
+        startMs: bucketStartMs,
+        endMs: bucketEndMs,
+        present: 0,
+        absent: 0,
+        leave: 0,
+        total: 0,
+        dates: new Set<string>(),
+      };
+
+      if (rec.status === 'Present' || rec.status === 'Late') {
+        entry.present++;
+      } else if (rec.status === 'Absent') {
+        entry.absent++;
+      } else if (rec.status === 'Approved_Leave') {
+        entry.leave++;
+      }
+      entry.total++;
+      entry.dates.add(rec.date);
+      bucketMap.set(weekIdx, entry);
+    });
+
+    const sortedBuckets = Array.from(bucketMap.values()).sort((a, b) => a.weekIdx - b.weekIdx);
+
+    let prevRate: number | null = null;
+    return sortedBuckets.map((bucket, idx) => {
+      const rate = bucket.total > 0 ? Math.round((bucket.present / bucket.total) * 1000) / 10 : 0;
+      const deltaFromPrev = prevRate !== null ? Math.round((rate - prevRate) * 10) / 10 : null;
+      prevRate = rate;
+
+      const rangeText = `${fmtShort(bucket.startMs)} – ${fmtShort(bucket.endMs)}`;
+      const displayDate = language === 'ur'
+        ? `ہفتہ ${idx + 1} (${fmtShort(bucket.startMs)})`
+        : `Wk ${idx + 1} (${fmtShort(bucket.startMs).slice(0, 6)})`;
+
+      return {
+        date: rangeText,
+        displayDate,
+        rangeLabel: `Week ${idx + 1}: ${rangeText}`,
+        rate,
+        present: bucket.present,
+        absent: bucket.absent,
+        leave: bucket.leave,
+        total: bucket.total,
+        schoolDays: bucket.dates.size,
+        deltaFromPrev,
+        isDip: (deltaFromPrev !== null && deltaFromPrev <= -1.5) || rate < 85,
+        target: 85,
+      };
+    });
+  }, [attendanceRecords, attendanceTrendClass, language]);
+
+  const activeAttendanceChartData =
+    attendanceTrendGranularity === 'weekly30' ? weeklyAttendanceTrendData : attendanceTrendData;
+
   // Overall attendance trend statistics
   const trendAvgRate = useMemo(() => {
-    if (attendanceTrendData.length === 0) return 88.5;
-    const sum = attendanceTrendData.reduce((acc, curr) => acc + curr.rate, 0);
-    return Math.round((sum / attendanceTrendData.length) * 10) / 10;
-  }, [attendanceTrendData]);
+    if (activeAttendanceChartData.length === 0) return 88.5;
+    const sum = activeAttendanceChartData.reduce((acc, curr) => acc + curr.rate, 0);
+    return Math.round((sum / activeAttendanceChartData.length) * 10) / 10;
+  }, [activeAttendanceChartData]);
 
-  // Custom Tooltip for Attendance Trend
+  // Identify sharpest weekly dip / lowest attendance week over the last 30 days
+  const weeklyDipInsight = useMemo(() => {
+    if (weeklyAttendanceTrendData.length === 0) return null;
+    const lowestWeek = [...weeklyAttendanceTrendData].sort((a, b) => a.rate - b.rate)[0];
+    const steepestDip = weeklyAttendanceTrendData
+      .filter((w) => w.deltaFromPrev !== null && w.deltaFromPrev < 0)
+      .sort((a, b) => (a.deltaFromPrev ?? 0) - (b.deltaFromPrev ?? 0))[0] || null;
+    const latestWeek = weeklyAttendanceTrendData[weeklyAttendanceTrendData.length - 1];
+    return { lowestWeek, steepestDip, latestWeek };
+  }, [weeklyAttendanceTrendData]);
+
+  // Custom Tooltip for Attendance Trend (supports Weekly 30-Day & Daily views)
   const CustomAttendanceTooltip = ({ active, payload }: any) => {
     if (active && payload && payload.length) {
       const data = payload[0].payload;
       return (
-        <div className="bg-slate-900/95 backdrop-blur-md text-white p-3.5 rounded-2xl shadow-2xl border border-slate-700/80 text-xs min-w-[200px] space-y-1.5">
-          <div className="font-bold text-amber-400 border-b border-slate-700 pb-1 flex items-center justify-between">
-            <span>{data.displayDate}</span>
-            <span className="text-[10px] font-mono text-slate-400">{data.date}</span>
+        <div className="bg-slate-900/95 backdrop-blur-md text-white p-3.5 rounded-2xl shadow-2xl border border-slate-700/80 text-xs min-w-[225px] space-y-1.5">
+          <div className="font-bold text-amber-400 border-b border-slate-700 pb-1 flex items-center justify-between gap-2">
+            <span>{data.rangeLabel || data.displayDate}</span>
+            {data.schoolDays > 1 && (
+              <span className="text-[10px] font-mono text-slate-400">{data.schoolDays}d</span>
+            )}
           </div>
           <div className="flex items-center justify-between text-slate-300">
             <span>{language === 'ur' ? 'حاضری کی شرح:' : 'Attendance Rate:'}</span>
-            <span className="font-mono font-bold text-indigo-300 text-sm">{data.rate}%</span>
+            <span className={`font-mono font-bold text-sm ${data.isDip ? 'text-rose-300' : 'text-indigo-300'}`}>
+              {data.rate}%
+            </span>
           </div>
+          {data.deltaFromPrev !== null && data.deltaFromPrev !== undefined && (
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="text-slate-400">
+                {attendanceTrendGranularity === 'weekly30' ? 'Week-over-Week:' : 'Day-over-Day:'}
+              </span>
+              <span
+                className={`font-mono font-bold ${
+                  data.deltaFromPrev < 0
+                    ? 'text-rose-400'
+                    : data.deltaFromPrev > 0
+                    ? 'text-emerald-400'
+                    : 'text-slate-300'
+                }`}
+              >
+                {data.deltaFromPrev > 0 ? `+${data.deltaFromPrev}%` : `${data.deltaFromPrev}%`}
+                {data.deltaFromPrev <= -1.5 ? ' (Dip)' : ''}
+              </span>
+            </div>
+          )}
           <div className="flex items-center justify-between text-[11px] text-emerald-400">
-            <span>{language === 'ur' ? 'حاضر طلباء:' : 'Present Students:'}</span>
+            <span>{language === 'ur' ? 'حاضر ریکارڈ:' : 'Present Entries:'}</span>
             <span className="font-mono font-bold text-emerald-300">{data.present}</span>
           </div>
           <div className="flex items-center justify-between text-[11px] text-rose-400">
-            <span>{language === 'ur' ? 'غیر حاضر:' : 'Absent Students:'}</span>
+            <span>{language === 'ur' ? 'غیر حاضر:' : 'Absent Entries:'}</span>
             <span className="font-mono font-bold text-rose-300">{data.absent}</span>
           </div>
           {data.leave > 0 && (
@@ -649,7 +806,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <span className={data.rate >= 85 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
               {data.rate >= 85
                 ? (language === 'ur' ? 'معیاری (کامیاب)' : 'Compliant')
-                : (language === 'ur' ? 'توجہ طلب' : 'Below Target')}
+                : (language === 'ur' ? 'توجہ طلب (کمی)' : 'Below Target · Dip')}
             </span>
           </div>
         </div>
@@ -853,18 +1010,18 @@ export const Dashboard: React.FC<DashboardProps> = ({
       {/* Customized School Master Widget with Centralized Official School Logo */}
       <div className="bg-gradient-to-r from-[#0f294a] via-[#172554] to-[#0f172a] rounded-3xl p-6 sm:p-8 text-white shadow-xl relative overflow-hidden border border-amber-400/25">
         <div className="absolute right-0 top-0 bottom-0 w-1/3 bg-gradient-to-l from-amber-400/10 to-transparent pointer-events-none" />
-        <div className="relative z-10 flex flex-col sm:flex-row sm:items-start gap-5">
-          {/* Clean Official School Logo Area (No duplicate School Name or Emblem labels) */}
-          <div className="shrink-0 flex flex-col items-center gap-2">
-            <div className="w-24 h-24 rounded-2xl bg-white border-2 border-amber-400 flex items-center justify-center overflow-hidden shadow-lg p-1.5">
+        <div className="relative z-10 flex flex-col sm:flex-row sm:items-start gap-6">
+          {/* Clean Official School Logo Area (Aspect-ratio preserved, generous spacing, zero overlap) */}
+          <div className="shrink-0 flex flex-col items-center gap-2 self-center sm:self-start">
+            <div className="w-24 h-24 sm:w-28 sm:h-28 rounded-2xl bg-white border-2 border-amber-400 flex items-center justify-center overflow-hidden shadow-lg p-2">
               {school.logoDataUrl ? (
                 <img
                   src={school.logoDataUrl}
                   alt="Official School Logo"
-                  className="w-full h-full object-contain"
+                  className="max-w-full max-h-full w-auto h-auto object-contain"
                 />
               ) : (
-                <School className="w-11 h-11 text-[#0f294a]" />
+                <SchoolEmblem size={88} />
               )}
             </div>
             {isAuthorizedAdmin && (
@@ -878,7 +1035,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             )}
           </div>
 
-          <div className="max-w-3xl flex-1">
+          <div className="max-w-3xl flex-1 min-w-0">
             <div className="inline-flex flex-wrap items-center gap-2 px-3 py-1 rounded-full bg-white/10 text-amber-200 border border-amber-400/35 text-xs font-semibold mb-2.5">
               <Sparkles className="w-3.5 h-3.5 text-amber-300" />
               <span>Session {school.academicSession}</span>
@@ -1260,6 +1417,17 @@ export const Dashboard: React.FC<DashboardProps> = ({
               >
                 <Users className="w-4 h-4" />
                 <span>{t.registerStudent}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const el = document.getElementById('dashboard-android-app-download');
+                  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 text-white font-extrabold text-xs sm:text-sm hover:bg-emerald-500 transition-all shadow-md shadow-emerald-600/30 border border-emerald-400/40"
+              >
+                <Smartphone className="w-4 h-4 text-emerald-100" />
+                <span>Download Android App</span>
               </button>
               <button
                 onClick={() => onNavigateTab('marks-entry')}
@@ -2293,9 +2461,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <span className="mt-2 text-[10px] font-bold text-indigo-600 group-hover:underline">Open Register →</span>
           </button>
 
-          {/* Module 2: JKEPM Teacher & School Records */}
+          {/* Module 2: JKEPM Quarterly Self-Assessment & CPIS Portal */}
           <button
-            onClick={() => onNavigateTab('teachers', 'jkepm')}
+            onClick={() => onNavigateTab('jkepm-appraisal')}
             className="p-3.5 rounded-2xl bg-slate-50 hover:bg-emerald-50/70 border border-slate-200 hover:border-emerald-300 text-left transition-all group flex flex-col justify-between"
           >
             <div className="flex items-center justify-between">
@@ -2303,10 +2471,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
               <TrendingUp className="w-4 h-4 text-emerald-600 group-hover:scale-110 transition-transform" />
             </div>
             <div className="mt-2">
-              <h4 className="text-xs font-extrabold text-slate-900 group-hover:text-emerald-950">JKEPM Records</h4>
-              <p className="text-[10.5px] text-slate-500 mt-0.5 line-clamp-2">Quarterly filings, syllabus coverage %, remedial classes & ratings.</p>
+              <h4 className="text-xs font-extrabold text-slate-900 group-hover:text-emerald-950">JKEPM Appraisal &amp; CPIS</h4>
+              <p className="text-[10.5px] text-slate-500 mt-0.5 line-clamp-2">CPIS KHYEDU 00220000 updation, Q1–Q4 self-assessment, HOI &amp; District review.</p>
             </div>
-            <span className="mt-2 text-[10px] font-bold text-emerald-600 group-hover:underline">Review JKEPM →</span>
+            <span className="mt-2 text-[10px] font-bold text-emerald-600 group-hover:underline">Open JKEPM Portal →</span>
           </button>
 
           {/* Module 3: Teacher Service Book */}
@@ -2655,57 +2823,35 @@ export const Dashboard: React.FC<DashboardProps> = ({
       {/* ===================================================================== */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
 
-        {/* ==================== CHART 1: ATTENDANCE TRENDS ==================== */}
+        {/* ==================== CHART 1: WEEKLY ATTENDANCE TRENDS (LAST 30 DAYS) ==================== */}
         <div className="bg-white p-5 sm:p-6 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col justify-between">
           <div>
             {/* Chart Header */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
-              <div className="flex items-center gap-2.5">
-                <div className="w-10 h-10 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
-                  <LineChartIcon className="w-5 h-5" />
-                </div>
-                <div>
-                  <h2 className="text-base font-bold text-slate-900">{t.attendanceTrends}</h2>
-                  <p className="text-xs text-slate-500">{t.attendanceTrendsSubtitle}</p>
-                </div>
-              </div>
-
-              {/* Controls */}
-              <div className="flex items-center gap-2 self-start sm:self-auto">
-                {/* Class selector */}
-                <select
-                  value={attendanceTrendClass}
-                  onChange={(e) => setAttendanceTrendClass(e.target.value)}
-                  className="px-2.5 py-1.5 rounded-xl border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                >
-                  <option value="all">{t.all} Classes</option>
-                  {classesList.map((c) => (
-                    <option key={c} value={c}>Class {c}</option>
-                  ))}
-                </select>
-
-                {/* View Mode Toggle */}
-                <div className="bg-slate-100 p-1 rounded-xl flex items-center text-xs">
-                  <button
-                    onClick={() => setAttendanceTrendMode('rate')}
-                    className={`px-2.5 py-1 rounded-lg font-semibold transition-all ${
-                      attendanceTrendMode === 'rate'
-                        ? 'bg-white text-indigo-600 shadow-sm'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    {t.chartMetricRate}
-                  </button>
-                  <button
-                    onClick={() => setAttendanceTrendMode('counts')}
-                    className={`px-2.5 py-1 rounded-lg font-semibold transition-all ${
-                      attendanceTrendMode === 'counts'
-                        ? 'bg-white text-indigo-600 shadow-sm'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    {t.chartMetricStudents}
-                  </button>
+            <div className="flex flex-col gap-3 mb-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-10 h-10 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                    <LineChartIcon className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h2 className="text-base font-bold text-slate-900">
+                        {attendanceTrendGranularity === 'weekly30'
+                          ? (language === 'ur' ? 'ہفتہ وار حاضری کا رجحان (آخری 30 دن)' : 'Weekly Attendance Trends (Last 30 Days)')
+                          : t.attendanceTrends}
+                      </h2>
+                      <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                        {attendanceTrendGranularity === 'weekly30' ? '30-Day Weekly' : 'Daily'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500">
+                      {attendanceTrendGranularity === 'weekly30'
+                        ? (language === 'ur'
+                            ? 'پرنسپل کے لیے گزشتہ 30 دنوں کے ہفتہ وار حاضری کے اتار چڑھاؤ اور کمی کی نشاندہی'
+                            : 'Weekly attendance trajectory from Attendance Records to help the principal spot attendance dips')
+                        : t.attendanceTrendsSubtitle}
+                    </p>
+                  </div>
                 </div>
 
                 {/* Download Chart PNG Button */}
@@ -2713,7 +2859,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   onClick={handleExportAttendanceChart}
                   disabled={isExportingChart}
                   title={t.downloadChart}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold transition-all shadow-sm active:scale-95 disabled:opacity-50"
+                  className="self-start sm:self-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold transition-all shadow-sm active:scale-95 disabled:opacity-50"
                 >
                   <Download className={`w-3.5 h-3.5 ${isExportingChart ? 'animate-bounce' : ''}`} />
                   <span className="hidden sm:inline">
@@ -2722,95 +2868,215 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   <span className="sm:hidden">PNG</span>
                 </button>
               </div>
+
+              {/* Controls Row: Weekly 30d vs Daily + Class Filter + Rate/Counts */}
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-100">
+                {/* Granularity Toggle */}
+                <div className="bg-indigo-50/80 p-1 rounded-xl flex items-center text-xs border border-indigo-100">
+                  <button
+                    type="button"
+                    onClick={() => setAttendanceTrendGranularity('weekly30')}
+                    className={`px-2.5 py-1 rounded-lg font-bold transition-all ${
+                      attendanceTrendGranularity === 'weekly30'
+                        ? 'bg-indigo-600 text-white shadow-sm'
+                        : 'text-indigo-700 hover:bg-indigo-100/70'
+                    }`}
+                  >
+                    Weekly (30 Days)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAttendanceTrendGranularity('daily')}
+                    className={`px-2.5 py-1 rounded-lg font-bold transition-all ${
+                      attendanceTrendGranularity === 'daily'
+                        ? 'bg-indigo-600 text-white shadow-sm'
+                        : 'text-indigo-700 hover:bg-indigo-100/70'
+                    }`}
+                  >
+                    Daily View
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {/* Class selector */}
+                  <select
+                    value={attendanceTrendClass}
+                    onChange={(e) => setAttendanceTrendClass(e.target.value)}
+                    className="px-2.5 py-1.5 rounded-xl border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="all">{t.all} Classes</option>
+                    {classesList.map((c) => (
+                      <option key={c} value={c}>Class {c}</option>
+                    ))}
+                  </select>
+
+                  {/* View Mode Toggle */}
+                  <div className="bg-slate-100 p-1 rounded-xl flex items-center text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setAttendanceTrendMode('rate')}
+                      className={`px-2.5 py-1 rounded-lg font-semibold transition-all ${
+                        attendanceTrendMode === 'rate'
+                          ? 'bg-white text-indigo-600 shadow-sm'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      {t.chartMetricRate}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAttendanceTrendMode('counts')}
+                      className={`px-2.5 py-1 rounded-lg font-semibold transition-all ${
+                        attendanceTrendMode === 'counts'
+                          ? 'bg-white text-indigo-600 shadow-sm'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      {t.chartMetricStudents}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Principal Dip-Detection Callout */}
+              {attendanceTrendGranularity === 'weekly30' && weeklyDipInsight?.steepestDip && (
+                <div className="px-3 py-2 rounded-xl bg-rose-50/90 border border-rose-200 flex items-center justify-between gap-2 text-xs">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <TrendingDown className="w-4 h-4 text-rose-600 shrink-0" />
+                    <span className="text-rose-900 font-semibold truncate">
+                      Attendance Dip Detected in{' '}
+                      <strong className="font-extrabold">{weeklyDipInsight.steepestDip.rangeLabel}</strong>:{' '}
+                      <span className="font-mono font-extrabold text-rose-700">
+                        {weeklyDipInsight.steepestDip.rate}% ({weeklyDipInsight.steepestDip.deltaFromPrev}% WoW)
+                      </span>
+                    </span>
+                  </div>
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-rose-700 bg-white px-2 py-0.5 rounded-md border border-rose-200 shrink-0">
+                    Principal Review
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Recharts Line Chart Container */}
             <div ref={attendanceChartContainerRef} className="h-[280px] w-full mt-2 bg-white rounded-xl">
-              <ResponsiveContainer width="100%" height="100%">
-                {attendanceTrendMode === 'rate' ? (
-                  <LineChart data={attendanceTrendData} margin={{ top: 10, right: 10, left: -20, bottom: 5 }}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F5F9" />
-                    <XAxis
-                      dataKey="displayDate"
-                      stroke="#94A3B8"
-                      fontSize={11}
-                      tickLine={false}
-                      axisLine={{ stroke: '#CBD5E1' }}
-                    />
-                    <YAxis
-                      domain={[50, 100]}
-                      stroke="#94A3B8"
-                      fontSize={11}
-                      tickLine={false}
-                      unit="%"
-                      axisLine={{ stroke: '#CBD5E1' }}
-                    />
-                    <Tooltip content={<CustomAttendanceTooltip />} />
-                    <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }} />
-                    <Line
-                      type="monotone"
-                      dataKey="rate"
-                      name={language === 'ur' ? 'حاضری کی شرح (%)' : 'Attendance Rate (%)'}
-                      stroke="#4F46E5"
-                      strokeWidth={3}
-                      dot={{ r: 3.5, fill: '#4F46E5', strokeWidth: 2, stroke: '#FFFFFF' }}
-                      activeDot={{ r: 6 }}
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="target"
-                      name={language === 'ur' ? 'آر ٹی ای ہدف (85%)' : 'RTE Mandate (85%)'}
-                      stroke="#10B981"
-                      strokeDasharray="4 4"
-                      strokeWidth={1.75}
-                      dot={false}
-                    />
-                  </LineChart>
-                ) : (
-                  <LineChart data={attendanceTrendData} margin={{ top: 10, right: 10, left: -20, bottom: 5 }}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F5F9" />
-                    <XAxis
-                      dataKey="displayDate"
-                      stroke="#94A3B8"
-                      fontSize={11}
-                      tickLine={false}
-                      axisLine={{ stroke: '#CBD5E1' }}
-                    />
-                    <YAxis
-                      stroke="#94A3B8"
-                      fontSize={11}
-                      tickLine={false}
-                      axisLine={{ stroke: '#CBD5E1' }}
-                    />
-                    <Tooltip content={<CustomAttendanceTooltip />} />
-                    <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }} />
-                    <Line
-                      type="monotone"
-                      dataKey="present"
-                      name={language === 'ur' ? 'حاضر طلباء' : 'Present'}
-                      stroke="#10B981"
-                      strokeWidth={2.5}
-                      dot={{ r: 3, fill: '#10B981', strokeWidth: 1.5, stroke: '#FFFFFF' }}
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="absent"
-                      name={language === 'ur' ? 'غیر حاضر' : 'Absent'}
-                      stroke="#EF4444"
-                      strokeWidth={2}
-                      dot={{ r: 3, fill: '#EF4444', strokeWidth: 1.5, stroke: '#FFFFFF' }}
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="leave"
-                      name={language === 'ur' ? 'رخصت' : 'On Leave'}
-                      stroke="#F59E0B"
-                      strokeWidth={1.8}
-                      dot={{ r: 2.5, fill: '#F59E0B', strokeWidth: 1.5, stroke: '#FFFFFF' }}
-                    />
-                  </LineChart>
-                )}
-              </ResponsiveContainer>
+              {activeAttendanceChartData.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-slate-400 text-xs gap-2 border border-dashed border-slate-200 rounded-xl">
+                  <LineChartIcon className="w-6 h-6 opacity-50" />
+                  <p>No attendance records available for the selected class filter.</p>
+                </div>
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  {attendanceTrendMode === 'rate' ? (
+                    <LineChart data={activeAttendanceChartData} margin={{ top: 12, right: 14, left: -16, bottom: 5 }}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F5F9" />
+                      <XAxis
+                        dataKey="displayDate"
+                        stroke="#94A3B8"
+                        fontSize={11}
+                        tickLine={false}
+                        axisLine={{ stroke: '#CBD5E1' }}
+                      />
+                      <YAxis
+                        domain={[50, 100]}
+                        stroke="#94A3B8"
+                        fontSize={11}
+                        tickLine={false}
+                        unit="%"
+                        axisLine={{ stroke: '#CBD5E1' }}
+                      />
+                      <Tooltip content={<CustomAttendanceTooltip />} />
+                      <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }} />
+                      <ReferenceLine
+                        y={85}
+                        stroke="#10B981"
+                        strokeDasharray="4 4"
+                        strokeWidth={1.5}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="rate"
+                        name={
+                          attendanceTrendGranularity === 'weekly30'
+                            ? (language === 'ur' ? 'ہفتہ وار حاضری (%)' : 'Weekly Attendance Rate (%)')
+                            : (language === 'ur' ? 'حاضری کی شرح (%)' : 'Attendance Rate (%)')
+                        }
+                        stroke="#4F46E5"
+                        strokeWidth={3}
+                        dot={(dotProps: any) => {
+                          const { cx, cy, payload, index } = dotProps;
+                          if (typeof cx !== 'number' || typeof cy !== 'number') return <g key={index} />;
+                          const isDipPoint = Boolean(payload?.isDip);
+                          return (
+                            <circle
+                              key={`dot-${index}`}
+                              cx={cx}
+                              cy={cy}
+                              r={isDipPoint ? 5.5 : 4}
+                              fill={isDipPoint ? '#E11D48' : '#4F46E5'}
+                              stroke="#FFFFFF"
+                              strokeWidth={2}
+                            />
+                          );
+                        }}
+                        activeDot={{ r: 7, fill: '#4F46E5', stroke: '#FFFFFF', strokeWidth: 2 }}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="target"
+                        name={language === 'ur' ? 'آر ٹی ای ہدف (85%)' : 'RTE Mandate (85%)'}
+                        stroke="#10B981"
+                        strokeDasharray="4 4"
+                        strokeWidth={1.5}
+                        dot={false}
+                      />
+                    </LineChart>
+                  ) : (
+                    <LineChart data={activeAttendanceChartData} margin={{ top: 12, right: 14, left: -16, bottom: 5 }}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F5F9" />
+                      <XAxis
+                        dataKey="displayDate"
+                        stroke="#94A3B8"
+                        fontSize={11}
+                        tickLine={false}
+                        axisLine={{ stroke: '#CBD5E1' }}
+                      />
+                      <YAxis
+                        stroke="#94A3B8"
+                        fontSize={11}
+                        tickLine={false}
+                        axisLine={{ stroke: '#CBD5E1' }}
+                      />
+                      <Tooltip content={<CustomAttendanceTooltip />} />
+                      <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }} />
+                      <Line
+                        type="monotone"
+                        dataKey="present"
+                        name={language === 'ur' ? 'حاضر طلباء' : 'Present'}
+                        stroke="#10B981"
+                        strokeWidth={2.5}
+                        dot={{ r: 3.5, fill: '#10B981', strokeWidth: 1.5, stroke: '#FFFFFF' }}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="absent"
+                        name={language === 'ur' ? 'غیر حاضر' : 'Absent'}
+                        stroke="#EF4444"
+                        strokeWidth={2.2}
+                        dot={{ r: 3.5, fill: '#EF4444', strokeWidth: 1.5, stroke: '#FFFFFF' }}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="leave"
+                        name={language === 'ur' ? 'رخصت' : 'On Leave'}
+                        stroke="#F59E0B"
+                        strokeWidth={1.8}
+                        dot={{ r: 3, fill: '#F59E0B', strokeWidth: 1.5, stroke: '#FFFFFF' }}
+                      />
+                    </LineChart>
+                  )}
+                </ResponsiveContainer>
+              )}
             </div>
           </div>
 
@@ -2818,21 +3084,47 @@ export const Dashboard: React.FC<DashboardProps> = ({
           <div className="mt-4 pt-3.5 border-t border-slate-100 grid grid-cols-3 gap-2 text-center text-xs">
             <div className="p-2 bg-slate-50 rounded-xl border border-slate-100">
               <span className="text-[10px] text-slate-500 font-medium">
-                {language === 'ur' ? 'ماہانہ اوسط شرح' : 'Monthly Avg Rate'}
+                {attendanceTrendGranularity === 'weekly30'
+                  ? (language === 'ur' ? '30 دن کی ہفتہ وار اوسط' : '30-Day Weekly Avg')
+                  : (language === 'ur' ? 'ماہانہ اوسط شرح' : 'Monthly Avg Rate')}
               </span>
               <p className="font-extrabold text-indigo-700 text-sm mt-0.5">{trendAvgRate}%</p>
             </div>
-            <div className="p-2 bg-emerald-50/70 rounded-xl border border-emerald-100">
-              <span className="text-[10px] text-emerald-700 font-medium">
-                {language === 'ur' ? 'آر ٹی ای معیار' : 'RTE Benchmark'}
+            <div className={`p-2 rounded-xl border ${
+              weeklyDipInsight?.lowestWeek && weeklyDipInsight.lowestWeek.rate < 90
+                ? 'bg-rose-50/70 border-rose-100'
+                : 'bg-emerald-50/70 border-emerald-100'
+            }`}>
+              <span className={`text-[10px] font-medium ${
+                weeklyDipInsight?.lowestWeek && weeklyDipInsight.lowestWeek.rate < 90
+                  ? 'text-rose-700'
+                  : 'text-emerald-700'
+              }`}>
+                {language === 'ur' ? 'کم ترین ہفتہ (کمی)' : 'Lowest Week (Dip)'}
               </span>
-              <p className="font-extrabold text-emerald-800 text-sm mt-0.5">85% Mandate</p>
+              <p className={`font-extrabold text-sm mt-0.5 truncate ${
+                weeklyDipInsight?.lowestWeek && weeklyDipInsight.lowestWeek.rate < 90
+                  ? 'text-rose-800'
+                  : 'text-emerald-800'
+              }`}>
+                {weeklyDipInsight?.lowestWeek
+                  ? `${weeklyDipInsight.lowestWeek.rate}% · ${weeklyDipInsight.lowestWeek.displayDate}`
+                  : '85% Mandate'}
+              </p>
             </div>
             <div className="p-2 bg-slate-50 rounded-xl border border-slate-100">
               <span className="text-[10px] text-slate-500 font-medium">
-                {language === 'ur' ? 'آخری تاریخ' : 'Latest Recorded'}
+                {language === 'ur' ? 'تازہ ترین ہفتہ' : 'Latest Week Trend'}
               </span>
-              <p className="font-extrabold text-slate-800 text-sm mt-0.5">28 Oct (Today)</p>
+              <p className="font-extrabold text-slate-800 text-sm mt-0.5 truncate">
+                {weeklyDipInsight?.latestWeek
+                  ? `${weeklyDipInsight.latestWeek.rate}%${
+                      weeklyDipInsight.latestWeek.deltaFromPrev !== null
+                        ? ` (${weeklyDipInsight.latestWeek.deltaFromPrev >= 0 ? '+' : ''}${weeklyDipInsight.latestWeek.deltaFromPrev}%)`
+                        : ''
+                    }`
+                  : todayStr}
+              </p>
             </div>
           </div>
         </div>
@@ -3277,7 +3569,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 </button>
               </div>
               <p className="text-xs text-slate-300">
-                {school.name} • {school.district}, {school.state || 'Jammu & Kashmir'}
+                {school.name} • {formatSchoolAddressOnce(school)}
               </p>
               <div className="flex items-center gap-3 pt-1">
                 <button
@@ -3298,30 +3590,12 @@ export const Dashboard: React.FC<DashboardProps> = ({
             </div>
           </div>
 
-          {/* 2. Official Android App Download */}
-          <div className="flex flex-col sm:flex-row sm:items-center lg:justify-end gap-3 pt-4 lg:pt-0 border-t lg:border-t-0 lg:border-l border-slate-800 lg:pl-6">
-            <div className="sm:text-right">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">
-                Official Mobile Application
-              </p>
-              <p className="text-xs font-bold text-white mt-0.5">
-                School Master Android App • Version 1.0.4
-              </p>
-              <p className="text-[11px] text-slate-400">
-                Direct APK install for authorized school staff &amp; devices
-              </p>
-            </div>
-            <div className="flex items-center gap-2 shrink-0">
-              <a
-                href="/SchoolMaster-release.apk"
-                download="SchoolMaster-v1.0.4-release.apk"
-                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-xs shadow-md shadow-emerald-600/25 transition-all active:scale-95 no-underline"
-              >
-                <Smartphone className="w-4 h-4 text-emerald-100" />
-                <span>App Download</span>
-                <span className="px-1.5 py-0.5 rounded bg-black/20 text-[10px] font-mono">v1.0.4</span>
-              </a>
-            </div>
+          {/* 2. Official Android App Download (Direct APK + Live Progress + Installation Guidance) */}
+          <div
+            id="dashboard-android-app-download"
+            className="pt-4 lg:pt-0 border-t lg:border-t-0 lg:border-l border-slate-800 lg:pl-6 flex-1 max-w-xl"
+          >
+            <AndroidAppDownloadCard variant="dashboard" />
           </div>
         </div>
       </footer>

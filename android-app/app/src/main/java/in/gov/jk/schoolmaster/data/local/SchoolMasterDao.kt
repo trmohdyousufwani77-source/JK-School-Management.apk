@@ -66,8 +66,33 @@ interface TeacherDao {
 
 @Dao
 interface ProtectedModulesDao {
-    @Query("SELECT * FROM teacher_leaves ORDER BY startDate DESC")
+    @Query("SELECT * FROM teacher_leaves WHERE deletedStatus = 'Active' ORDER BY startDate DESC")
     fun observeLeaves(): Flow<List<TeacherLeaveEntity>>
+
+    @Query("SELECT * FROM teacher_leaves ORDER BY updatedAtMillis DESC")
+    fun observeAllLeavesIncludingDeleted(): Flow<List<TeacherLeaveEntity>>
+
+    @Query("SELECT * FROM teacher_leaves WHERE deletedStatus = 'Active' AND teacherId = :teacherId ORDER BY startDate DESC")
+    fun observeLeavesByTeacher(teacherId: String): Flow<List<TeacherLeaveEntity>>
+
+    @Query(
+        """
+        SELECT * FROM teacher_leaves
+        WHERE deletedStatus = 'Active'
+          AND status != 'Rejected'
+          AND teacherId = :teacherId
+          AND id != :excludeId
+          AND startDate <= :endDate
+          AND endDate >= :startDate
+        LIMIT 1
+        """
+    )
+    suspend fun findOverlappingLeave(
+        teacherId: String,
+        startDate: String,
+        endDate: String,
+        excludeId: String = ""
+    ): TeacherLeaveEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertLeaves(items: List<TeacherLeaveEntity>)
@@ -75,8 +100,57 @@ interface ProtectedModulesDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertLeave(item: TeacherLeaveEntity)
 
-    @Query("UPDATE teacher_leaves SET status = :status WHERE id = :leaveId")
-    suspend fun updateLeaveStatus(leaveId: String, status: String)
+    @Query("UPDATE teacher_leaves SET status = :status, updatedAtMillis = :nowMillis WHERE id = :leaveId")
+    suspend fun updateLeaveStatus(
+        leaveId: String,
+        status: String,
+        nowMillis: Long = System.currentTimeMillis()
+    )
+
+    @Query(
+        """
+        UPDATE teacher_leaves
+        SET status = :status,
+            headmasterRemarks = :remarks,
+            rejectionReason = :rejectionReason,
+            decidedBy = :decidedBy,
+            decisionDate = :decisionDate,
+            updatedAtMillis = :nowMillis
+        WHERE id = :leaveId
+        """
+    )
+    suspend fun recordLeaveDecision(
+        leaveId: String,
+        status: String,
+        remarks: String,
+        rejectionReason: String,
+        decidedBy: String,
+        decisionDate: String,
+        nowMillis: Long = System.currentTimeMillis()
+    )
+
+    @Query(
+        """
+        UPDATE teacher_leaves
+        SET deletedStatus = 'Deleted',
+            deletedBy = :deletedBy,
+            deletionReason = :reason,
+            updatedAtMillis = :nowMillis
+        WHERE id = :leaveId AND status = 'Pending'
+        """
+    )
+    suspend fun softDeletePendingLeave(
+        leaveId: String,
+        deletedBy: String,
+        reason: String,
+        nowMillis: Long = System.currentTimeMillis()
+    )
+
+    @Query("SELECT * FROM leave_audit_logs ORDER BY timestampMillis DESC")
+    fun observeLeaveAuditLogs(): Flow<List<LeaveAuditLogEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertLeaveAuditLog(entry: LeaveAuditLogEntity)
 
     @Query("SELECT COUNT(*) FROM teacher_leaves")
     suspend fun countLeaves(): Int
@@ -128,6 +202,12 @@ interface ProtectedModulesDao {
 interface TeacherAttendanceDao {
     @Query("SELECT * FROM teacher_attendance ORDER BY dateIso DESC, lastModified DESC")
     fun observeAllAttendance(): Flow<List<TeacherAttendanceEntity>>
+
+    @Query("SELECT * FROM teacher_attendance WHERE dateIso = :dateIso ORDER BY teacherName ASC")
+    fun observeAttendanceForDate(dateIso: String): Flow<List<TeacherAttendanceEntity>>
+
+    @Query("SELECT * FROM teacher_attendance WHERE teacherId = :teacherId ORDER BY dateIso DESC")
+    fun observeAttendanceForTeacher(teacherId: String): Flow<List<TeacherAttendanceEntity>>
 
     @Query("SELECT COUNT(*) FROM teacher_attendance WHERE LOWER(syncStatus) = 'pending'")
     fun observePendingSyncCount(): Flow<Int>
