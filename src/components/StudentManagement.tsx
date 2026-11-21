@@ -29,6 +29,8 @@ import {
   ArrowRightLeft,
   History,
   GraduationCap,
+  Camera,
+  Image as ImageIcon,
 } from 'lucide-react';
 import { AadhaarStatus, SchoolProfile, Student, StudentHistoryEvent, StudentStatus, User } from '../types';
 import { Language, translations } from '../utils/translations';
@@ -36,6 +38,7 @@ import { downloadStudentImportTemplate, exportStudentRegisterToExcel } from '../
 import { AadhaarVerificationModal } from './AadhaarVerificationModal';
 import { UpcomingBirthdaysCard } from './UpcomingBirthdaysCard';
 import { StudentQrPassModal } from './StudentQrPassModal';
+import { BulkPhotoImportModal } from './BulkPhotoImportModal';
 import { STANDARDIZED_ADDRESS } from '../utils/sampleData';
 import {
   buildStudentQrPayload,
@@ -120,6 +123,7 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({
   const [profileQrDataUrl, setProfileQrDataUrl] = useState<string>('');
   const [verifyingStudent, setVerifyingStudent] = useState<Student | null>(null);
   const [selectedStudentForQr, setSelectedStudentForQr] = useState<Student | null>(null);
+  const [isBulkPhotoModalOpen, setIsBulkPhotoModalOpen] = useState<boolean>(false);
 
   // Delete Confirmation Modal State
   const [studentToDelete, setStudentToDelete] = useState<Student | null>(null);
@@ -653,6 +657,18 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({
             <Download className="w-4 h-4" />
           </button>
 
+          {/* Bulk Student Photo Match (Excel / Admission Number) */}
+          {(currentUser.role === 'admin' || currentUser.role === 'head_teacher') && (
+            <button
+              onClick={() => setIsBulkPhotoModalOpen(true)}
+              title="Upload multiple student photographs named by Admission Number or Student ID to match automatically"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 transition-colors"
+            >
+              <Camera className="w-4 h-4 text-indigo-600" />
+              <span>Bulk Photo Match</span>
+            </button>
+          )}
+
           {/* Auto-Calculate Attendance Marks button */}
           {(currentUser.role === 'admin' || currentUser.role === 'head_teacher') && (
             <button
@@ -1153,8 +1169,12 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({
                     </td>
                     <td className="py-3 px-3 font-semibold text-slate-900">
                       <div className="flex items-start gap-2.5">
-                        <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-indigo-500 to-indigo-700 text-white font-bold flex items-center justify-center text-xs shrink-0 shadow-sm mt-0.5">
-                          {s.fullName.slice(0, 1)}
+                        <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-indigo-500 to-indigo-700 text-white font-bold flex items-center justify-center text-xs shrink-0 shadow-sm mt-0.5 overflow-hidden border border-indigo-200/70">
+                          {s.photoDataUrl ? (
+                            <img src={s.photoDataUrl} alt={s.fullName} className="w-full h-full object-cover" />
+                          ) : (
+                            s.fullName.slice(0, 1)
+                          )}
                         </div>
                         <div className="min-w-0">
                           <div className="flex items-center gap-1.5 flex-wrap">
@@ -1578,6 +1598,21 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({
           language={language}
         />
       )}
+
+      {/* Bulk Photo Matching Modal (Excel / Admission Number) */}
+      <BulkPhotoImportModal
+        isOpen={isBulkPhotoModalOpen}
+        onClose={() => setIsBulkPhotoModalOpen(false)}
+        students={uniqueStudents}
+        onApplyMatchedPhotos={(updates) => {
+          updates.forEach(({ student, photoDataUrl }) => {
+            onUpdateStudent({ ...student, photoDataUrl });
+          });
+          showNotification(
+            `Updated photographs for ${updates.length} student${updates.length === 1 ? '' : 's'} matched by Admission Number / ID.`
+          );
+        }}
+      />
 
       {/* Delete Student Confirmation Dialog Modal */}
       {showDeleteConfirmModal && studentToDelete && (
@@ -2148,8 +2183,42 @@ const StudentFormModal: React.FC<StudentFormModalProps> = ({
   const [pinCode, setPinCode] = useState(initialData?.pinCode || school.pinCode || '190017');
   const [admissionDate, setAdmissionDate] = useState(initialData?.admissionDate || new Date().toISOString().slice(0, 10));
   const [previousSchool, setPreviousSchool] = useState(initialData?.previousSchool || '');
+  const [photoUrl, setPhotoUrl] = useState<string>(initialData?.photoDataUrl || '');
+  const [confirmRemovePhoto, setConfirmRemovePhoto] = useState<boolean>(false);
 
   if (!isOpen) return null;
+
+  const handlePhotoFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !file.type.startsWith('image/')) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const rawUrl = String(reader.result || '');
+      const img = new Image();
+      img.onload = () => {
+        const maxDim = 480;
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height, 1));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          setPhotoUrl(canvas.toDataURL('image/jpeg', 0.86));
+        } else {
+          setPhotoUrl(rawUrl);
+        }
+        setConfirmRemovePhoto(false);
+      };
+      img.onerror = () => {
+        setPhotoUrl(rawUrl);
+        setConfirmRemovePhoto(false);
+      };
+      img.src = rawUrl;
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -2181,6 +2250,7 @@ const StudentFormModal: React.FC<StudentFormModalProps> = ({
       pinCode: pinCode.trim(),
       admissionDate,
       previousSchool: previousSchool.trim(),
+      photoDataUrl: photoUrl || undefined,
     });
   };
 
@@ -2206,6 +2276,86 @@ const StudentFormModal: React.FC<StudentFormModalProps> = ({
               {formError}
             </div>
           )}
+
+          {/* Student Photograph Management (Camera Capture + Gallery Upload + Delete Confirmation) */}
+          <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-center gap-3.5">
+              <div className="w-16 h-20 rounded-xl bg-white border border-slate-300 flex items-center justify-center overflow-hidden shadow-2xs shrink-0">
+                {photoUrl ? (
+                  <img src={photoUrl} alt="Student Passport" className="w-full h-full object-cover" />
+                ) : (
+                  <div className="flex flex-col items-center text-slate-400">
+                    <ImageIcon className="w-6 h-6" />
+                    <span className="text-[9px] font-bold mt-0.5">No Photo</span>
+                  </div>
+                )}
+              </div>
+              <div>
+                <p className="font-extrabold text-slate-900 text-xs">Student Photograph</p>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Shown on Admission Register, Student Profile, QR Pass, and Holistic Progress Cards (JPG/PNG).
+                </p>
+                {confirmRemovePhoto && (
+                  <div className="mt-2 flex items-center gap-2 text-[11px]">
+                    <span className="font-bold text-rose-700">Delete student photo?</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPhotoUrl('');
+                        setConfirmRemovePhoto(false);
+                      }}
+                      className="px-2 py-0.5 rounded-lg bg-rose-600 text-white font-bold"
+                    >
+                      Confirm Delete
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmRemovePhoto(false)}
+                      className="px-2 py-0.5 rounded-lg bg-slate-200 text-slate-700 font-bold"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-2xs transition-colors">
+                <Camera className="w-3.5 h-3.5" />
+                <span>Camera</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  capture="user"
+                  className="hidden"
+                  onChange={handlePhotoFileChange}
+                />
+              </label>
+
+              <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 font-bold text-xs transition-colors">
+                <Upload className="w-3.5 h-3.5 text-indigo-600" />
+                <span>{photoUrl ? 'Replace' : 'Gallery'}</span>
+                <input
+                  type="file"
+                  accept="image/jpeg,image/jpg,image/png,image/webp"
+                  className="hidden"
+                  onChange={handlePhotoFileChange}
+                />
+              </label>
+
+              {photoUrl && !confirmRemovePhoto && (
+                <button
+                  type="button"
+                  onClick={() => setConfirmRemovePhoto(true)}
+                  className="inline-flex items-center gap-1 px-2.5 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-bold text-xs"
+                  title="Remove Student Photograph"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block font-semibold text-slate-700 mb-1">{t.fullName} *</label>

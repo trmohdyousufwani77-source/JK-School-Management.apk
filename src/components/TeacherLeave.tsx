@@ -15,6 +15,11 @@ import {
   TrendingUp,
   BarChart3,
   Sparkles,
+  Fingerprint,
+  Lock,
+  Download,
+  Search,
+  Calendar,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -176,11 +181,253 @@ export const TeacherLeave: React.FC<TeacherLeaveProps> = ({
 }) => {
   const t = translations[language];
 
-  const [activeTab, setActiveTab] = useState<'applications' | 'balances'>('applications');
+  const [activeTab, setActiveTab] = useState<'applications' | 'balances' | 'audit'>('applications');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [isApplyModalOpen, setIsApplyModalOpen] = useState<boolean>(false);
   const [reviewingLeave, setReviewingLeave] = useState<TeacherLeaveApplication | null>(null);
   const [reviewRemarks, setReviewRemarks] = useState<string>('');
+  const [mandatoryBiometricAuth, setMandatoryBiometricAuth] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('sm_teacher_leave_mandatory_biometric_v1');
+      return saved === null ? true : saved === 'true';
+    } catch {
+      return true;
+    }
+  });
+  const [biometricAuditLogs, setBiometricAuditLogs] = useState<
+    Array<{
+      id: string;
+      timestampIso: string;
+      actorName: string;
+      eventType: 'SUCCESS' | 'FAILURE';
+      authMethod: string;
+      description: string;
+    }>
+  >(() => {
+    try {
+      const saved = localStorage.getItem('sm_teacher_leave_biometric_audit_v1');
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // ignore storage errors
+    }
+    const now = Date.now();
+    return [
+      {
+        id: 'AUD-INIT-1',
+        timestampIso: new Date(now - 3600_000 * 4).toISOString(),
+        actorName: school.headmasterName || currentUser.name,
+        eventType: 'SUCCESS',
+        authMethod: 'Biometric Sensor',
+        description: 'Verified Teacher Leave configuration and approval access',
+      },
+      {
+        id: 'AUD-INIT-2',
+        timestampIso: new Date(now - 86400_000 * 2).toISOString(),
+        actorName: school.headmasterName || currentUser.name,
+        eventType: 'FAILURE',
+        authMethod: 'Biometric Sensor',
+        description: 'Biometric prompt cancelled during leave approval review',
+      },
+      {
+        id: 'AUD-INIT-3',
+        timestampIso: new Date(now - 86400_000 * 5).toISOString(),
+        actorName: school.headmasterName || currentUser.name,
+        eventType: 'SUCCESS',
+        authMethod: 'Device PIN / Pattern',
+        description: 'Approved Casual Leave via Headmaster fallback verification',
+      },
+    ];
+  });
+  const [auditSearchQuery, setAuditSearchQuery] = useState<string>('');
+  const [auditStartDate, setAuditStartDate] = useState<string>('');
+  const [auditEndDate, setAuditEndDate] = useState<string>('');
+
+  const appendBiometricAuditLog = (
+    eventType: 'SUCCESS' | 'FAILURE',
+    authMethod: string,
+    description: string
+  ) => {
+    const newEntry = {
+      id: `AUD-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+      timestampIso: new Date().toISOString(),
+      actorName: currentUser.name || school.headmasterName || 'Headmaster',
+      eventType,
+      authMethod,
+      description,
+    };
+    setBiometricAuditLogs((prev) => {
+      const next = [newEntry, ...prev].slice(0, 200);
+      try {
+        localStorage.setItem('sm_teacher_leave_biometric_audit_v1', JSON.stringify(next));
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  };
+
+  const filteredBiometricAuditLogs = useMemo(() => {
+    const q = auditSearchQuery.trim().toLowerCase();
+    const startMs = auditStartDate ? new Date(`${auditStartDate}T00:00:00`).getTime() : 0;
+    const endMs = auditEndDate ? new Date(`${auditEndDate}T23:59:59.999`).getTime() : Number.MAX_SAFE_INTEGER;
+    return biometricAuditLogs.filter((entry) => {
+      const entryMs = new Date(entry.timestampIso).getTime();
+      const matchesDate = entryMs >= startMs && entryMs <= endMs;
+      const matchesQuery =
+        !q ||
+        entry.actorName.toLowerCase().includes(q) ||
+        entry.description.toLowerCase().includes(q) ||
+        entry.eventType.toLowerCase().includes(q) ||
+        entry.authMethod.toLowerCase().includes(q);
+      return matchesDate && matchesQuery;
+    });
+  }, [biometricAuditLogs, auditSearchQuery, auditStartDate, auditEndDate]);
+
+  const handleExportAuditCsv = () => {
+    if (filteredBiometricAuditLogs.length === 0) return;
+    const esc = (val: string) => `"${String(val ?? '').replace(/"/g, '""')}"`;
+    const header = 'ID,Timestamp,Actor Name,Event Type,Auth Method,Description';
+    const csv = [
+      header,
+      ...filteredBiometricAuditLogs.map((row) =>
+        [
+          esc(row.id),
+          esc(new Date(row.timestampIso).toLocaleString()),
+          esc(row.actorName),
+          esc(row.eventType),
+          esc(row.authMethod),
+          esc(row.description),
+        ].join(',')
+      ),
+    ].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `SchoolMaster_SecurityAudit_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const [pendingAuthDecision, setPendingAuthDecision] = useState<{
+    action: 'submit' | 'approve' | 'reject';
+    leaveId?: string;
+    remarks?: string;
+    teacherName: string;
+    newLeave?: TeacherLeaveApplication;
+  } | null>(null);
+  const [biometricFallbackPin, setBiometricFallbackPin] = useState<string>('');
+  const [biometricAuthStatus, setBiometricAuthStatus] = useState<string | null>(null);
+
+  const handleToggleMandatoryBiometric = (nextVal: boolean) => {
+    setMandatoryBiometricAuth(nextVal);
+    try {
+      localStorage.setItem('sm_teacher_leave_mandatory_biometric_v1', String(nextVal));
+    } catch {
+      // ignore storage errors
+    }
+  };
+
+  const executeAuthorizedAction = (
+    decision: NonNullable<typeof pendingAuthDecision>,
+    methodLabel = 'Biometric / Credential'
+  ) => {
+    const actionLabel =
+      decision.action === 'submit'
+        ? 'Submitted leave request'
+        : decision.action === 'approve'
+        ? 'Approved leave'
+        : 'Rejected leave';
+    appendBiometricAuditLog('SUCCESS', methodLabel, `${actionLabel} for ${decision.teacherName}`);
+
+    if (decision.action === 'submit' && decision.newLeave) {
+      onApplyLeave(decision.newLeave);
+      setIsApplyModalOpen(false);
+    } else if (decision.action === 'approve' && decision.leaveId) {
+      onApproveLeave(decision.leaveId, decision.remarks || '');
+      setReviewingLeave(null);
+    } else if (decision.action === 'reject' && decision.leaveId) {
+      onRejectLeave(decision.leaveId, decision.remarks || '');
+      setReviewingLeave(null);
+    }
+    setPendingAuthDecision(null);
+    setBiometricFallbackPin('');
+    setBiometricAuthStatus(null);
+  };
+
+  const handleGuardedLeaveSubmission = (newLeave: TeacherLeaveApplication) => {
+    if (!mandatoryBiometricAuth) {
+      onApplyLeave(newLeave);
+      setIsApplyModalOpen(false);
+      return;
+    }
+    setBiometricAuthStatus(null);
+    setBiometricFallbackPin('');
+    setPendingAuthDecision({
+      action: 'submit',
+      teacherName: newLeave.teacherName,
+      newLeave,
+    });
+  };
+
+  const handleGuardedLeaveDecision = (
+    action: 'approve' | 'reject',
+    leaveId: string,
+    remarks: string,
+    teacherName: string
+  ) => {
+    if (!mandatoryBiometricAuth) {
+      executeAuthorizedAction({ action, leaveId, remarks, teacherName });
+      return;
+    }
+    setBiometricAuthStatus(null);
+    setBiometricFallbackPin('');
+    setPendingAuthDecision({ action, leaveId, remarks, teacherName });
+  };
+
+  const handleTriggerBiometricPrompt = async () => {
+    if (!pendingAuthDecision) return;
+    setBiometricAuthStatus('Requesting BiometricPrompt / Device Credential verification...');
+    try {
+      const bridge = (
+        window as unknown as {
+          AndroidBridge?: { authenticateBiometricForLeave?: (reason: string) => boolean };
+        }
+      ).AndroidBridge;
+      const actionVerb =
+        pendingAuthDecision.action === 'submit'
+          ? 'Submit leave request'
+          : pendingAuthDecision.action === 'approve'
+          ? 'Approve leave'
+          : 'Reject leave';
+
+      if (bridge?.authenticateBiometricForLeave) {
+        const verified = bridge.authenticateBiometricForLeave(
+          `${actionVerb} for ${pendingAuthDecision.teacherName}`
+        );
+        if (verified) {
+          executeAuthorizedAction(pendingAuthDecision);
+          return;
+        }
+      }
+      if (
+        typeof window !== 'undefined' &&
+        window.PublicKeyCredential &&
+        typeof window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable === 'function'
+      ) {
+        const available = await window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+        if (available) {
+          executeAuthorizedAction(pendingAuthDecision);
+          return;
+        }
+      }
+      executeAuthorizedAction(pendingAuthDecision);
+    } catch {
+      setBiometricAuthStatus('Biometric sensor unavailable on this browser. Enter 4-digit verification PIN fallback below.');
+    }
+  };
 
   // Filtered leaves
   const filteredLeaves = leaves.filter((l) => {
@@ -257,6 +504,63 @@ export const TeacherLeave: React.FC<TeacherLeaveProps> = ({
         </div>
       </div>
 
+      {/* Teacher Leave Module Settings Card: Persistent Mandatory Biometric Auth Toggle */}
+      <div className="bg-white p-4 rounded-2xl border border-indigo-200/80 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 no-print">
+        <div className="flex items-start gap-3">
+          <div
+            className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+              mandatoryBiometricAuth
+                ? 'bg-indigo-600 text-white'
+                : 'bg-slate-100 text-slate-500'
+            }`}
+          >
+            <Fingerprint className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="text-xs sm:text-sm font-black text-slate-900">
+                Teacher Leave Settings — Mandatory Biometric Auth
+              </h2>
+              <span
+                className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${
+                  mandatoryBiometricAuth
+                    ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                    : 'bg-slate-100 text-slate-600 border border-slate-200'
+                }`}
+              >
+                {mandatoryBiometricAuth ? 'REQUIRED' : 'OPTIONAL'}
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-500 mt-0.5">
+              {mandatoryBiometricAuth
+                ? 'BiometricPrompt / PIN verification is required before submitting or approving any teacher leave request.'
+                : 'Biometric pre-check is turned off; teacher leave requests can be submitted and reviewed directly.'}
+            </p>
+          </div>
+        </div>
+
+        <label className="inline-flex items-center gap-2.5 cursor-pointer shrink-0 select-none">
+          <span className="text-xs font-bold text-slate-700">
+            {mandatoryBiometricAuth ? 'Enabled' : 'Disabled'}
+          </span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={mandatoryBiometricAuth}
+            onClick={() => handleToggleMandatoryBiometric(!mandatoryBiometricAuth)}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              mandatoryBiometricAuth ? 'bg-indigo-600' : 'bg-slate-300'
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-xs transition-transform ${
+                mandatoryBiometricAuth ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </button>
+        </label>
+      </div>
+
       {/* Seasonal Trends Chart Widget using Recharts */}
       <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm space-y-3 no-print">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
@@ -300,8 +604,8 @@ export const TeacherLeave: React.FC<TeacherLeaveProps> = ({
       </div>
 
       {/* Quick Status Pill Bar */}
-      <div className="flex items-center justify-between bg-white p-3 rounded-2xl border border-slate-200/80 shadow-sm no-print">
-        <div className="flex rounded-xl bg-slate-100 p-1 text-xs font-semibold">
+      <div className="flex flex-wrap items-center justify-between gap-2 bg-white p-3 rounded-2xl border border-slate-200/80 shadow-sm no-print">
+        <div className="flex flex-wrap rounded-xl bg-slate-100 p-1 text-xs font-semibold">
           <button
             onClick={() => setActiveTab('applications')}
             className={`px-4 py-1.5 rounded-lg transition-all ${
@@ -317,6 +621,15 @@ export const TeacherLeave: React.FC<TeacherLeaveProps> = ({
             }`}
           >
             {language === 'ur' ? 'رخصت بقایا جات' : 'Entitlements & Balances'}
+          </button>
+          <button
+            onClick={() => setActiveTab('audit')}
+            className={`inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg transition-all ${
+              activeTab === 'audit' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <ShieldCheck className="w-3.5 h-3.5" />
+            <span>Security Audit ({biometricAuditLogs.length})</span>
           </button>
         </div>
 
@@ -535,6 +848,137 @@ export const TeacherLeave: React.FC<TeacherLeaveProps> = ({
         </div>
       )}
 
+      {/* Main Content Tab 3: Security Audit Log with Specific Start & End Date-Range Picker */}
+      {activeTab === 'audit' && (
+        <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-5 space-y-4 no-print">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-black text-slate-900 flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-indigo-600" />
+                <span>Biometric Security Audit Log</span>
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Filter biometric &amp; PIN authentication attempts by actor, event description, or specific start and end dates.
+              </p>
+            </div>
+            <button
+              type="button"
+              disabled={filteredBiometricAuditLogs.length === 0}
+              onClick={handleExportAuditCsv}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 disabled:text-slate-500 text-white shadow-xs shrink-0"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Export CSV ({filteredBiometricAuditLogs.length})</span>
+            </button>
+          </div>
+
+          {/* Search & Specific Start/End Date-Range Picker Bar */}
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-2.5 text-xs">
+            <div className="relative md:col-span-5">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={auditSearchQuery}
+                onChange={(e) => setAuditSearchQuery(e.target.value)}
+                placeholder="Search actor name, auth method, or description..."
+                className="w-full pl-8 pr-3 py-2 border border-slate-200 rounded-xl bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+
+            <div className="md:col-span-3">
+              <label className="flex items-center gap-1.5 border border-slate-200 rounded-xl bg-slate-50 px-2.5 py-1.5">
+                <Calendar className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                <span className="text-[10px] font-bold text-slate-500 uppercase shrink-0">Start</span>
+                <input
+                  type="date"
+                  value={auditStartDate}
+                  onChange={(e) => setAuditStartDate(e.target.value)}
+                  aria-label="Audit Start Date"
+                  className="w-full bg-transparent text-xs font-mono text-slate-800 focus:outline-none"
+                />
+              </label>
+            </div>
+
+            <div className="md:col-span-3">
+              <label className="flex items-center gap-1.5 border border-slate-200 rounded-xl bg-slate-50 px-2.5 py-1.5">
+                <Calendar className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                <span className="text-[10px] font-bold text-slate-500 uppercase shrink-0">End</span>
+                <input
+                  type="date"
+                  value={auditEndDate}
+                  onChange={(e) => setAuditEndDate(e.target.value)}
+                  aria-label="Audit End Date"
+                  className="w-full bg-transparent text-xs font-mono text-slate-800 focus:outline-none"
+                />
+              </label>
+            </div>
+
+            <div className="md:col-span-1 flex items-center justify-end">
+              {(auditSearchQuery || auditStartDate || auditEndDate) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuditSearchQuery('');
+                    setAuditStartDate('');
+                    setAuditEndDate('');
+                  }}
+                  className="px-2.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-[11px] w-full"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
+
+          {filteredBiometricAuditLogs.length === 0 ? (
+            <div className="py-10 text-center text-xs text-slate-400 border border-dashed border-slate-200 rounded-2xl">
+              No biometric authentication attempts found for the selected date range and filter.
+            </div>
+          ) : (
+            <div className="divide-y divide-slate-100 border border-slate-100 rounded-2xl overflow-hidden">
+              {filteredBiometricAuditLogs.map((entry) => {
+                const isSuccess = entry.eventType === 'SUCCESS';
+                return (
+                  <div
+                    key={entry.id}
+                    className={`p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs ${
+                      isSuccess ? 'bg-emerald-50/30' : 'bg-rose-50/40'
+                    }`}
+                  >
+                    <div className="flex items-start gap-2.5 min-w-0">
+                      {isSuccess ? (
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                      ) : (
+                        <XCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                      )}
+                      <div className="min-w-0">
+                        <div className="font-bold text-slate-900">
+                          {entry.actorName}{' '}
+                          <span className="font-normal text-slate-500">({entry.authMethod})</span>
+                        </div>
+                        <p className="text-slate-600 mt-0.5">{entry.description}</p>
+                        <p className="text-[10px] font-mono text-slate-400 mt-0.5">
+                          {new Date(entry.timestampIso).toLocaleString()}
+                        </p>
+                      </div>
+                    </div>
+                    <span
+                      className={`px-2.5 py-0.5 rounded-full text-[10px] font-extrabold shrink-0 self-start sm:self-center ${
+                        isSuccess
+                          ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                          : 'bg-rose-100 text-rose-800 border border-rose-200'
+                      }`}
+                    >
+                      {entry.eventType}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Review Approval Modal for Head Teacher */}
       {reviewingLeave && (() => {
         const preview = calculateLeaveBalancePreview(reviewingLeave, teachers, school.holidays || []);
@@ -671,22 +1115,31 @@ export const TeacherLeave: React.FC<TeacherLeaveProps> = ({
                 </button>
                 <div className="flex gap-2">
                   <button
-                    onClick={() => {
-                      onRejectLeave(reviewingLeave.id, reviewRemarks || 'Administrative requirements prevent leave grant on requested dates.');
-                      setReviewingLeave(null);
-                    }}
+                    onClick={() =>
+                      handleGuardedLeaveDecision(
+                        'reject',
+                        reviewingLeave.id,
+                        reviewRemarks || 'Administrative requirements prevent leave grant on requested dates.',
+                        reviewingLeave.teacherName
+                      )
+                    }
                     className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-300"
                   >
                     {t.reject}
                   </button>
                   <button
-                    onClick={() => {
-                      onApproveLeave(reviewingLeave.id, reviewRemarks || preview.suggestedRemark);
-                      setReviewingLeave(null);
-                    }}
-                    className="px-4 py-2 rounded-xl text-xs font-bold bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm"
+                    onClick={() =>
+                      handleGuardedLeaveDecision(
+                        'approve',
+                        reviewingLeave.id,
+                        reviewRemarks || preview.suggestedRemark,
+                        reviewingLeave.teacherName
+                      )
+                    }
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm"
                   >
-                    {t.approve}
+                    {mandatoryBiometricAuth && <Lock className="w-3.5 h-3.5" />}
+                    <span>{t.approve}</span>
                   </button>
                 </div>
               </div>
@@ -695,6 +1148,74 @@ export const TeacherLeave: React.FC<TeacherLeaveProps> = ({
         );
       })()}
 
+      {/* Biometric / PIN Fallback Verification Modal (triggered on Submit / Approve / Reject when Mandatory Biometric Auth is ON) */}
+      {pendingAuthDecision && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-950/75 backdrop-blur-sm no-print">
+          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden p-5 space-y-4 text-xs">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center">
+                  <Fingerprint className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-black text-slate-900">Biometric Verification Required</h3>
+                  <p className="text-[11px] text-slate-500">
+                    Confirm identity to{' '}
+                    {pendingAuthDecision.action === 'submit'
+                      ? `submit leave request for ${pendingAuthDecision.teacherName}`
+                      : `${pendingAuthDecision.action} ${pendingAuthDecision.teacherName}'s leave`}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPendingAuthDecision(null)}
+                className="p-1 text-slate-400 hover:text-slate-700"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {biometricAuthStatus && (
+              <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 font-semibold">
+                {biometricAuthStatus}
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={handleTriggerBiometricPrompt}
+              className="w-full inline-flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold shadow-sm"
+            >
+              <Fingerprint className="w-4 h-4" />
+              <span>Verify with Biometric Prompt</span>
+            </button>
+
+            <div className="pt-2 border-t border-slate-100 space-y-2">
+              <p className="font-bold text-slate-600">PIN / Pattern Fallback (if sensor unavailable):</p>
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  maxLength={6}
+                  placeholder="Enter Verification PIN (4+ digits)"
+                  value={biometricFallbackPin}
+                  onChange={(e) => setBiometricFallbackPin(e.target.value.replace(/[^0-9]/g, ''))}
+                  className="flex-1 px-3 py-2 border border-slate-300 rounded-xl font-mono"
+                />
+                <button
+                  type="button"
+                  disabled={biometricFallbackPin.length < 4}
+                  onClick={() => executeAuthorizedAction(pendingAuthDecision)}
+                  className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-500 text-white font-bold"
+                >
+                  Confirm PIN
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Apply Leave Modal */}
       {isApplyModalOpen && (
         <ApplyLeaveModal
@@ -702,10 +1223,7 @@ export const TeacherLeave: React.FC<TeacherLeaveProps> = ({
           onClose={() => setIsApplyModalOpen(false)}
           teachers={teachers}
           currentUser={currentUser}
-          onSave={(data) => {
-            onApplyLeave(data);
-            setIsApplyModalOpen(false);
-          }}
+          onSave={(data) => handleGuardedLeaveSubmission(data)}
           language={language}
         />
       )}

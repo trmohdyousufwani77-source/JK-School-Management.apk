@@ -27,8 +27,12 @@ import {
   FileSignature,
   Stamp,
   Bell,
+  Eye,
+  Edit3,
+  X,
+  Lock,
 } from 'lucide-react';
-import { GradeBoundary, Holiday, SchoolProfile } from '../types';
+import { AdminRoleType, GradeBoundary, Holiday, SchoolProfile } from '../types';
 import { Language, translations } from '../utils/translations';
 
 import { translateSchoolNameToUrdu } from '../utils/urduTransliteration';
@@ -38,6 +42,7 @@ import {
   savePushPreferences,
   PUSH_PREFS_UPDATED_EVENT,
 } from '../utils/pushNotifications';
+import { SchoolLogoGeneratorPanel } from './SchoolLogoGeneratorPanel';
 
 interface SchoolSettingsProps {
   school: SchoolProfile;
@@ -46,6 +51,7 @@ interface SchoolSettingsProps {
   onExportBackup: () => void;
   onImportBackup: (jsonStr: string) => void;
   language: Language;
+  effectiveRole?: AdminRoleType;
   onOpenMultiPlatformModal?: (platform?: 'android' | 'ios' | 'windows') => void;
   onOpenDownloadHub?: () => void;
   initialSubTab?: 'profile' | 'administrative' | 'location' | 'grading' | 'holidays' | 'backup' | 'admin-access';
@@ -58,11 +64,13 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
   onExportBackup,
   onImportBackup,
   language,
+  effectiveRole = 'primary_admin',
   onOpenMultiPlatformModal,
   onOpenDownloadHub,
   initialSubTab = 'profile',
 }) => {
   const t = translations[language];
+  const isAuthorizedAdmin = effectiveRole !== 'teacher';
 
   const [activeTab, setActiveTab] = useState<'profile' | 'administrative' | 'location' | 'grading' | 'holidays' | 'backup' | 'admin-access'>(initialSubTab);
 
@@ -80,10 +88,18 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
   const [headTeacherName, setHeadTeacherName] = useState(school.headTeacherName || '');
   const [adminName, setAdminName] = useState(school.adminName || school.headmasterName || school.headTeacherName || 'Mohd Yousuf Wani');
   const [headmasterName, setHeadmasterName] = useState(school.headmasterName || school.headTeacherName || 'Mohd Yousuf Wani');
+  const [headmasterQualification, setHeadmasterQualification] = useState(school.headmasterQualification || 'M.Sc., M.Ed.');
+  const [headmasterContact, setHeadmasterContact] = useState(school.headmasterContact || school.contactNumber || '');
+  const [headmasterEmail, setHeadmasterEmail] = useState(school.headmasterEmail || school.email || '');
+  const [headmasterJoiningDate, setHeadmasterJoiningDate] = useState(school.headmasterJoiningDate || '2022-04-01');
+  const [isEditingHeadmaster, setIsEditingHeadmaster] = useState<boolean>(false);
   const [officialStampDataUrl, setOfficialStampDataUrl] = useState(school.officialStampDataUrl || '');
   const [headmasterSignatureDataUrl, setHeadmasterSignatureDataUrl] = useState(school.headmasterSignatureDataUrl || '');
   const [logoDataUrl, setLogoDataUrl] = useState(school.logoDataUrl || '');
-  const [principalDesignation, setPrincipalDesignation] = useState<'Headmaster' | 'Principal' | 'Headmistress' | 'Officiating Principal'>(
+  const [showLogoPreviewModal, setShowLogoPreviewModal] = useState<boolean>(false);
+  const [confirmDeleteLogo, setConfirmDeleteLogo] = useState<boolean>(false);
+  const [logoStatusMessage, setLogoStatusMessage] = useState<string | null>(null);
+  const [principalDesignation, setPrincipalDesignation] = useState<'Headmaster' | 'Principal' | 'Headmistress' | 'Officiating Principal' | 'In-Charge Headmaster'>(
     (school.principalDesignation as any) || 'Headmaster'
   );
   const [schoolCategory, setSchoolCategory] = useState<'Primary' | 'Middle' | 'High_School' | 'Higher_Secondary' | 'Composite'>(
@@ -231,6 +247,26 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
     reader.readAsDataURL(file);
   };
 
+  const handleSaveOfficialLogo = (nextDataUrl: string, message = 'Official School Logo saved & applied centrally.') => {
+    if (!isAuthorizedAdmin) return;
+    setLogoDataUrl(nextDataUrl);
+    const updated: SchoolProfile = {
+      ...school,
+      logoDataUrl: nextDataUrl || undefined,
+      officialLogoLocked: Boolean(nextDataUrl),
+      officialLogoUpdatedAt: new Date().toISOString(),
+    };
+    onUpdateSchool(updated);
+    try {
+      localStorage.setItem('school_master_v1_school', JSON.stringify(updated));
+    } catch (err) {
+      console.warn('LocalStorage save failed:', err);
+    }
+    setConfirmDeleteLogo(false);
+    setLogoStatusMessage(message);
+    setTimeout(() => setLogoStatusMessage(null), 3500);
+  };
+
   const handleSaveProfile = (e: React.FormEvent) => {
     e.preventDefault();
     const resolvedHeadmaster = headmasterName.trim() || headTeacherName.trim();
@@ -249,10 +285,17 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
       academicSession,
       headTeacherName: resolvedHeadmaster,
       headmasterName: resolvedHeadmaster,
+      headmasterQualification: headmasterQualification.trim() || school.headmasterQualification,
+      headmasterContact: headmasterContact.trim() || school.headmasterContact,
+      headmasterEmail: headmasterEmail.trim() || school.headmasterEmail,
+      headmasterJoiningDate: headmasterJoiningDate || school.headmasterJoiningDate,
+      headmasterManuallyEdited: true,
+      headmasterUpdatedAt: new Date().toISOString(),
       adminName: resolvedAdmin,
       officialStampDataUrl: officialStampDataUrl || undefined,
       headmasterSignatureDataUrl: headmasterSignatureDataUrl || undefined,
       logoDataUrl: logoDataUrl || undefined,
+      officialLogoLocked: Boolean(logoDataUrl),
       principalDesignation,
       schoolCategory,
       classesOffered,
@@ -278,8 +321,23 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
     setTimeout(() => setSaveSuccess(false), 3000);
   };
 
+  const handleCancelHeadmasterEdit = () => {
+    setHeadmasterName(school.headmasterName || school.headTeacherName || 'Mohd Yousuf Wani');
+    setHeadTeacherName(school.headTeacherName || school.headmasterName || 'Mohd Yousuf Wani');
+    setAdminName(school.adminName || school.headmasterName || school.headTeacherName || 'Mohd Yousuf Wani');
+    setPrincipalDesignation((school.principalDesignation as any) || 'Headmaster');
+    setHeadmasterQualification(school.headmasterQualification || 'M.Sc., M.Ed.');
+    setHeadmasterContact(school.headmasterContact || school.contactNumber || '');
+    setHeadmasterEmail(school.headmasterEmail || school.email || '');
+    setHeadmasterJoiningDate(school.headmasterJoiningDate || '2022-04-01');
+    setOfficialStampDataUrl(school.officialStampDataUrl || '');
+    setHeadmasterSignatureDataUrl(school.headmasterSignatureDataUrl || '');
+    setIsEditingHeadmaster(false);
+  };
+
   const handleSaveAdministrativeProfile = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isAuthorizedAdmin) return;
     const resolvedHeadmaster = headmasterName.trim() || headTeacherName.trim();
     const resolvedAdmin = adminName.trim() || resolvedHeadmaster;
     setHeadTeacherName(resolvedHeadmaster);
@@ -287,6 +345,12 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
       ...school,
       headTeacherName: resolvedHeadmaster,
       headmasterName: resolvedHeadmaster,
+      headmasterQualification: headmasterQualification.trim() || undefined,
+      headmasterContact: headmasterContact.trim() || undefined,
+      headmasterEmail: headmasterEmail.trim() || undefined,
+      headmasterJoiningDate: headmasterJoiningDate || undefined,
+      headmasterManuallyEdited: true,
+      headmasterUpdatedAt: new Date().toISOString(),
       adminName: resolvedAdmin,
       principalDesignation,
       officialStampDataUrl: officialStampDataUrl || undefined,
@@ -298,6 +362,7 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
     } catch (err) {
       console.warn('LocalStorage save failed:', err);
     }
+    setIsEditingHeadmaster(false);
     setSaveSuccess(true);
     setTimeout(() => setSaveSuccess(false), 3000);
   };
@@ -648,45 +713,162 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
       {/* Tab 1: Profile Form */}
       {activeTab === 'profile' && (
         <form onSubmit={handleSaveProfile} className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 space-y-4 text-xs">
-          {/* School Logo Uploader */}
-          <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-            <div className="flex items-center gap-3.5">
-              <div className="w-16 h-16 rounded-2xl bg-white border border-slate-300 flex items-center justify-center overflow-hidden shadow-xs shrink-0">
-                {logoDataUrl ? (
-                  <img src={logoDataUrl} alt="School Logo" className="w-full h-full object-contain p-1" />
+          {/* Centralized Official School Logo Management (Clean Section — No School Name or Emblem Fields) */}
+          <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-center gap-3.5">
+                <div className="w-20 h-20 rounded-2xl bg-white border border-slate-300 flex items-center justify-center overflow-hidden shadow-xs shrink-0">
+                  {logoDataUrl ? (
+                    <img src={logoDataUrl} alt="Official School Logo" className="w-full h-full object-contain p-1.5" />
+                  ) : (
+                    <School className="w-8 h-8 text-indigo-600" />
+                  )}
+                </div>
+                <div>
+                  <h3 className="font-black text-slate-900 text-xs sm:text-sm flex items-center gap-2">
+                    <span>Official School Logo</span>
+                    {logoDataUrl && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-bold">
+                        <Lock className="w-2.5 h-2.5" />
+                        <span>Centralized</span>
+                      </span>
+                    )}
+                  </h3>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Managed centrally and displayed consistently across the School Master Widget, Automatic School Logo Generator, Smart ID Cards, and Holistic Progress Cards.
+                  </p>
+                  {logoStatusMessage && (
+                    <p className="text-[11px] font-bold text-emerald-700 mt-1 flex items-center gap-1">
+                      <CheckCircle className="w-3.5 h-3.5" />
+                      <span>{logoStatusMessage}</span>
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                {isAuthorizedAdmin ? (
+                  <>
+                    <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-xs transition-colors">
+                      {logoDataUrl ? <Edit3 className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
+                      <span>{logoDataUrl ? 'Edit Logo' : 'Add Logo'}</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => {
+                          handleAdminImageUpload(e, (url) => {
+                            handleSaveOfficialLogo(url, 'Official School Logo uploaded & applied across the app.');
+                          });
+                          e.target.value = '';
+                        }}
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      disabled={!logoDataUrl}
+                      onClick={() => setShowLogoPreviewModal(true)}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white hover:bg-slate-100 disabled:opacity-40 text-slate-800 border border-slate-300 font-bold text-xs transition-colors"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>Preview</span>
+                    </button>
+                    {logoDataUrl && (
+                      <button
+                        type="button"
+                        onClick={() => handleSaveOfficialLogo(logoDataUrl, 'Official School Logo saved & synced centrally.')}
+                        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-xs transition-colors"
+                      >
+                        <Save className="w-3.5 h-3.5" />
+                        <span>Save &amp; Apply</span>
+                      </button>
+                    )}
+                    {logoDataUrl && (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeleteLogo(true)}
+                        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-bold text-xs transition-colors"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Delete</span>
+                      </button>
+                    )}
+                  </>
                 ) : (
-                  <School className="w-7 h-7 text-indigo-600" />
+                  <span className="px-3 py-1.5 rounded-xl bg-amber-50 text-amber-800 border border-amber-200 font-bold text-[11px]">
+                    Authorized Admin Required to Edit Logo
+                  </span>
                 )}
               </div>
-              <div>
-                <h3 className="font-bold text-slate-900 text-xs sm:text-sm">Official School Logo / Emblem</h3>
-                <p className="text-[11px] text-slate-500 mt-0.5">
-                  Displayed on Dashboard, Header, Official Notices, and Holistic Student Progress Cards.
-                </p>
+            </div>
+
+            {confirmDeleteLogo && isAuthorizedAdmin && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <span className="text-xs font-bold text-rose-800">
+                  Remove the centrally saved Official School Logo across all widgets and modules?
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleSaveOfficialLogo('', 'Official School Logo deleted successfully.')}
+                    className="px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs"
+                  >
+                    Confirm Delete
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDeleteLogo(false)}
+                    className="px-3 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 font-bold text-xs"
+                  >
+                    Cancel
+                  </button>
+                </div>
               </div>
-            </div>
-            <div className="flex items-center gap-2 shrink-0">
-              <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-xs transition-colors">
-                <Upload className="w-3.5 h-3.5" />
-                <span>{logoDataUrl ? 'Change Logo' : 'Upload Logo'}</span>
-                <input
-                  type="file"
-                  accept="image/*"
-                  className="hidden"
-                  onChange={(e) => handleAdminImageUpload(e, setLogoDataUrl)}
-                />
-              </label>
-              {logoDataUrl && (
-                <button
-                  type="button"
-                  onClick={() => setLogoDataUrl('')}
-                  className="px-3 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-bold text-xs"
-                >
-                  Remove
-                </button>
-              )}
-            </div>
+            )}
+
+            {showLogoPreviewModal && logoDataUrl && (
+              <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+                <div className="bg-white rounded-3xl border border-slate-200 shadow-2xl max-w-sm w-full p-5 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h4 className="font-black text-slate-900 text-sm">Official School Logo Preview</h4>
+                    <button
+                      type="button"
+                      onClick={() => setShowLogoPreviewModal(false)}
+                      className="p-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <div className="aspect-square rounded-2xl bg-slate-50 border border-slate-200 p-6 flex items-center justify-center">
+                    <img src={logoDataUrl} alt="Official School Logo Preview" className="w-full h-full object-contain" />
+                  </div>
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => setShowLogoPreviewModal(false)}
+                      className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs"
+                    >
+                      Close Preview
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
+
+          <SchoolLogoGeneratorPanel
+            schoolName={name || school.name}
+            motto={reportHeader || school.reportHeader || 'Knowledge • Discipline • Excellence'}
+            udiseCode={code || school.code}
+            currentLogoDataUrl={logoDataUrl}
+            isAuthorized={isAuthorizedAdmin}
+            onApplyLogo={(dataUrl) => {
+              handleSaveOfficialLogo(dataUrl, 'Official School Logo saved & synced across all modules.');
+            }}
+            onDeleteLogo={() => {
+              handleSaveOfficialLogo('', 'Official School Logo deleted successfully.');
+            }}
+          />
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div>
@@ -1027,63 +1209,174 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
         </form>
       )}
 
-      {/* Tab: Administrative Profile (Headmaster, Admin Name, Official Stamp & Signature) */}
+      {/* Tab: Administrative Profile & Manual Headmaster Management (No Auto-Overwrite) */}
       {activeTab === 'administrative' && (
         <form onSubmit={handleSaveAdministrativeProfile} className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 space-y-6 text-xs">
           <div className="border-b border-slate-100 pb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
                 <UserCheck className="w-4 h-4 text-indigo-600" />
-                <span>Administrative Profile, Digital Signature &amp; Official Stamp</span>
+                <span>Headmaster Profile &amp; Administrative Credentials (Manual Control)</span>
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Configure Admin Name (replacing DDO), Headmaster Name, Official School Stamp, and Digital Signature. Automatically appended to generated PDF &amp; Print Progress Cards.
+                Headmaster details are edited manually by authorized administrators and remain permanently saved without being automatically overwritten by any other module or database.
               </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {!isEditingHeadmaster ? (
+                isAuthorizedAdmin ? (
+                  <button
+                    type="button"
+                    onClick={() => setIsEditingHeadmaster(true)}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-sm transition-colors"
+                  >
+                    <Edit3 className="w-3.5 h-3.5" />
+                    <span>Edit Headmaster</span>
+                  </button>
+                ) : (
+                  <span className="px-3 py-1.5 rounded-xl bg-amber-50 text-amber-800 border border-amber-200 font-bold text-[11px]">
+                    Authorized Admin Only
+                  </span>
+                )
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleCancelHeadmasterEdit}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs border border-slate-200 transition-colors"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                    <span>Cancel</span>
+                  </button>
+                  <button
+                    type="submit"
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-sm transition-colors"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    <span>Save Headmaster</span>
+                  </button>
+                </>
+              )}
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div>
-              <label className="block font-semibold text-slate-700 mb-1">Admin Name *</label>
-              <input
-                type="text"
-                required
-                value={adminName}
-                onChange={(e) => setAdminName(e.target.value)}
-                placeholder="Enter Admin Name (e.g. Mohd Yousuf Wani)"
-                className="w-full px-3 py-2 border border-slate-300 rounded-xl font-bold text-slate-900 focus:ring-2 focus:ring-indigo-500"
-              />
-              <span className="text-[10px] text-slate-500 mt-1 block">Replaces DDO designation across staff &amp; academic reports.</span>
+          {/* Saved Manual Headmaster Summary Banner */}
+          <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-sm font-black text-slate-900">
+                  {headmasterName || headTeacherName || 'Mohd Yousuf Wani'}
+                </span>
+                <span className="px-2 py-0.5 rounded-lg bg-indigo-100 text-indigo-800 font-bold text-[10px]">
+                  {principalDesignation}
+                </span>
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold text-[10px]">
+                  <Lock className="w-2.5 h-2.5" />
+                  <span>Manual Record Protected</span>
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-600">
+                Qualification: <strong className="text-slate-800">{headmasterQualification || 'Not specified'}</strong> • Contact: <strong className="font-mono text-slate-800">{headmasterContact || school.contactNumber || 'Not specified'}</strong>
+                {headmasterEmail ? ` • ${headmasterEmail}` : ''}
+              </p>
             </div>
+            {school.headmasterUpdatedAt && (
+              <span className="text-[10px] font-semibold text-slate-500 shrink-0">
+                Last manually saved: {new Date(school.headmasterUpdatedAt).toLocaleDateString('en-IN')}
+              </span>
+            )}
+          </div>
 
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div>
               <label className="block font-semibold text-slate-700 mb-1">Headmaster / Principal Name *</label>
               <input
                 type="text"
                 required
+                disabled={!isEditingHeadmaster}
                 value={headmasterName}
                 onChange={(e) => {
                   setHeadmasterName(e.target.value);
                   setHeadTeacherName(e.target.value);
                 }}
                 placeholder="Enter Headmaster's Full Name"
-                className="w-full px-3 py-2 border border-slate-300 rounded-xl font-bold text-slate-900 focus:ring-2 focus:ring-indigo-500"
+                className="w-full px-3 py-2 border border-slate-300 rounded-xl font-bold text-slate-900 focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100 disabled:text-slate-600"
               />
-              <span className="text-[10px] text-slate-500 mt-1 block">Printed above the official signature block on Progress Cards.</span>
+              <span className="text-[10px] text-slate-500 mt-1 block">Printed on Dashboard, Smart ID Cards, and Progress Cards.</span>
             </div>
 
             <div>
               <label className="block font-semibold text-slate-700 mb-1">Official Designation Title</label>
               <select
+                disabled={!isEditingHeadmaster}
                 value={principalDesignation}
                 onChange={(e) => setPrincipalDesignation(e.target.value as any)}
-                className="w-full px-3 py-2 border border-slate-300 rounded-xl font-semibold bg-white"
+                className="w-full px-3 py-2 border border-slate-300 rounded-xl font-semibold bg-white disabled:bg-slate-100 disabled:text-slate-600"
               >
                 <option value="Headmaster">Headmaster</option>
                 <option value="Principal">Principal</option>
                 <option value="Headmistress">Headmistress</option>
                 <option value="Officiating Principal">Officiating Principal</option>
+                <option value="In-Charge Headmaster">In-Charge Headmaster</option>
               </select>
+            </div>
+
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">Admin Name *</label>
+              <input
+                type="text"
+                required
+                disabled={!isEditingHeadmaster}
+                value={adminName}
+                onChange={(e) => setAdminName(e.target.value)}
+                placeholder="Enter Admin Name"
+                className="w-full px-3 py-2 border border-slate-300 rounded-xl font-bold text-slate-900 focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100 disabled:text-slate-600"
+              />
+            </div>
+
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">Qualification</label>
+              <input
+                type="text"
+                disabled={!isEditingHeadmaster}
+                value={headmasterQualification}
+                onChange={(e) => setHeadmasterQualification(e.target.value)}
+                placeholder="e.g. M.Sc., M.Ed."
+                className="w-full px-3 py-2 border border-slate-300 rounded-xl font-medium text-slate-900 focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100 disabled:text-slate-600"
+              />
+            </div>
+
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">Headmaster Contact Number</label>
+              <input
+                type="text"
+                disabled={!isEditingHeadmaster}
+                value={headmasterContact}
+                onChange={(e) => setHeadmasterContact(e.target.value)}
+                placeholder="+91 9XXXXXXXXX"
+                className="w-full px-3 py-2 border border-slate-300 rounded-xl font-mono text-slate-900 focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100 disabled:text-slate-600"
+              />
+            </div>
+
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">Headmaster Email / Joining Date</label>
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  type="email"
+                  disabled={!isEditingHeadmaster}
+                  value={headmasterEmail}
+                  onChange={(e) => setHeadmasterEmail(e.target.value)}
+                  placeholder="hm@school.edu.in"
+                  className="w-full px-2.5 py-2 border border-slate-300 rounded-xl text-slate-900 focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100 disabled:text-slate-600"
+                />
+                <input
+                  type="date"
+                  disabled={!isEditingHeadmaster}
+                  value={headmasterJoiningDate}
+                  onChange={(e) => setHeadmasterJoiningDate(e.target.value)}
+                  className="w-full px-2.5 py-2 border border-slate-300 rounded-xl font-mono text-slate-900 focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100 disabled:text-slate-600"
+                />
+              </div>
             </div>
           </div>
 
@@ -1096,7 +1389,7 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
                   <Stamp className="w-4 h-4 text-indigo-600" />
                   <span>Official School / Headmaster Stamp</span>
                 </h3>
-                {officialStampDataUrl && (
+                {officialStampDataUrl && isEditingHeadmaster && (
                   <button
                     type="button"
                     onClick={() => setOfficialStampDataUrl('')}
@@ -1123,16 +1416,18 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
                 )}
               </div>
 
-              <label className="w-full py-2 px-3 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 font-bold cursor-pointer flex items-center justify-center gap-2 transition-colors">
-                <Upload className="w-3.5 h-3.5" />
-                <span>{officialStampDataUrl ? 'Change Official Stamp Image' : 'Upload Official Stamp Image'}</span>
-                <input
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp,image/svg+xml"
-                  onChange={(e) => handleAdminImageUpload(e, setOfficialStampDataUrl)}
-                  className="hidden"
-                />
-              </label>
+              {isEditingHeadmaster && (
+                <label className="w-full py-2 px-3 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 font-bold cursor-pointer flex items-center justify-center gap-2 transition-colors">
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>{officialStampDataUrl ? 'Change Official Stamp Image' : 'Upload Official Stamp Image'}</span>
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                    onChange={(e) => handleAdminImageUpload(e, setOfficialStampDataUrl)}
+                    className="hidden"
+                  />
+                </label>
+              )}
             </div>
 
             {/* Digital Signature Uploader */}
@@ -1142,7 +1437,7 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
                   <FileSignature className="w-4 h-4 text-emerald-600" />
                   <span>Headmaster Digital Signature</span>
                 </h3>
-                {headmasterSignatureDataUrl && (
+                {headmasterSignatureDataUrl && isEditingHeadmaster && (
                   <button
                     type="button"
                     onClick={() => setHeadmasterSignatureDataUrl('')}
@@ -1169,16 +1464,18 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
                 )}
               </div>
 
-              <label className="w-full py-2 px-3 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 font-bold cursor-pointer flex items-center justify-center gap-2 transition-colors">
-                <Upload className="w-3.5 h-3.5" />
-                <span>{headmasterSignatureDataUrl ? 'Change Signature Image' : 'Upload Digital Signature Image'}</span>
-                <input
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp,image/svg+xml"
-                  onChange={(e) => handleAdminImageUpload(e, setHeadmasterSignatureDataUrl)}
-                  className="hidden"
-                />
-              </label>
+              {isEditingHeadmaster && (
+                <label className="w-full py-2 px-3 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 font-bold cursor-pointer flex items-center justify-center gap-2 transition-colors">
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>{headmasterSignatureDataUrl ? 'Change Signature Image' : 'Upload Digital Signature Image'}</span>
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                    onChange={(e) => handleAdminImageUpload(e, setHeadmasterSignatureDataUrl)}
+                    className="hidden"
+                  />
+                </label>
+              )}
             </div>
           </div>
 
@@ -1228,15 +1525,25 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
             </div>
           </div>
 
-          <div className="pt-4 border-t flex justify-end">
-            <button
-              type="submit"
-              className="inline-flex items-center gap-1.5 px-6 py-2.5 rounded-xl bg-indigo-600 text-white font-bold hover:bg-indigo-700 transition-colors shadow-sm"
-            >
-              <Save className="w-4 h-4" />
-              <span>Save Administrative Profile</span>
-            </button>
-          </div>
+          {isEditingHeadmaster && (
+            <div className="pt-4 border-t flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={handleCancelHeadmasterEdit}
+                className="inline-flex items-center gap-1.5 px-5 py-2.5 rounded-xl bg-slate-100 text-slate-700 font-bold hover:bg-slate-200 transition-colors border border-slate-200"
+              >
+                <X className="w-4 h-4" />
+                <span>Cancel</span>
+              </button>
+              <button
+                type="submit"
+                className="inline-flex items-center gap-1.5 px-6 py-2.5 rounded-xl bg-indigo-600 text-white font-bold hover:bg-indigo-700 transition-colors shadow-sm"
+              >
+                <Save className="w-4 h-4" />
+                <span>Save Headmaster Profile</span>
+              </button>
+            </div>
+          )}
         </form>
       )}
 

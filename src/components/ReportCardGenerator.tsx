@@ -32,6 +32,8 @@ import {
   Copy,
   Link,
   Check,
+  Search,
+  Image as ImageIcon,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -69,7 +71,10 @@ import {
   sampleHolisticRecords,
   sampleSubjectConfigs,
 } from '../utils/sampleData';
-import { generateBatchClassProgressCardsPdf } from '../utils/batchProgressCardPdf';
+import {
+  generateBatchClassProgressCardsPdf,
+  generateHpcCardsJpegBatch,
+} from '../utils/batchProgressCardPdf';
 import {
   recordMarkAudit,
   getMarkAuditLogs,
@@ -119,10 +124,15 @@ export const ReportCardGenerator: React.FC<ReportCardGeneratorProps> = ({
   // Grade Filter state for isolating students in snapshot & roster
   const [selectedGradeFilter, setSelectedGradeFilter] = useState<string>('all');
 
-  // Batch PDF & Print state
+  // Batch PDF, JPEG & Print state
   const [isGeneratingBatchPdf, setIsGeneratingBatchPdf] = useState<boolean>(false);
+  const [isGeneratingBatchJpeg, setIsGeneratingBatchJpeg] = useState<boolean>(false);
   const [batchDownloadSuccess, setBatchDownloadSuccess] = useState<string>('');
   const [isConsolidatedDocOpen, setIsConsolidatedDocOpen] = useState<boolean>(false);
+
+  // Student Name-Wise School-Wide Instant Search + Multi-Student Bulk Selection
+  const [hpcSearchQuery, setHpcSearchQuery] = useState<string>('');
+  const [selectedStudentIdsForExport, setSelectedStudentIdsForExport] = useState<string[]>([]);
 
   // Bulk Edit Mode in HPC
   const [isBulkEditMode, setIsBulkEditMode] = useState<boolean>(false);
@@ -132,6 +142,24 @@ export const ReportCardGenerator: React.FC<ReportCardGeneratorProps> = ({
   const [bulkSaveNotice, setBulkSaveNotice] = useState<string | null>(null);
   const [showClassAuditModal, setShowClassAuditModal] = useState<boolean>(false);
   const [allAuditLogs, setAllAuditLogs] = useState<MarkAuditEntry[]>(() => getMarkAuditLogs());
+
+  const allSchoolActiveStudents = useMemo(
+    () => deduplicateStudentsByAdmissionNumber(students).filter((s) => s.status === 'Active'),
+    [students]
+  );
+
+  const instantSearchMatches = useMemo(() => {
+    const q = hpcSearchQuery.trim().toLowerCase();
+    if (!q) return [];
+    return allSchoolActiveStudents
+      .filter(
+        (s) =>
+          s.fullName.toLowerCase().includes(q) ||
+          s.admissionNumber.toLowerCase().includes(q) ||
+          `class ${s.classNumber}-${s.section}`.toLowerCase().includes(q)
+      )
+      .slice(0, 12);
+  }, [allSchoolActiveStudents, hpcSearchQuery]);
 
   const openAuditModal = () => {
     setAllAuditLogs(getMarkAuditLogs());
@@ -453,6 +481,143 @@ export const ReportCardGenerator: React.FC<ReportCardGeneratorProps> = ({
     }
   };
 
+  const handleDownloadClassJpeg = async (targetIds?: string[]) => {
+    if (studentSummaries.length === 0) return;
+    setIsGeneratingBatchJpeg(true);
+    setBatchDownloadSuccess('');
+    try {
+      const count = await generateHpcCardsJpegBatch({
+        school,
+        examination: currentExam,
+        studentSummaries,
+        students: classStudents,
+        marksEntries,
+        holisticRecords,
+        classNumber: selectedClass,
+        section: selectedSection,
+        selectedStudentIds: targetIds,
+      });
+      setBatchDownloadSuccess(
+        `Exported ${count} print-ready HPC JPEG card${count > 1 ? 's' : ''} (Headmaster signature only).`
+      );
+      setTimeout(() => setBatchDownloadSuccess(''), 7000);
+    } catch (err) {
+      console.error('Batch Class JPEG Generation Error:', err);
+      setBulkSaveNotice('An error occurred while exporting HPC JPEG cards. Please try again.');
+      setTimeout(() => setBulkSaveNotice(null), 5000);
+    } finally {
+      setIsGeneratingBatchJpeg(false);
+    }
+  };
+
+  const handleOpenSearchedStudentHpc = (st: Student) => {
+    setSelectedClass(st.classNumber);
+    setSelectedSection(st.section);
+    setSelectedGradeFilter('all');
+    const summary = calculateStudentExamSummary(
+      st.id,
+      st.fullName,
+      st.rollNumber,
+      st.classNumber,
+      st.section,
+      currentExam.id,
+      currentExam.name,
+      marksEntries,
+      classSubjects,
+      school.gradingScale,
+      92.4
+    );
+    setSelectedStudentSummary(summary);
+    setHpcSearchQuery('');
+  };
+
+  const handleDownloadSearchedStudentFile = async (st: Student, format: 'pdf' | 'jpeg') => {
+    const summary = calculateStudentExamSummary(
+      st.id,
+      st.fullName,
+      st.rollNumber,
+      st.classNumber,
+      st.section,
+      currentExam.id,
+      currentExam.name,
+      marksEntries,
+      classSubjects,
+      school.gradingScale,
+      92.4
+    );
+    if (format === 'pdf') {
+      generateBatchClassProgressCardsPdf({
+        school,
+        examination: currentExam,
+        studentSummaries: [summary],
+        students: [st],
+        marksEntries,
+        holisticRecords,
+        classNumber: st.classNumber,
+        section: st.section,
+        customFileName: `HPC_${st.fullName.replace(/[^a-zA-Z0-9]/g, '_')}_${st.admissionNumber}.pdf`,
+      });
+      setBatchDownloadSuccess(`Downloaded HPC PDF for ${st.fullName} (Class ${st.classNumber}-${st.section}).`);
+    } else {
+      await generateHpcCardsJpegBatch({
+        school,
+        examination: currentExam,
+        studentSummaries: [summary],
+        students: [st],
+        marksEntries,
+        holisticRecords,
+        classNumber: st.classNumber,
+        section: st.section,
+      });
+      setBatchDownloadSuccess(`Downloaded HPC JPEG for ${st.fullName} (Class ${st.classNumber}-${st.section}).`);
+    }
+    setTimeout(() => setBatchDownloadSuccess(''), 6000);
+  };
+
+  const [manualSelectedStudentId, setManualSelectedStudentId] = useState<string>('');
+  const [manualExportBusy, setManualExportBusy] = useState<'pdf' | 'jpeg' | null>(null);
+
+  const allActiveStudentsSorted = useMemo(
+    () =>
+      students
+        .filter((s) => s.status === 'Active')
+        .sort((a, b) => {
+          const clsDiff = parseInt(a.classNumber, 10) - parseInt(b.classNumber, 10);
+          if (clsDiff !== 0) return clsDiff;
+          return (parseInt(a.rollNumber, 10) || 0) - (parseInt(b.rollNumber, 10) || 0);
+        }),
+    [students]
+  );
+
+  const manualSelectedStudent = useMemo(() => {
+    if (manualSelectedStudentId) {
+      const found = allActiveStudentsSorted.find((s) => s.id === manualSelectedStudentId);
+      if (found) return found;
+    }
+    const firstInClass = studentSummaries[0]
+      ? allActiveStudentsSorted.find((s) => s.id === studentSummaries[0].studentId)
+      : undefined;
+    return firstInClass || allActiveStudentsSorted[0] || null;
+  }, [manualSelectedStudentId, allActiveStudentsSorted, studentSummaries]);
+
+  const handleManualIndividualDownload = async (format: 'pdf' | 'jpeg') => {
+    if (!manualSelectedStudent) return;
+    setManualExportBusy(format);
+    try {
+      await handleDownloadSearchedStudentFile(manualSelectedStudent, format);
+    } finally {
+      setManualExportBusy(null);
+    }
+  };
+
+  const handleManualIndividualPrint = () => {
+    if (!manualSelectedStudent) return;
+    handleOpenSearchedStudentHpc(manualSelectedStudent);
+    setTimeout(() => {
+      window.print();
+    }, 350);
+  };
+
   const handleQuickPrint = () => {
     // Immediately trigger browser native print dialog for the current report card view, bypassing download workflow
     window.print();
@@ -507,6 +672,27 @@ export const ReportCardGenerator: React.FC<ReportCardGeneratorProps> = ({
             )}
           </button>
 
+          {/* Bulk Class JPEG Export */}
+          <button
+            id="download-class-jpeg-btn"
+            onClick={() => handleDownloadClassJpeg()}
+            disabled={isGeneratingBatchJpeg || studentSummaries.length === 0}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-black bg-amber-500 hover:bg-amber-600 active:scale-95 text-slate-950 transition-all shadow-md shadow-amber-500/20 disabled:opacity-50"
+            title="Export print-ready high-resolution JPEG HPC cards for all students in this class"
+          >
+            {isGeneratingBatchJpeg ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>Exporting JPEGs...</span>
+              </>
+            ) : (
+              <>
+                <ImageIcon className="w-4 h-4" />
+                <span>Bulk Class JPEG</span>
+              </>
+            )}
+          </button>
+
           {/* Consolidated Multi-Page A4 Document Preview & Print */}
           <button
             onClick={() => setIsConsolidatedDocOpen(true)}
@@ -534,6 +720,101 @@ export const ReportCardGenerator: React.FC<ReportCardGeneratorProps> = ({
             <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
             <span>Export Class (.xlsx)</span>
           </button>
+        </div>
+      </div>
+
+      {/* Dedicated Student-Wise Manual HPC Download Controls (PDF, JPEG, Preview, Print) */}
+      <div className="bg-gradient-to-r from-indigo-50/90 via-white to-emerald-50/70 p-4 sm:p-5 rounded-2xl border border-indigo-200/80 shadow-sm no-print space-y-3">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-black text-slate-900 flex items-center gap-2">
+              <Award className="w-4 h-4 text-indigo-600" />
+              <span>Individual Student Holistic Progress Card (Manual Download &amp; Print)</span>
+            </h2>
+            <p className="text-[11px] text-slate-600 mt-0.5">
+              Manually select any individual student to preview, print, or download their print-friendly HPC in PDF or JPEG without downloading the entire class record.
+            </p>
+          </div>
+          {manualSelectedStudent && (
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-white border border-indigo-200 text-[11px] font-bold text-indigo-900 shrink-0 self-start lg:self-auto">
+              <span>Selected:</span>
+              <span className="font-black">{manualSelectedStudent.fullName}</span>
+              <span className="font-mono text-indigo-600">
+                (Class {manualSelectedStudent.classNumber}-{manualSelectedStudent.section} • Adm {manualSelectedStudent.admissionNumber})
+              </span>
+            </span>
+          )}
+        </div>
+
+        <div className="flex flex-col md:flex-row items-stretch md:items-center gap-2.5">
+          <div className="flex-1 min-w-[240px]">
+            <select
+              aria-label="Select individual student for Holistic Progress Card download"
+              value={manualSelectedStudent?.id || ''}
+              onChange={(e) => setManualSelectedStudentId(e.target.value)}
+              className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-xs font-bold text-slate-900 focus:ring-2 focus:ring-indigo-500 shadow-2xs"
+            >
+              {allActiveStudentsSorted.length === 0 ? (
+                <option value="">No active students available</option>
+              ) : (
+                allActiveStudentsSorted.map((st) => (
+                  <option key={st.id} value={st.id}>
+                    {st.fullName} — Class {st.classNumber}-{st.section} | Roll #{st.rollNumber} | Adm: {st.admissionNumber}
+                  </option>
+                ))
+              )}
+            </select>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              disabled={!manualSelectedStudent || manualExportBusy !== null}
+              onClick={() => handleManualIndividualDownload('pdf')}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-extrabold shadow-xs transition-colors"
+            >
+              {manualExportBusy === 'pdf' ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Download className="w-3.5 h-3.5 text-amber-300" />
+              )}
+              <span>Download PDF</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={!manualSelectedStudent || manualExportBusy !== null}
+              onClick={() => handleManualIndividualDownload('jpeg')}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-extrabold shadow-xs transition-colors"
+            >
+              {manualExportBusy === 'jpeg' ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <ImageIcon className="w-3.5 h-3.5" />
+              )}
+              <span>Download JPEG</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={!manualSelectedStudent}
+              onClick={() => manualSelectedStudent && handleOpenSearchedStudentHpc(manualSelectedStudent)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-white hover:bg-slate-50 disabled:opacity-50 text-slate-800 border border-slate-300 text-xs font-bold shadow-2xs transition-colors"
+            >
+              <Eye className="w-3.5 h-3.5 text-indigo-600" />
+              <span>Preview</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={!manualSelectedStudent}
+              onClick={handleManualIndividualPrint}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-bold shadow-xs transition-colors"
+            >
+              <Printer className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Print</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -625,10 +906,156 @@ export const ReportCardGenerator: React.FC<ReportCardGeneratorProps> = ({
           </div>
           <div className="h-8 w-px bg-slate-200 hidden sm:block" />
           <div>
-            <span className="text-[10px] text-slate-400 font-bold block uppercase tracking-wider">Administrator</span>
-            <span className="text-xs font-bold text-slate-800">{school.adminName || school.headmasterName || 'Mohd Yousuf Wani'} (Admin)</span>
+            <span className="text-[10px] text-slate-400 font-bold block uppercase tracking-wider">
+              {school.principalDesignation || 'Headmaster'}
+            </span>
+            <span className="text-xs font-bold text-slate-800">
+              {school.headmasterName || school.headTeacherName || 'Headmaster'}
+            </span>
           </div>
         </div>
+      </div>
+
+      {/* Student Name-Wise Instant HPC Search Bar (Searches Entire School) */}
+      <div className="bg-white p-4 rounded-2xl border border-indigo-200/80 shadow-xs no-print space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Search className="w-4 h-4 text-indigo-600" />
+            <span className="text-xs font-extrabold text-slate-900">
+              Student Name-Wise HPC Search &amp; Quick Download
+            </span>
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">
+              {allSchoolActiveStudents.length} Students Indexed
+            </span>
+          </div>
+          {selectedStudentIdsForExport.length > 0 && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[11px] font-bold text-indigo-800">
+                {selectedStudentIdsForExport.length} Selected:
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  generateBatchClassProgressCardsPdf({
+                    school,
+                    examination: currentExam,
+                    studentSummaries,
+                    students: classStudents,
+                    marksEntries,
+                    holisticRecords,
+                    classNumber: selectedClass,
+                    section: selectedSection,
+                    selectedStudentIds: selectedStudentIdsForExport,
+                    customFileName: `Selected_${selectedStudentIdsForExport.length}_Students_HPC_Class_${selectedClass}_${selectedSection}.pdf`,
+                  });
+                  setBatchDownloadSuccess(`Downloaded combined PDF for ${selectedStudentIdsForExport.length} selected students.`);
+                  setTimeout(() => setBatchDownloadSuccess(''), 6000);
+                }}
+                className="px-2.5 py-1 rounded-lg bg-indigo-600 text-white text-[11px] font-bold hover:bg-indigo-700"
+              >
+                Bulk PDF ({selectedStudentIdsForExport.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => handleDownloadClassJpeg(selectedStudentIdsForExport)}
+                className="px-2.5 py-1 rounded-lg bg-amber-500 text-slate-950 text-[11px] font-bold hover:bg-amber-600"
+              >
+                Bulk JPEG ({selectedStudentIdsForExport.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedStudentIdsForExport([])}
+                className="text-[11px] font-bold text-slate-500 hover:text-slate-800"
+              >
+                Clear
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="relative">
+          <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+          <input
+            type="text"
+            value={hpcSearchQuery}
+            onChange={(e) => setHpcSearchQuery(e.target.value)}
+            placeholder="Search any student by partial name, admission number, or class (e.g. Aarav, SRN-2026)..."
+            className="w-full pl-10 pr-9 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 text-xs font-semibold text-slate-900"
+          />
+          {hpcSearchQuery && (
+            <button
+              type="button"
+              onClick={() => setHpcSearchQuery('')}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+
+        {hpcSearchQuery.trim().length > 0 && (
+          <div className="border border-slate-200 rounded-xl divide-y divide-slate-100 max-h-64 overflow-y-auto bg-white">
+            {instantSearchMatches.length === 0 ? (
+              <div className="p-3 text-center text-xs text-slate-500">
+                No matching students found for &quot;{hpcSearchQuery}&quot;.
+              </div>
+            ) : (
+              instantSearchMatches.map((st) => {
+                const isChecked = selectedStudentIdsForExport.includes(st.id);
+                return (
+                  <div
+                    key={st.id}
+                    className="p-2.5 flex flex-wrap items-center justify-between gap-2 hover:bg-indigo-50/50 transition-colors text-xs"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() =>
+                          setSelectedStudentIdsForExport((prev) =>
+                            prev.includes(st.id) ? prev.filter((id) => id !== st.id) : [...prev, st.id]
+                          )
+                        }
+                        className="rounded border-slate-300 text-indigo-600"
+                        title="Select for bulk download"
+                      />
+                      <div className="min-w-0">
+                        <div className="font-extrabold text-slate-900 truncate">{st.fullName}</div>
+                        <div className="text-[11px] text-slate-500 font-mono">
+                          Adm: {st.admissionNumber} • Class {st.classNumber}-{st.section} • Roll #{st.rollNumber}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => handleOpenSearchedStudentHpc(st)}
+                        className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px] flex items-center gap-1"
+                      >
+                        <Eye className="w-3 h-3" />
+                        <span>Open HPC</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadSearchedStudentFile(st, 'pdf')}
+                        className="px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-[11px]"
+                      >
+                        PDF
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadSearchedStudentFile(st, 'jpeg')}
+                        className="px-2 py-1 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-900 font-bold text-[11px]"
+                      >
+                        JPEG
+                      </button>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        )}
       </div>
 
       {/* Persistent 'Sync Status' Indicator Bar in HPC Module */}
@@ -1316,13 +1743,37 @@ export const ReportCardGenerator: React.FC<ReportCardGeneratorProps> = ({
                         </span>
                       </td>
                       <td className="py-2.5 px-3 text-right">
-                        <div className="inline-flex items-center gap-1.5">
+                        <div className="inline-flex items-center gap-1.5 flex-wrap justify-end">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const st = students.find((s) => s.id === sum.studentId);
+                              if (st) handleDownloadSearchedStudentFile(st, 'pdf');
+                            }}
+                            className="px-2 py-1 rounded bg-indigo-50 text-indigo-700 font-bold text-[11px] hover:bg-indigo-100 transition-colors border border-indigo-200 flex items-center gap-1"
+                            title="Download individual student HPC as PDF"
+                          >
+                            <Download className="w-3 h-3" />
+                            <span>PDF</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const st = students.find((s) => s.id === sum.studentId);
+                              if (st) handleDownloadSearchedStudentFile(st, 'jpeg');
+                            }}
+                            className="px-2 py-1 rounded bg-amber-50 text-amber-800 font-bold text-[11px] hover:bg-amber-100 transition-colors border border-amber-200 flex items-center gap-1"
+                            title="Download individual student HPC as JPEG"
+                          >
+                            <ImageIcon className="w-3 h-3" />
+                            <span>JPEG</span>
+                          </button>
                           <button
                             onClick={() => setSelectedStudentSummary(sum)}
                             className="px-2.5 py-1 rounded bg-indigo-600 text-white font-bold text-[11px] hover:bg-indigo-700 transition-colors flex items-center gap-1 shadow-sm"
                           >
                             <Eye className="w-3 h-3" />
-                            <span>View HPC</span>
+                            <span>Preview</span>
                           </button>
                           <button
                             onClick={() => setWhatsAppStudentSummary(sum)}
@@ -1916,10 +2367,10 @@ const SingleStudentProgressCardView: React.FC<SingleStudentProgressCardViewProps
             )}
           </div>
           <p className="font-extrabold border-t border-slate-400 pt-1 text-[11px]">
-            {school.headmasterName || school.headTeacherName || 'Mohd Yousuf Wani'} ({school.principalDesignation || 'Headmaster'})
+            {school.headmasterName || school.headTeacherName || 'Headmaster'}
           </p>
-          <p className="text-[10px] text-slate-700 font-bold">
-            Admin: {school.adminName || school.headmasterName || 'Mohd Yousuf Wani'}
+          <p className="text-[10px] text-slate-600 font-bold">
+            {school.principalDesignation || 'Headmaster'} • Official Seal &amp; Signature
           </p>
         </div>
       </div>
@@ -3296,10 +3747,10 @@ const HolisticProgressCardModal: React.FC<HolisticProgressCardModalProps> = ({
                   )}
                 </div>
                 <p className="font-extrabold border-t border-slate-400 pt-1 text-[11px]">
-                  {school.headmasterName || school.headTeacherName || 'Mohd Yousuf Wani'} ({school.principalDesignation || 'Headmaster'})
+                  {school.headmasterName || school.headTeacherName || 'Headmaster'}
                 </p>
-                <p className="text-[10px] text-slate-700 font-bold">
-                  Admin: {school.adminName || school.headmasterName || 'Mohd Yousuf Wani'}
+                <p className="text-[10px] text-slate-600 font-bold">
+                  {school.principalDesignation || 'Headmaster'} • Official Seal &amp; Signature
                 </p>
               </div>
             </div>

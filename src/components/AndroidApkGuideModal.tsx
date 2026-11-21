@@ -25,7 +25,7 @@ export const AndroidApkGuideModal: React.FC<AndroidApkGuideModalProps> = ({
   isOpen,
   onClose,
 }) => {
-  const [activeTab, setActiveTab] = useState<'capacitor' | 'flutter' | 'pwa' | 'history'>('capacitor');
+  const [activeTab, setActiveTab] = useState<'github' | 'capacitor' | 'flutter' | 'pwa' | 'history'>('github');
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
 
   if (!isOpen) return null;
@@ -58,6 +58,15 @@ export const AndroidApkGuideModal: React.FC<AndroidApkGuideModalProps> = ({
 
         {/* Tab switch */}
         <div className="p-3 bg-slate-50 border-b border-slate-200 flex flex-wrap rounded-none gap-2 text-xs font-semibold">
+          <button
+            onClick={() => setActiveTab('github')}
+            className={`px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 ${
+              activeTab === 'github' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <FolderGit2 className="w-3.5 h-3.5" />
+            <span>GitHub Actions & Releases</span>
+          </button>
           <button
             onClick={() => setActiveTab('capacitor')}
             className={`px-3 py-1.5 rounded-lg transition-all ${
@@ -95,7 +104,67 @@ export const AndroidApkGuideModal: React.FC<AndroidApkGuideModalProps> = ({
 
         {/* Body */}
         <div className="p-6 overflow-y-auto space-y-4 text-xs">
-          
+
+          {/* TAB 0: GITHUB ACTIONS & RELEASES */}
+          {activeTab === 'github' && (
+            <div className="space-y-4">
+              <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-xl text-indigo-900">
+                <p className="font-bold">Automated Debug &amp; Production Release APK Pipeline (GitHub Actions)</p>
+                <p className="text-[11px] mt-1 text-indigo-700">
+                  Workflow <code>.github/workflows/android-build.yml</code> compiles <code>android-app/</code> with JDK 17 + Gradle 8.9, runs unit tests, verifies APK signatures with <code>apksigner</code>, and publishes direct-download APKs to GitHub Releases.
+                </p>
+              </div>
+
+              <div className="space-y-1.5">
+                <p className="font-bold text-slate-800">1. Push to Build &amp; Publish Debug APK (Automatic on Push):</p>
+                <div className="p-3 bg-slate-900 text-emerald-400 rounded-xl font-mono text-[11px] flex items-center justify-between gap-2">
+                  <code className="truncate">git push -u origin main</code>
+                  <button
+                    onClick={() => copyToClipboard('git push -u origin main', 10)}
+                    className="p-1 hover:text-white shrink-0"
+                  >
+                    {copiedIndex === 10 ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <p className="font-bold text-slate-800">2. Production Release Mode (Keystore-Signed via GitHub Secrets):</p>
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-700 space-y-1 text-[11px]">
+                  <p>Add these 4 repository secrets under <strong>Settings ➔ Secrets and variables ➔ Actions</strong>, then trigger <code>workflow_dispatch</code> with <code>build_mode=release</code> or push a <code>v*</code> tag:</p>
+                  <ul className="list-disc list-inside font-mono text-[10px] text-slate-800 space-y-0.5">
+                    <li>ANDROID_KEYSTORE_BASE64</li>
+                    <li>ANDROID_KEYSTORE_PASSWORD</li>
+                    <li>ANDROID_KEY_ALIAS</li>
+                    <li>ANDROID_KEY_PASSWORD</li>
+                  </ul>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <p className="font-bold text-slate-800">3. Direct Phone Download URLs (In-App Updates Tab Compatible):</p>
+                <div className="p-3 bg-slate-900 text-sky-300 rounded-xl font-mono text-[11px] flex items-center justify-between gap-2">
+                  <code className="truncate">https://github.com/&lt;OWNER&gt;/&lt;REPO&gt;/releases/latest/download/SchoolMaster-release-latest.apk</code>
+                  <button
+                    onClick={() => copyToClipboard('https://github.com/<OWNER>/<REPO>/releases/latest/download/SchoolMaster-release-latest.apk', 11)}
+                    className="p-1 hover:text-white shrink-0"
+                  >
+                    {copiedIndex === 11 ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-600 space-y-1">
+                <p className="font-semibold text-slate-800">Published Release Assets &amp; Verification:</p>
+                <ul className="list-disc list-inside space-y-0.5 text-[11px]">
+                  <li><code>SchoolMaster-debug-latest.apk</code> / <code>SchoolMaster-release-latest.apk</code> — stable URLs fetched by the Android <strong>Updates</strong> tab</li>
+                  <li><code>SchoolMaster-v1.0.4-&lt;mode&gt;-r&lt;run&gt;.apk</code> — run-stamped signed APK</li>
+                  <li><code>.sha256</code> checksum manifests &amp; 30-day workflow artifacts</li>
+                </ul>
+              </div>
+            </div>
+          )}
+
           {/* TAB 1: CAPACITOR */}
           {activeTab === 'capacitor' && (
             <div className="space-y-4">

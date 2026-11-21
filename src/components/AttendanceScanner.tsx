@@ -19,6 +19,7 @@ import {
   CloudOff,
   SlidersHorizontal,
   Database,
+  Download,
   Search,
   Trash2,
 } from 'lucide-react';
@@ -670,6 +671,39 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
       }),
     [persistentLogs, scanLogSearch, scanLogClassFilter, scanLogDateFrom, scanLogDateTo]
   );
+
+  const handleExportScannerHistoryCsv = useCallback(() => {
+    const rowsToExport = filteredScanLogs.length > 0 ? filteredScanLogs : persistentLogs;
+    if (rowsToExport.length === 0) return;
+    const esc = (val: string | number) => `"${String(val ?? '').replace(/"/g, '""')}"`;
+    const header = 'ID,Date,Timestamp,Student Name,Admission Number,Class & Section,Status,Source,Sync Status';
+    const csvLines = [
+      header,
+      ...rowsToExport.map((log) =>
+        [
+          esc(log.id),
+          esc(log.date),
+          esc(log.timestamp),
+          esc(log.studentName),
+          esc(log.admissionNumber),
+          esc(`Class ${log.classNumber}-${log.section}`),
+          esc(log.status),
+          esc(log.source),
+          esc(log.syncState === 'synced' ? 'SYNCED' : 'PENDING'),
+        ].join(',')
+      ),
+    ].join('\n');
+
+    const blob = new Blob([csvLines], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `SchoolMaster_ScannerHistory_${effectiveDate}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }, [effectiveDate, filteredScanLogs, persistentLogs]);
 
   const appendEvent = useCallback((entry: Omit<ScannerEventLog, 'id' | 'timestamp'>) => {
     const nowTime = new Date().toLocaleTimeString([], {
@@ -1514,20 +1548,31 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
               </div>
             </div>
 
-            <div className="flex items-center justify-between text-[11px] text-slate-400">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
               <span className="font-mono tabular-nums">
                 Showing {filteredScanLogs.length} of {persistentLogs.length} persistent scan record(s)
               </span>
-              {persistentLogs.length > 0 && (
+              <div className="flex items-center gap-3">
                 <button
                   type="button"
-                  onClick={() => setPersistentLogs(clearPersistentScanLogs())}
-                  className="inline-flex items-center gap-1 text-slate-400 hover:text-rose-400 font-semibold whitespace-nowrap shrink-0"
+                  disabled={persistentLogs.length === 0}
+                  onClick={handleExportScannerHistoryCsv}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold whitespace-nowrap shrink-0 transition-colors"
                 >
-                  <Trash2 className="w-3 h-3" />
-                  <span>Clear Database</span>
+                  <Download className="w-3 h-3" />
+                  <span>Export CSV</span>
                 </button>
-              )}
+                {persistentLogs.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setPersistentLogs(clearPersistentScanLogs())}
+                    className="inline-flex items-center gap-1 text-slate-400 hover:text-rose-400 font-semibold whitespace-nowrap shrink-0"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    <span>Clear Database</span>
+                  </button>
+                )}
+              </div>
             </div>
 
             {filteredScanLogs.length === 0 ? (

@@ -317,13 +317,23 @@ function SchoolMasterApp() {
   }, []);
 
   const syncSchoolWithActivePrincipal = (rec: PrincipalRecord) => {
-    setSchool((prev) => ({
-      ...prev,
-      headTeacherName: rec.fullName,
-      headmasterName: rec.fullName,
-      principalDesignation: rec.designation,
-      contactNumber: rec.contactNumber || prev.contactNumber,
-    }));
+    setSchool((prev) => {
+      // Never automatically overwrite Headmaster details from another module/database once manually edited or persisted.
+      if (prev.headmasterManuallyEdited || (prev.headmasterName && prev.headmasterName.trim().length > 0)) {
+        return prev;
+      }
+      return {
+        ...prev,
+        headTeacherName: rec.fullName,
+        headmasterName: rec.fullName,
+        principalDesignation: rec.designation,
+        headmasterQualification: prev.headmasterQualification || rec.qualification,
+        headmasterContact: prev.headmasterContact || rec.contactNumber,
+        headmasterEmail: prev.headmasterEmail || rec.email,
+        headmasterJoiningDate: prev.headmasterJoiningDate || rec.joiningDate,
+        contactNumber: rec.contactNumber || prev.contactNumber,
+      };
+    });
   };
 
   const handleAddPrincipal = async (record: PrincipalRecord) => {
@@ -1415,6 +1425,7 @@ function SchoolMasterApp() {
             onFirebaseSignOut={() => { signOutFirebaseAdmin().catch(() => {}); }}
             onCloudBackupSync={handleCloudBackupSync}
             onLockSession={() => setShowLogoutConfirm(true)}
+            onUpdateSchool={setSchool}
           />
         );
       case 'principal-management':
@@ -1728,6 +1739,7 @@ function SchoolMasterApp() {
             onExportBackup={handleExportBackup}
             onImportBackup={handleImportBackup}
             language={language}
+            effectiveRole={effectiveRole}
             initialSubTab={settingsSubTab}
             onOpenMultiPlatformModal={(plat) => {
               setSelectedModalPlatform(plat);

@@ -118,14 +118,23 @@ export interface SchoolProfile {
   locationAddress?: string;
   requireLocationForAttendance?: boolean;
 
-  // Administrative Profile (Admin replacing DDO, Headmaster Name, Stamp & Digital Signature)
+  // Administrative Profile (Admin replacing DDO, Manual Headmaster Profile, Stamp & Digital Signature)
   adminName?: string;
   headmasterName?: string;
+  headmasterQualification?: string;
+  headmasterContact?: string;
+  headmasterEmail?: string;
+  headmasterJoiningDate?: string;
+  headmasterPhotoDataUrl?: string;
+  headmasterManuallyEdited?: boolean;
+  headmasterUpdatedAt?: string;
   officialStampDataUrl?: string;
   headmasterSignatureDataUrl?: string;
 
-  // School Logo & Extended ID Card Info
+  // Centralized Official School Logo & Extended ID Card Info
   logoDataUrl?: string;
+  officialLogoLocked?: boolean;
+  officialLogoUpdatedAt?: string;
   website?: string;
   motto?: string;
   emergencyContact?: string;

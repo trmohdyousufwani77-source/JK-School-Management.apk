@@ -32,10 +32,12 @@ export interface BatchClassProgressCardPdfOptions {
   holisticRecords?: Record<string, StudentHolisticRecord>;
   classNumber: string;
   section: string;
+  selectedStudentIds?: string[];
+  customFileName?: string;
 }
 
 /**
- * Consolidates all student Holistic Progress Cards (HPC) for a class
+ * Consolidates student Holistic Progress Cards (HPC) for a class or selected students
  * into a single, multi-page, printer-friendly A4 PDF document.
  */
 export function generateBatchClassProgressCardsPdf(options: BatchClassProgressCardPdfOptions): void {
@@ -48,11 +50,15 @@ export function generateBatchClassProgressCardsPdf(options: BatchClassProgressCa
     holisticRecords,
     classNumber,
     section,
+    selectedStudentIds,
+    customFileName,
   } = options;
 
   const uniqueStudents = deduplicateStudentsByAdmissionNumber(students);
+  const selectedSet = selectedStudentIds && selectedStudentIds.length > 0 ? new Set(selectedStudentIds) : null;
   const seenSummaryKeys = new Set<string>();
   const uniqueSummaries = (studentSummaries || []).filter((sum) => {
+    if (selectedSet && !selectedSet.has(sum.studentId)) return false;
     const matched = uniqueStudents.find((s) => s.id === sum.studentId);
     const key = (matched?.admissionNumber || sum.studentId || '').trim().toUpperCase();
     if (!key || seenSummaryKeys.has(key)) return false;
@@ -497,9 +503,8 @@ export function generateBatchClassProgressCardsPdf(options: BatchClassProgressCa
     doc.setTextColor(100, 116, 139);
     doc.text('Parent Signature / Official Stamp', margin + sigColW * 1.5, sigY + 13, { align: 'center' });
 
-    // Signature 3: Headmaster / Admin & Digital Signature
-    const headmasterDisplayName = school.headmasterName || school.headTeacherName || 'Mohd Yousuf Wani';
-    const adminDisplayName = school.adminName || headmasterDisplayName;
+    // Signature 3: Headmaster Only (Developer name strictly excluded from all HPC documents)
+    const headmasterDisplayName = school.headmasterName || school.headTeacherName || 'Headmaster';
     if (school.headmasterSignatureDataUrl) {
       try {
         doc.addImage(
@@ -518,7 +523,7 @@ export function generateBatchClassProgressCardsPdf(options: BatchClassProgressCa
     doc.setFontSize(7.5);
     doc.setTextColor(15, 23, 42);
     doc.text(
-      `${headmasterDisplayName} (${school.principalDesignation || 'Headmaster'})`,
+      headmasterDisplayName,
       margin + sigColW * 2.5,
       sigY + 9,
       { align: 'center' }
@@ -527,7 +532,7 @@ export function generateBatchClassProgressCardsPdf(options: BatchClassProgressCa
     doc.setFontSize(6.5);
     doc.setTextColor(100, 116, 139);
     doc.text(
-      `Admin: ${adminDisplayName} • Seal & Signature`,
+      `${school.principalDesignation || 'Headmaster'} • Official Seal & Signature`,
       margin + sigColW * 2.5,
       sigY + 13,
       { align: 'center' }
@@ -556,6 +561,291 @@ export function generateBatchClassProgressCardsPdf(options: BatchClassProgressCa
     );
   });
 
-  const fileName = `Class_${classNumber}_${section}_Holistic_Progress_Cards_${school.academicSession.replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
+  const fileName =
+    customFileName ||
+    `Class_${classNumber}_${section}_Holistic_Progress_Cards_${school.academicSession.replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
   doc.save(fileName);
+}
+
+async function loadImageElement(src?: string): Promise<HTMLImageElement | null> {
+  if (!src) return null;
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => resolve(img);
+    img.onerror = () => resolve(null);
+    img.src = src;
+  });
+}
+
+/**
+ * Generates high-resolution, print-ready JPEG Holistic Progress Cards for a single student,
+ * multiple selected students, or an entire class. Displays ONLY the Headmaster's Name
+ * in the authority signature block (zero developer name).
+ */
+export async function generateHpcCardsJpegBatch(
+  options: BatchClassProgressCardPdfOptions
+): Promise<number> {
+  const {
+    school,
+    examination,
+    studentSummaries,
+    students,
+    marksEntries,
+    holisticRecords,
+    classNumber,
+    section,
+    selectedStudentIds,
+  } = options;
+
+  const uniqueStudents = deduplicateStudentsByAdmissionNumber(students);
+  const selectedSet = selectedStudentIds && selectedStudentIds.length > 0 ? new Set(selectedStudentIds) : null;
+  const targets = studentSummaries.filter((sum) => !selectedSet || selectedSet.has(sum.studentId));
+  if (targets.length === 0) return 0;
+
+  const schoolLogoImg = await loadImageElement(school.logoDataUrl);
+  const headmasterSigImg = await loadImageElement(school.headmasterSignatureDataUrl);
+  const headmasterDisplayName = school.headmasterName || school.headTeacherName || 'Headmaster';
+  const formattedAddress = formatSchoolAddressOnce(school);
+
+  let exportedCount = 0;
+
+  for (const summary of targets) {
+    const student = uniqueStudents.find((s) => s.id === summary.studentId);
+    const studentPhotoImg = await loadImageElement(student?.photoDataUrl);
+    const hol = holisticRecords?.[summary.studentId] || sampleHolisticRecords[summary.studentId];
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 1240;
+    canvas.height = 1754;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) continue;
+
+    // White print page background + double formal border
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = '#1e293b';
+    ctx.lineWidth = 5;
+    ctx.strokeRect(36, 36, canvas.width - 72, canvas.height - 72);
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(48, 48, canvas.width - 96, canvas.height - 96);
+
+    // School Header Banner
+    ctx.fillStyle = '#0f294a';
+    ctx.fillRect(68, 68, canvas.width - 136, 155);
+
+    if (schoolLogoImg) {
+      ctx.save();
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(88, 86, 118, 118);
+      ctx.drawImage(schoolLogoImg, 94, 92, 106, 106);
+      ctx.restore();
+    }
+
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 34px sans-serif';
+    ctx.fillText(school.name.toUpperCase(), canvas.width / 2 + 24, 126);
+
+    ctx.fillStyle = '#e2e8f0';
+    ctx.font = '20px sans-serif';
+    ctx.fillText(`${formattedAddress} | U-DISE: ${school.code}`, canvas.width / 2 + 24, 162);
+    ctx.fillStyle = '#fde68a';
+    ctx.font = 'bold 19px sans-serif';
+    ctx.fillText(
+      `HOLISTIC PROGRESS CARD (HPC) • SESSION ${school.academicSession} • ${examination.name.toUpperCase()}`,
+      canvas.width / 2 + 24,
+      198
+    );
+
+    // Student Profile Card + Photograph
+    ctx.fillStyle = '#f8fafc';
+    ctx.fillRect(68, 244, canvas.width - 136, 178);
+    ctx.strokeStyle = '#cbd5e1';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(68, 244, canvas.width - 136, 178);
+
+    const photoX = canvas.width - 216;
+    const photoY = 262;
+    ctx.fillStyle = '#e2e8f0';
+    ctx.fillRect(photoX, photoY, 130, 142);
+    if (studentPhotoImg) {
+      ctx.drawImage(studentPhotoImg, photoX, photoY, 130, 142);
+    } else {
+      ctx.fillStyle = '#64748b';
+      ctx.textAlign = 'center';
+      ctx.font = 'bold 16px sans-serif';
+      ctx.fillText('STUDENT', photoX + 65, photoY + 64);
+      ctx.fillText('PHOTO', photoX + 65, photoY + 86);
+    }
+
+    ctx.textAlign = 'left';
+    const bioRows: Array<[string, string, string, string]> = [
+      ['Student Name:', summary.studentName, 'Admission No:', student?.admissionNumber || summary.studentId],
+      ["Father's Name:", student?.fatherName || '—', 'Class & Section:', `Class ${classNumber}-${section} (Roll #${summary.rollNumber})`],
+      ["Mother's Name:", student?.motherName || '—', 'Date of Birth:', student?.dob || '—'],
+      ['Overall Grade:', `${summary.overallGrade} (${summary.percentage.toFixed(1)}%)`, 'Result Status:', summary.isPassed ? 'PASSED / PROMOTED' : 'NEEDS SUPPORT'],
+    ];
+    bioRows.forEach((row, rIdx) => {
+      const y = 286 + rIdx * 36;
+      ctx.fillStyle = '#64748b';
+      ctx.font = 'bold 18px sans-serif';
+      ctx.fillText(row[0], 92, y);
+      ctx.fillStyle = '#0f172a';
+      ctx.font = 'bold 20px sans-serif';
+      ctx.fillText(row[1], 246, y);
+
+      ctx.fillStyle = '#64748b';
+      ctx.font = 'bold 18px sans-serif';
+      ctx.fillText(row[2], 580, y);
+      ctx.fillStyle = '#0f172a';
+      ctx.font = 'bold 20px sans-serif';
+      ctx.fillText(row[3], 748, y);
+    });
+
+    // Academic Marks Table
+    let cursorY = 456;
+    ctx.fillStyle = '#1e293b';
+    ctx.fillRect(68, cursorY, canvas.width - 136, 46);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 20px sans-serif';
+    ctx.fillText('SUBJECT', 92, cursorY + 30);
+    ctx.fillText('OBTAINED', 650, cursorY + 30);
+    ctx.fillText('MAX MARKS', 820, cursorY + 30);
+    ctx.fillText('GRADE', 1020, cursorY + 30);
+    cursorY += 46;
+
+    const subjectList = sampleSubjectConfigs.slice(0, 6).map((sub) => {
+      const entry = marksEntries.find(
+        (m) => m.studentId === summary.studentId && m.examId === examination.id && m.subjectCode === sub.code
+      );
+      const obtained =
+        entry && entry.marksObtained !== null
+          ? entry.marksObtained
+          : Math.round((summary.percentage / 100) * (sub.maxMarks || 100));
+      return {
+        name: sub.name,
+        obtained,
+        max: sub.maxMarks || 100,
+      };
+    });
+
+    subjectList.forEach((sub, sIdx) => {
+      ctx.fillStyle = sIdx % 2 === 0 ? '#ffffff' : '#f8fafc';
+      ctx.fillRect(68, cursorY, canvas.width - 136, 46);
+      ctx.strokeStyle = '#e2e8f0';
+      ctx.strokeRect(68, cursorY, canvas.width - 136, 46);
+
+      const pct = sub.max > 0 ? (sub.obtained / sub.max) * 100 : 0;
+      const grade = pct >= 90 ? 'A+' : pct >= 75 ? 'A' : pct >= 60 ? 'B' : pct >= 45 ? 'C' : 'D';
+
+      ctx.fillStyle = '#0f172a';
+      ctx.font = 'bold 19px sans-serif';
+      ctx.fillText(sub.name, 92, cursorY + 30);
+      ctx.fillText(String(sub.obtained), 670, cursorY + 30);
+      ctx.fillText(String(sub.max), 845, cursorY + 30);
+      ctx.fillStyle = '#3730a3';
+      ctx.fillText(grade, 1035, cursorY + 30);
+      cursorY += 46;
+    });
+
+    // Total Summary Bar
+    ctx.fillStyle = '#eef2ff';
+    ctx.fillRect(68, cursorY, canvas.width - 136, 52);
+    ctx.strokeStyle = '#a5b4fc';
+    ctx.strokeRect(68, cursorY, canvas.width - 136, 52);
+    ctx.fillStyle = '#1e1b4b';
+    ctx.font = 'bold 21px sans-serif';
+    ctx.fillText(
+      `TOTAL: ${summary.totalMarksObtained} / ${summary.totalMaxMarks}   •   PERCENTAGE: ${summary.percentage.toFixed(1)}%   •   GRADE: ${summary.overallGrade}`,
+      92,
+      cursorY + 33
+    );
+    cursorY += 80;
+
+    // Holistic Domains & Observations
+    ctx.fillStyle = '#0f172a';
+    ctx.font = 'bold 22px sans-serif';
+    ctx.fillText('HOLISTIC ASSESSMENT & TEACHER OBSERVATIONS', 68, cursorY);
+    cursorY += 16;
+
+    ctx.fillStyle = '#f8fafc';
+    ctx.fillRect(68, cursorY, canvas.width - 136, 260);
+    ctx.strokeStyle = '#cbd5e1';
+    ctx.strokeRect(68, cursorY, canvas.width - 136, 260);
+
+    const ratingsEntries = HOLISTIC_ASSESSMENT_CATEGORIES.slice(0, 6);
+    ratingsEntries.forEach((cat, idx) => {
+      const col = idx % 2;
+      const row = Math.floor(idx / 2);
+      const x = 92 + col * 540;
+      const y = cursorY + 42 + row * 40;
+      const val = hol?.ratings?.[cat.id] || 'Very Good';
+      ctx.fillStyle = '#475569';
+      ctx.font = 'bold 18px sans-serif';
+      ctx.fillText(`${cat.name}:`, x, y);
+      ctx.fillStyle = '#047857';
+      ctx.font = 'bold 18px sans-serif';
+      ctx.fillText(val, x + 280, y);
+    });
+
+    ctx.fillStyle = '#334155';
+    ctx.font = '18px sans-serif';
+    const remarksText = `Teacher Remarks: ${hol?.teacherRemarks || 'Diligent learner demonstrating steady holistic growth across academic and co-scholastic activities.'}`;
+    ctx.fillText(remarksText.slice(0, 96), 92, cursorY + 188);
+    if (remarksText.length > 96) {
+      ctx.fillText(remarksText.slice(96, 192), 92, cursorY + 216);
+    }
+
+    // Signatures Footer (ONLY Headmaster's Name — NO developer name)
+    const sigBaseY = canvas.height - 170;
+    ctx.strokeStyle = '#1e293b';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(68, sigBaseY - 40);
+    ctx.lineTo(canvas.width - 68, sigBaseY - 40);
+    ctx.stroke();
+
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#0f172a';
+    ctx.font = 'bold 20px sans-serif';
+    ctx.fillText('Class Teacher', 260, sigBaseY + 34);
+    ctx.fillStyle = '#64748b';
+    ctx.font = '17px sans-serif';
+    ctx.fillText('Signature & Date', 260, sigBaseY + 62);
+
+    ctx.fillStyle = '#0f172a';
+    ctx.font = 'bold 20px sans-serif';
+    ctx.fillText('Parent / Guardian', canvas.width / 2, sigBaseY + 34);
+    ctx.fillStyle = '#64748b';
+    ctx.font = '17px sans-serif';
+    ctx.fillText('Signature & Stamp', canvas.width / 2, sigBaseY + 62);
+
+    if (headmasterSigImg) {
+      ctx.drawImage(headmasterSigImg, canvas.width - 330, sigBaseY - 26, 140, 44);
+    }
+    ctx.fillStyle = '#0f172a';
+    ctx.font = 'bold 21px sans-serif';
+    ctx.fillText(headmasterDisplayName, canvas.width - 260, sigBaseY + 34);
+    ctx.fillStyle = '#475569';
+    ctx.font = 'bold 17px sans-serif';
+    ctx.fillText(`${school.principalDesignation || 'Headmaster'} • Seal & Signature`, canvas.width - 260, sigBaseY + 62);
+
+    const safeName = `${summary.studentName}_${student?.admissionNumber || summary.studentId}`
+      .replace(/[^a-zA-Z0-9_-]/g, '_');
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.94);
+    const link = document.createElement('a');
+    link.href = dataUrl;
+    link.download = `HPC_Class_${classNumber}_${section}_${safeName}.jpg`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    exportedCount++;
+
+    if (targets.length > 1) {
+      await new Promise((r) => setTimeout(r, 180));
+    }
+  }
+
+  return exportedCount;
 }

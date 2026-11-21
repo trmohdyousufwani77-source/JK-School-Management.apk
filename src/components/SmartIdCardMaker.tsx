@@ -56,6 +56,7 @@ import { QrIdVerifier } from './QrIdVerifier';
 
 export type IdMakerView =
   | 'dashboard'
+  | 'individual-student-id'
   | 'create-student'
   | 'create-teacher'
   | 'students-list'
@@ -130,6 +131,94 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
 
   // Preview modal for quick inspection
   const [inspectedCard, setInspectedCard] = useState<SchoolIdCardRecord | null>(null);
+
+  // Student-Wise Individual ID Card state (PDF & JPEG export)
+  const activeStudentsList = useMemo(
+    () => students.filter((s) => s.status === 'Active'),
+    [students]
+  );
+  const [individualClassFilter, setIndividualClassFilter] = useState<string>('ALL');
+  const [individualSearch, setIndividualSearch] = useState<string>('');
+  const [selectedIndividualStudentId, setSelectedIndividualStudentId] = useState<string>(
+    () => activeStudentsList[0]?.id || ''
+  );
+  const [individualExportBusy, setIndividualExportBusy] = useState<'pdf' | 'jpeg' | null>(null);
+
+  const filteredIndividualStudents = useMemo(() => {
+    const q = individualSearch.trim().toLowerCase();
+    return activeStudentsList.filter((s) => {
+      if (individualClassFilter !== 'ALL' && s.classNumber !== individualClassFilter) return false;
+      if (!q) return true;
+      return (
+        s.fullName.toLowerCase().includes(q) ||
+        s.admissionNumber.toLowerCase().includes(q) ||
+        s.rollNumber.toLowerCase().includes(q) ||
+        `${s.classNumber}-${s.section}`.toLowerCase().includes(q)
+      );
+    });
+  }, [activeStudentsList, individualClassFilter, individualSearch]);
+
+  const selectedIndividualStudent = useMemo(
+    () =>
+      filteredIndividualStudents.find((s) => s.id === selectedIndividualStudentId) ||
+      activeStudentsList.find((s) => s.id === selectedIndividualStudentId) ||
+      filteredIndividualStudents[0] ||
+      activeStudentsList[0] ||
+      null,
+    [filteredIndividualStudents, activeStudentsList, selectedIndividualStudentId]
+  );
+
+  const individualStudentCard = useMemo<SchoolIdCardRecord | null>(() => {
+    if (!selectedIndividualStudent) return null;
+    const existing = records.find(
+      (r) =>
+        r.category === 'student' &&
+        (r.sourceId === selectedIndividualStudent.id ||
+          r.admissionNumber === selectedIndividualStudent.admissionNumber)
+    );
+    const syncedDesign: IdCardDesignConfig = {
+      ...designConfig,
+      schoolLogoDataUrl: school.logoDataUrl || designConfig.schoolLogoDataUrl,
+    };
+    const generated = studentToIdCardRecord(
+      selectedIndividualStudent,
+      school,
+      syncedDesign,
+      existing
+    );
+    return {
+      ...generated,
+      schoolLogoDataUrl: school.logoDataUrl || generated.schoolLogoDataUrl,
+    };
+  }, [selectedIndividualStudent, records, school, designConfig]);
+
+  const handleDownloadIndividualStudentId = async (format: 'pdf' | 'jpeg') => {
+    if (!individualStudentCard || !selectedIndividualStudent) return;
+    setIndividualExportBusy(format);
+    try {
+      const syncedDesign: IdCardDesignConfig = {
+        ...designConfig,
+        schoolLogoDataUrl: school.logoDataUrl || designConfig.schoolLogoDataUrl,
+      };
+      const safeName = selectedIndividualStudent.fullName.replace(/[^a-zA-Z0-9]+/g, '_');
+      if (format === 'pdf') {
+        await exportIdCardsToPdf(
+          [individualStudentCard],
+          syncedDesign,
+          qrPrivacy,
+          `Smart_ID_${safeName}_${selectedIndividualStudent.admissionNumber}.pdf`
+        );
+        showToast(`Downloaded printable PDF Smart ID for ${selectedIndividualStudent.fullName}.`);
+      } else {
+        await downloadIdCardAsImage(individualStudentCard, syncedDesign, qrPrivacy, 'jpeg');
+        showToast(`Downloaded high-resolution JPEG Smart ID for ${selectedIndividualStudent.fullName}.`);
+      }
+    } catch {
+      showToast(`Unable to export ${format.toUpperCase()} Smart ID. Please try again.`);
+    } finally {
+      setIndividualExportBusy(null);
+    }
+  };
 
   const showToast = (msg: string) => {
     setToastMsg(msg);
@@ -473,6 +562,14 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
     accent: string;
     metric?: string | number;
   }[] = [
+    {
+      id: 'individual-student-id',
+      title: 'Student-Wise Individual ID',
+      subtitle: 'Select any student & download official PDF or JPEG ID card',
+      icon: IdCard,
+      accent: 'text-indigo-700 bg-indigo-50 border-indigo-300',
+      metric: activeStudentsList.length,
+    },
     {
       id: 'create-student',
       title: '1. Create Student ID',
@@ -829,7 +926,19 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center gap-2 whitespace-nowrap shrink-0">
+        <div className="flex flex-wrap items-center gap-2 whitespace-nowrap shrink-0">
+          <button
+            type="button"
+            onClick={() => setActiveView('individual-student-id')}
+            className={`px-3 py-2 rounded-lg border text-xs font-bold flex items-center gap-1.5 ${
+              activeView === 'individual-student-id'
+                ? 'bg-emerald-600 text-white border-emerald-600'
+                : 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
+            }`}
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>Student-Wise ID (PDF / JPEG)</span>
+          </button>
           <button
             type="button"
             onClick={() => setActiveView('qr-scanner')}
@@ -995,6 +1104,195 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* 1B. STUDENT-WISE INDIVIDUAL SMART ID GENERATOR (PDF & JPEG DOWNLOAD)  */}
+      {/* ===================================================================== */}
+      {activeView === 'individual-student-id' && (
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 items-start">
+          {/* Left: Student Selector & Search */}
+          <div className="xl:col-span-5 bg-white rounded-2xl border border-slate-200 p-5 space-y-4">
+            <div className="border-b border-slate-100 pb-3">
+              <h2 className="text-sm font-black text-slate-900 flex items-center gap-2">
+                <IdCard className="w-4 h-4 text-indigo-600" />
+                <span>Select Individual Student</span>
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Generate and download an individual student&apos;s official Smart ID Card in printable PDF or JPEG format without batch processing.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <div className="relative sm:col-span-2">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={individualSearch}
+                  onChange={(e) => setIndividualSearch(e.target.value)}
+                  placeholder="Search student name, roll or admission no..."
+                  className="w-full pl-8 pr-3 py-2 rounded-xl border border-slate-200 text-xs text-slate-900 focus:ring-2 focus:ring-indigo-500"
+                />
+              </div>
+              <select
+                value={individualClassFilter}
+                onChange={(e) => setIndividualClassFilter(e.target.value)}
+                className="px-3 py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-700 bg-white"
+              >
+                <option value="ALL">All Classes</option>
+                {Array.from(new Set(activeStudentsList.map((s) => s.classNumber)))
+                  .sort((a, b) => parseInt(a, 10) - parseInt(b, 10))
+                  .map((cls) => (
+                    <option key={cls} value={cls}>
+                      Class {cls}
+                    </option>
+                  ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                Quick Student Dropdown ({filteredIndividualStudents.length})
+              </label>
+              <select
+                value={selectedIndividualStudent?.id || ''}
+                onChange={(e) => setSelectedIndividualStudentId(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs font-bold text-slate-900 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500"
+              >
+                {filteredIndividualStudents.map((st) => (
+                  <option key={st.id} value={st.id}>
+                    {st.fullName} — Class {st.classNumber}-{st.section} (Roll #{st.rollNumber} | Adm: {st.admissionNumber})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="max-h-80 overflow-y-auto divide-y divide-slate-100 rounded-xl border border-slate-200">
+              {filteredIndividualStudents.length === 0 ? (
+                <div className="p-6 text-center text-xs text-slate-500">
+                  No active students match your search filter.
+                </div>
+              ) : (
+                filteredIndividualStudents.map((st) => {
+                  const isSelected = selectedIndividualStudent?.id === st.id;
+                  return (
+                    <button
+                      key={st.id}
+                      type="button"
+                      onClick={() => setSelectedIndividualStudentId(st.id)}
+                      className={`w-full text-left px-3.5 py-2.5 transition-colors flex items-center justify-between gap-2 ${
+                        isSelected
+                          ? 'bg-indigo-50 border-l-4 border-l-indigo-600'
+                          : 'hover:bg-slate-50'
+                      }`}
+                    >
+                      <div className="min-w-0">
+                        <p className={`text-xs font-bold truncate ${isSelected ? 'text-indigo-900' : 'text-slate-900'}`}>
+                          {st.fullName}
+                        </p>
+                        <p className="text-[11px] text-slate-500 font-mono truncate">
+                          Class {st.classNumber}-{st.section} • Roll #{st.rollNumber} • Adm {st.admissionNumber}
+                        </p>
+                      </div>
+                      <span
+                        className={`text-[10px] font-extrabold px-2 py-0.5 rounded-lg shrink-0 ${
+                          isSelected
+                            ? 'bg-indigo-600 text-white'
+                            : 'bg-slate-100 text-slate-600'
+                        }`}
+                      >
+                        {isSelected ? 'Selected' : 'Select'}
+                      </span>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </div>
+
+          {/* Right: Live Printable Smart ID Card Preview & PDF / JPEG Download Controls */}
+          <div className="xl:col-span-7 bg-white rounded-2xl border border-slate-200 p-5 space-y-5">
+            {individualStudentCard && selectedIndividualStudent ? (
+              <>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+                  <div>
+                    <p className="text-[11px] font-extrabold uppercase tracking-wider text-indigo-600">
+                      Official School Branding • Printable CR80 Layout
+                    </p>
+                    <h3 className="text-base font-black text-slate-900">
+                      {selectedIndividualStudent.fullName}
+                    </h3>
+                    <p className="text-xs text-slate-500 font-mono">
+                      Class {selectedIndividualStudent.classNumber}-{selectedIndividualStudent.section} • Roll #{selectedIndividualStudent.rollNumber} • Adm: {selectedIndividualStudent.admissionNumber}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      disabled={individualExportBusy !== null}
+                      onClick={() => handleDownloadIndividualStudentId('pdf')}
+                      className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-bold shadow-sm transition-colors"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>{individualExportBusy === 'pdf' ? 'Generating PDF...' : 'Download PDF'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={individualExportBusy !== null}
+                      onClick={() => handleDownloadIndividualStudentId('jpeg')}
+                      className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-bold shadow-sm transition-colors"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>{individualExportBusy === 'jpeg' ? 'Generating JPEG...' : 'Download JPEG'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex justify-center bg-slate-50 rounded-2xl p-5 border border-slate-200/80">
+                  <IdCardPreview
+                    card={individualStudentCard}
+                    design={{
+                      ...designConfig,
+                      schoolLogoDataUrl: school.logoDataUrl || designConfig.schoolLogoDataUrl,
+                    }}
+                    privacy={qrPrivacy}
+                  />
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
+                  <p className="text-[11px] text-slate-500">
+                    Maintains existing school details, official school logo, academic session ({school.academicSession}), and QR code verification.
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSaveRecord(individualStudentCard);
+                        showToast(`Saved ${selectedIndividualStudent.fullName}'s Smart ID card to issued directory.`);
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold border border-slate-200"
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>Save to Directory</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openEditCard(individualStudentCard)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white hover:bg-slate-50 text-indigo-700 text-xs font-bold border border-indigo-200"
+                    >
+                      <Edit3 className="w-3.5 h-3.5" />
+                      <span>Edit Card Details</span>
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="p-10 text-center text-xs text-slate-500">
+                Select a student from the left panel to generate and download their Smart ID Card.
+              </div>
+            )}
+          </div>
         </div>
       )}
 

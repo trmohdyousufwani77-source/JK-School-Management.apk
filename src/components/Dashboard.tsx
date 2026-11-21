@@ -133,6 +133,7 @@ interface DashboardProps {
   onFirebaseSignOut?: () => void;
   onCloudBackupSync?: () => void;
   onLockSession?: () => void;
+  onUpdateSchool?: (updated: SchoolProfile) => void;
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({
@@ -161,9 +162,21 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onFirebaseSignOut,
   onCloudBackupSync,
   onLockSession,
+  onUpdateSchool,
 }) => {
   const t = translations[language];
   const isTeacherDashboard = effectiveRole === 'teacher';
+  const isAuthorizedAdmin = effectiveRole !== 'teacher';
+
+  // Manual Headmaster Edit modal state (never auto-overwritten from other modules)
+  const [showEditHeadmasterModal, setShowEditHeadmasterModal] = useState<boolean>(false);
+  const [hmDraftName, setHmDraftName] = useState<string>('');
+  const [hmDraftDesignation, setHmDraftDesignation] = useState<NonNullable<SchoolProfile['principalDesignation']>>('Headmaster');
+  const [hmDraftQualification, setHmDraftQualification] = useState<string>('');
+  const [hmDraftContact, setHmDraftContact] = useState<string>('');
+  const [hmDraftEmail, setHmDraftEmail] = useState<string>('');
+  const [hmDraftJoiningDate, setHmDraftJoiningDate] = useState<string>('');
+  const [hmDraftError, setHmDraftError] = useState<string | null>(null);
 
   // Active filter state
   const [selectedClass, setSelectedClass] = useState<string>('all');
@@ -424,6 +437,85 @@ export const Dashboard: React.FC<DashboardProps> = ({
     setShowEditProfileModal(false);
     setProfileNameError(null);
     showToast(`Profile name successfully updated to "${trimmed}".`);
+  };
+
+  const resolvedHeadmasterName =
+    (school.headmasterManuallyEdited ? school.headmasterName : undefined) ||
+    school.headmasterName ||
+    school.headTeacherName ||
+    currentPrincipal?.fullName ||
+    'Mohd Yousuf Wani';
+
+  const resolvedHeadmasterDesignation =
+    (school.headmasterManuallyEdited ? school.principalDesignation : undefined) ||
+    school.principalDesignation ||
+    currentPrincipal?.designation ||
+    'Headmaster';
+
+  const resolvedHeadmasterQualification =
+    (school.headmasterManuallyEdited ? school.headmasterQualification : undefined) ||
+    school.headmasterQualification ||
+    currentPrincipal?.qualification ||
+    'M.Sc., M.Ed.';
+
+  const resolvedHeadmasterContact =
+    (school.headmasterManuallyEdited ? school.headmasterContact : undefined) ||
+    school.headmasterContact ||
+    currentPrincipal?.contactNumber ||
+    school.contactNumber ||
+    '';
+
+  const resolvedHeadmasterJoiningDate =
+    (school.headmasterManuallyEdited ? school.headmasterJoiningDate : undefined) ||
+    school.headmasterJoiningDate ||
+    currentPrincipal?.joiningDate ||
+    '2022-04-01';
+
+  const openManualHeadmasterEditor = () => {
+    if (!isAuthorizedAdmin) {
+      showToast('Only authorized administrators can edit Headmaster profile details.');
+      return;
+    }
+    setHmDraftName(resolvedHeadmasterName);
+    setHmDraftDesignation((resolvedHeadmasterDesignation as any) || 'Headmaster');
+    setHmDraftQualification(resolvedHeadmasterQualification);
+    setHmDraftContact(resolvedHeadmasterContact);
+    setHmDraftEmail(school.headmasterEmail || currentPrincipal?.email || school.email || '');
+    setHmDraftJoiningDate(resolvedHeadmasterJoiningDate);
+    setHmDraftError(null);
+    setShowEditHeadmasterModal(true);
+  };
+
+  const handleSaveManualHeadmaster = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanedName = hmDraftName.trim();
+    if (cleanedName.length < 2) {
+      setHmDraftError('Headmaster name must be at least 2 characters.');
+      return;
+    }
+    if (onUpdateSchool) {
+      const updated: SchoolProfile = {
+        ...school,
+        headmasterName: cleanedName,
+        headTeacherName: cleanedName,
+        principalDesignation: hmDraftDesignation,
+        headmasterQualification: hmDraftQualification.trim() || undefined,
+        headmasterContact: hmDraftContact.trim() || undefined,
+        headmasterEmail: hmDraftEmail.trim() || undefined,
+        headmasterJoiningDate: hmDraftJoiningDate || undefined,
+        headmasterManuallyEdited: true,
+        headmasterUpdatedAt: new Date().toISOString(),
+      };
+      onUpdateSchool(updated);
+      try {
+        localStorage.setItem('school_master_v1_school', JSON.stringify(updated));
+      } catch {
+        // ignore storage quota errors
+      }
+    }
+    setShowEditHeadmasterModal(false);
+    setHmDraftError(null);
+    showToast(`Headmaster profile manually saved: ${cleanedName} (${hmDraftDesignation}).`);
   };
 
   const showToast = (msg: string) => {
@@ -758,74 +850,41 @@ export const Dashboard: React.FC<DashboardProps> = ({
         </div>
       )}
 
-      {/* Top Profile & Android App Banner */}
-      <div className="bg-white p-4 sm:p-5 rounded-3xl border border-slate-200/90 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div className="flex items-center gap-3.5">
-          <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-indigo-600 to-indigo-800 text-white font-black text-lg flex items-center justify-center shadow-md shadow-indigo-600/20 shrink-0">
-            {displayedAdminName.slice(0, 1)}
-          </div>
-          <div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <h2 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
-                {displayedAdminName}
-              </h2>
-              <button
-                type="button"
-                onClick={() => {
-                  setTempProfileName(displayedAdminName);
-                  setProfileNameError(null);
-                  setShowEditProfileModal(true);
-                }}
-                title="Edit Displayed Profile Name"
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl bg-slate-100 hover:bg-indigo-50 hover:text-indigo-700 text-slate-700 text-xs font-bold transition-all border border-slate-200 shadow-2xs active:scale-95"
-              >
-                <Edit2 className="w-3.5 h-3.5 text-indigo-600" />
-                <span>✏️ Edit Profile</span>
-              </button>
-            </div>
-            <p className="text-xs text-slate-500 font-medium mt-0.5">
-              Authorized School Administrator • UDISE+ Student Management Portal
-            </p>
-          </div>
-        </div>
-
-        {/* Direct APK Download Quick Action */}
-        <div className="flex items-center gap-2">
-          <a
-            href="/SchoolMaster-release.apk"
-            download="SchoolMaster-v1.0.4-release.apk"
-            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-gradient-to-r from-emerald-600 to-emerald-700 hover:from-emerald-500 hover:to-emerald-600 text-white font-extrabold text-xs shadow-md shadow-emerald-600/30 transition-all active:scale-95 no-underline"
-          >
-            <Smartphone className="w-4 h-4 text-emerald-200" />
-            <span>Download Android APK</span>
-            <span className="px-1.5 py-0.2 rounded-md bg-white/20 text-[10px] font-mono">v1.0.4</span>
-          </a>
-        </div>
-      </div>
-
-      {/* Welcome Banner with School Logo & J&K Identity (Navy Blue, White & Golden-Yellow Theme) */}
+      {/* Customized School Master Widget with Centralized Official School Logo */}
       <div className="bg-gradient-to-r from-[#0f294a] via-[#172554] to-[#0f172a] rounded-3xl p-6 sm:p-8 text-white shadow-xl relative overflow-hidden border border-amber-400/25">
         <div className="absolute right-0 top-0 bottom-0 w-1/3 bg-gradient-to-l from-amber-400/10 to-transparent pointer-events-none" />
         <div className="relative z-10 flex flex-col sm:flex-row sm:items-start gap-5">
-          <div className="shrink-0 flex flex-col items-center">
-            {school.logoDataUrl ? (
-              <div className="w-20 h-20 rounded-2xl bg-white border-2 border-amber-400 flex items-center justify-center overflow-hidden shadow-lg p-1">
-                <img src={school.logoDataUrl} alt={`${school.name} Logo`} className="w-full h-full object-contain" />
-              </div>
-            ) : (
-              <SchoolEmblem size={84} showMotto />
+          {/* Clean Official School Logo Area (No duplicate School Name or Emblem labels) */}
+          <div className="shrink-0 flex flex-col items-center gap-2">
+            <div className="w-24 h-24 rounded-2xl bg-white border-2 border-amber-400 flex items-center justify-center overflow-hidden shadow-lg p-1.5">
+              {school.logoDataUrl ? (
+                <img
+                  src={school.logoDataUrl}
+                  alt="Official School Logo"
+                  className="w-full h-full object-contain"
+                />
+              ) : (
+                <School className="w-11 h-11 text-[#0f294a]" />
+              )}
+            </div>
+            {isAuthorizedAdmin && (
+              <button
+                type="button"
+                onClick={() => onNavigateTab('settings', 'profile')}
+                className="text-[10px] font-bold text-amber-200 hover:text-white underline underline-offset-2 transition-colors cursor-pointer"
+              >
+                {school.logoDataUrl ? 'Manage Logo' : 'Add Official Logo'}
+              </button>
             )}
           </div>
+
           <div className="max-w-3xl flex-1">
             <div className="inline-flex flex-wrap items-center gap-2 px-3 py-1 rounded-full bg-white/10 text-amber-200 border border-amber-400/35 text-xs font-semibold mb-2.5">
               <Sparkles className="w-3.5 h-3.5 text-amber-300" />
-              <span>{school.motto || 'LEARN • GROW • EXCEL'}</span>
+              <span>Session {school.academicSession}</span>
               <span>•</span>
               <span className="font-mono text-amber-300 font-bold">U-DISE: {school.code}</span>
             </div>
-            <p className="text-xs font-bold uppercase tracking-wider text-amber-300 mb-1">
-              Government Middle School Pamposh Colony • Session {school.academicSession}
-            </p>
             <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight">
               {language === 'ur'
                 ? (school?.nameUrdu ? `خوش آمدید - ${school.nameUrdu}` : school?.name ? `خوش آمدید - ${school.name}` : 'خوش آمدید - اسکول')
@@ -1223,40 +1282,50 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
       {/* Current Principal / Headmaster Spotlight + Firebase Cloud Admin Sync Bar */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* Current Principal / Headmaster Card */}
+        {/* Current Headmaster Card (Strictly Manual Profile Priority — Never Auto-Overwritten) */}
         <div className="lg:col-span-2 bg-white p-5 rounded-3xl border border-slate-200 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-center gap-4 min-w-0">
             <div className="w-16 h-16 rounded-2xl bg-[#0f294a] text-amber-300 flex items-center justify-center overflow-hidden border-2 border-amber-400 shrink-0 shadow-sm">
-              {currentPrincipal?.photoDataUrl ? (
+              {school.headmasterPhotoDataUrl || currentPrincipal?.photoDataUrl ? (
                 <img
-                  src={currentPrincipal.photoDataUrl}
-                  alt={currentPrincipal.fullName}
+                  src={school.headmasterPhotoDataUrl || currentPrincipal?.photoDataUrl}
+                  alt={resolvedHeadmasterName}
                   className="w-full h-full object-cover"
                 />
               ) : (
                 <span className="text-2xl font-black">
-                  {(currentPrincipal?.fullName || school.headTeacherName || 'P').slice(0, 1)}
+                  {resolvedHeadmasterName.slice(0, 1)}
                 </span>
               )}
             </div>
             <div className="min-w-0 space-y-1">
-              <div className="text-[11px] font-extrabold uppercase tracking-wider text-amber-700">
-                Current {currentPrincipal?.designation || school.principalDesignation || 'Headmaster'} • {school.name}
+              <div className="text-[11px] font-extrabold uppercase tracking-wider text-amber-700 flex items-center gap-1.5 flex-wrap">
+                <span>Current {resolvedHeadmasterDesignation}</span>
+                {school.headmasterManuallyEdited && (
+                  <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 text-[9px] font-bold normal-case">
+                    <Lock className="w-2.5 h-2.5" />
+                    Manual Profile
+                  </span>
+                )}
               </div>
               <h2 className="text-lg font-black text-[#0f294a] truncate">
-                {currentPrincipal?.fullName || school.headTeacherName || 'Mohd Yousuf Wani'}
+                {resolvedHeadmasterName}
               </h2>
               <div className="flex flex-wrap items-center gap-2.5 text-xs text-slate-600">
-                <span className="font-semibold">{currentPrincipal?.qualification || 'M.Sc., M.Ed.'}</span>
+                <span className="font-semibold">{resolvedHeadmasterQualification}</span>
                 <span>•</span>
                 <span className="font-mono tabular-nums">
-                  Joined {currentPrincipal?.joiningDate || '2022-04-01'}
+                  Joined {resolvedHeadmasterJoiningDate}
                 </span>
-                <span>•</span>
-                <span className="inline-flex items-center gap-1 font-mono tabular-nums text-emerald-700 font-semibold">
-                  <Phone className="w-3 h-3" />
-                  {currentPrincipal?.contactNumber || school.contactNumber}
-                </span>
+                {resolvedHeadmasterContact && (
+                  <>
+                    <span>•</span>
+                    <span className="inline-flex items-center gap-1 font-mono tabular-nums text-emerald-700 font-semibold">
+                      <Phone className="w-3 h-3" />
+                      {resolvedHeadmasterContact}
+                    </span>
+                  </>
+                )}
               </div>
             </div>
           </div>
@@ -1269,24 +1338,133 @@ export const Dashboard: React.FC<DashboardProps> = ({
             >
               <span>View Archive</span>
             </button>
-            <button
-              type="button"
-              onClick={() => onNavigateTab('principal-management', 'add')}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-black transition-colors cursor-pointer"
-            >
-              <UserPlus className="w-3.5 h-3.5" />
-              <span>Add Principal</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => onNavigateTab('principal-management', 'edit')}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#0f294a] hover:bg-[#1e3a8a] text-white text-xs font-bold transition-colors cursor-pointer"
-            >
-              <Edit2 className="w-3.5 h-3.5 text-amber-300" />
-              <span>Edit Principal</span>
-            </button>
+            {isAuthorizedAdmin && (
+              <button
+                type="button"
+                onClick={openManualHeadmasterEditor}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#0f294a] hover:bg-[#1e3a8a] text-white text-xs font-bold transition-colors cursor-pointer shadow-xs"
+              >
+                <Edit2 className="w-3.5 h-3.5 text-amber-300" />
+                <span>Edit Headmaster</span>
+              </button>
+            )}
           </div>
         </div>
+
+        {/* Manual Headmaster Edit Modal (Save & Cancel) */}
+        {showEditHeadmasterModal && (
+          <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+            <form
+              onSubmit={handleSaveManualHeadmaster}
+              className="bg-white rounded-3xl border border-slate-200 shadow-2xl max-w-lg w-full p-6 space-y-4"
+            >
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <div>
+                  <h3 className="text-base font-black text-slate-900">Edit Headmaster Profile</h3>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Saved manually and protected from automatic overwrites by other modules.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowEditHeadmasterModal(false)}
+                  className="p-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {hmDraftError && (
+                <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-bold">
+                  {hmDraftError}
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                <div className="sm:col-span-2">
+                  <label className="block font-bold text-slate-700 mb-1">Headmaster Full Name *</label>
+                  <input
+                    type="text"
+                    required
+                    value={hmDraftName}
+                    onChange={(e) => setHmDraftName(e.target.value)}
+                    placeholder="Enter Headmaster full name"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-xl font-bold text-slate-900 focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Designation</label>
+                  <select
+                    value={hmDraftDesignation}
+                    onChange={(e) => setHmDraftDesignation(e.target.value as any)}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-xl font-semibold bg-white"
+                  >
+                    <option value="Headmaster">Headmaster</option>
+                    <option value="Principal">Principal</option>
+                    <option value="Headmistress">Headmistress</option>
+                    <option value="Officiating Principal">Officiating Principal</option>
+                    <option value="In-Charge Headmaster">In-Charge Headmaster</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Qualification</label>
+                  <input
+                    type="text"
+                    value={hmDraftQualification}
+                    onChange={(e) => setHmDraftQualification(e.target.value)}
+                    placeholder="e.g. M.Sc., M.Ed."
+                    className="w-full px-3 py-2 border border-slate-300 rounded-xl"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Contact Number</label>
+                  <input
+                    type="text"
+                    value={hmDraftContact}
+                    onChange={(e) => setHmDraftContact(e.target.value)}
+                    placeholder="+91 9XXXXXXXXX"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-xl font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Joining Date</label>
+                  <input
+                    type="date"
+                    value={hmDraftJoiningDate}
+                    onChange={(e) => setHmDraftJoiningDate(e.target.value)}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-xl font-mono"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="block font-bold text-slate-700 mb-1">Email Address</label>
+                  <input
+                    type="email"
+                    value={hmDraftEmail}
+                    onChange={(e) => setHmDraftEmail(e.target.value)}
+                    placeholder="headmaster@school.edu.in"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-xl"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setShowEditHeadmasterModal(false)}
+                  className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 rounded-xl bg-[#0f294a] hover:bg-[#1e3a8a] text-white font-bold text-xs shadow-sm"
+                >
+                  Save Headmaster
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
 
         {/* Firebase Authentication & Cloud Firestore Sync Card */}
         <div className="bg-gradient-to-br from-[#0f294a] to-[#172554] text-white p-5 rounded-3xl border border-amber-400/30 shadow-sm flex flex-col justify-between gap-3">
@@ -1552,50 +1730,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
               </div>
             )}
           </div>
-        </div>
-      </div>
-
-      {/* Authorized School Staff & Roles Banner */}
-      <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4 text-xs">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-indigo-50 text-indigo-700 flex items-center justify-center shrink-0">
-            <ShieldCheck className="w-5 h-5" />
-          </div>
-          <div>
-            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-              Administrator &amp; School Faculty • {activeDevAdmin?.institution || school.name}
-            </span>
-            <div className="font-extrabold text-slate-900 text-xs sm:text-sm flex flex-wrap items-center gap-2 mt-0.5">
-              <span className="inline-flex items-center gap-1 text-indigo-900 bg-indigo-50 px-2 py-0.5 rounded-lg border border-indigo-200 font-black">
-                {activeDevAdmin?.name || school.adminName || displayedAdminName} ({activeDevAdmin?.designation || 'App Developer / Administrator'})
-              </span>
-              <span>•</span>
-              <span className="inline-flex items-center gap-1 text-slate-800 bg-slate-100 px-2 py-0.5 rounded-lg font-bold">
-                {activeDevAdmin?.district || school.district}, {activeDevAdmin?.unionTerritory || school.state || 'Jammu & Kashmir, India'}
-              </span>
-              <span>•</span>
-              <span className="inline-flex items-center gap-1 text-slate-800 bg-slate-100 px-2 py-0.5 rounded-lg font-bold">
-                Nazir Ahmad Dar (Teacher)
-              </span>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-3 self-start md:self-auto">
-          <button
-            onClick={() => onNavigateTab('about-us')}
-            className="text-xs font-bold text-amber-700 hover:text-amber-900 bg-amber-50 hover:bg-amber-100 px-3 py-1.5 rounded-xl border border-amber-200 flex items-center gap-1 transition-colors"
-          >
-            <Edit2 className="w-3.5 h-3.5" />
-            <span>Admin Profile / About Us</span>
-          </button>
-          <button
-            onClick={() => onNavigateTab('admin-access')}
-            className="text-xs font-bold text-indigo-600 hover:text-indigo-800 flex items-center gap-1"
-          >
-            <span>Staff Permissions</span>
-            <ChevronRight className="w-3.5 h-3.5" />
-          </button>
         </div>
       </div>
 
@@ -3112,6 +3246,85 @@ export const Dashboard: React.FC<DashboardProps> = ({
         </div>
 
       </div>
+
+      {/* Dedicated Bottom Dashboard Footer Section: School Administrator Information & App Download */}
+      <footer className="mt-8 pt-6 border-t-2 border-slate-200/90">
+        <div className="bg-slate-900 text-white rounded-3xl p-5 sm:p-6 shadow-md border border-slate-800 grid grid-cols-1 lg:grid-cols-2 gap-5 items-center">
+          {/* 1. School Administrator Information */}
+          <div className="flex items-start gap-3.5">
+            <div className="w-11 h-11 rounded-2xl bg-indigo-500/20 border border-indigo-400/30 text-indigo-300 font-black text-base flex items-center justify-center shrink-0">
+              {displayedAdminName.slice(0, 1)}
+            </div>
+            <div className="space-y-1">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                School Administrator Information
+              </p>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-sm sm:text-base font-extrabold text-white">
+                  {activeDevAdmin?.name || school.adminName || displayedAdminName}
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTempProfileName(displayedAdminName);
+                    setProfileNameError(null);
+                    setShowEditProfileModal(true);
+                  }}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-white/10 hover:bg-white/20 text-slate-200 text-[11px] font-semibold transition-colors"
+                >
+                  <Edit2 className="w-3 h-3 text-amber-300" />
+                  <span>Edit</span>
+                </button>
+              </div>
+              <p className="text-xs text-slate-300">
+                {school.name} • {school.district}, {school.state || 'Jammu & Kashmir'}
+              </p>
+              <div className="flex items-center gap-3 pt-1">
+                <button
+                  type="button"
+                  onClick={() => onNavigateTab('about-us')}
+                  className="text-[11px] font-bold text-amber-300 hover:text-amber-200 underline underline-offset-2"
+                >
+                  Administration Details
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onNavigateTab('admin-access')}
+                  className="text-[11px] font-bold text-indigo-300 hover:text-indigo-200 underline underline-offset-2"
+                >
+                  Role &amp; Access Controls
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* 2. Official Android App Download */}
+          <div className="flex flex-col sm:flex-row sm:items-center lg:justify-end gap-3 pt-4 lg:pt-0 border-t lg:border-t-0 lg:border-l border-slate-800 lg:pl-6">
+            <div className="sm:text-right">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">
+                Official Mobile Application
+              </p>
+              <p className="text-xs font-bold text-white mt-0.5">
+                School Master Android App • Version 1.0.4
+              </p>
+              <p className="text-[11px] text-slate-400">
+                Direct APK install for authorized school staff &amp; devices
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <a
+                href="/SchoolMaster-release.apk"
+                download="SchoolMaster-v1.0.4-release.apk"
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-xs shadow-md shadow-emerald-600/25 transition-all active:scale-95 no-underline"
+              >
+                <Smartphone className="w-4 h-4 text-emerald-100" />
+                <span>App Download</span>
+                <span className="px-1.5 py-0.5 rounded bg-black/20 text-[10px] font-mono">v1.0.4</span>
+              </a>
+            </div>
+          </div>
+        </div>
+      </footer>
 
       {/* Edit Profile Modal */}
       {showEditProfileModal && (
