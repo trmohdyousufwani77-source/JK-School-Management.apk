@@ -165,6 +165,53 @@ export interface DeveloperAdminProfile {
   updatedAt?: string;
 }
 
+export interface SchoolAboutUsInfo {
+  id: string;
+  // A. About Us (School Admin Editable Only)
+  schoolName: string;
+  schoolIntroduction: string;
+  schoolHistory: string;
+  schoolVision: string;
+  schoolMission: string;
+  schoolObjectives: string;
+  schoolAddress: string;
+  schoolContactNumber: string;
+  schoolEmail: string;
+  schoolWebsite: string;
+  schoolLogoDataUrl?: string;
+  schoolFacilities: string;
+  principalsMessage: string;
+  otherSchoolInfo: string;
+
+  // B. App Information (School Admin Editable Only)
+  appName: string;
+  appDescription: string;
+  appVersion: string;
+  appFeatures: string;
+  appPurpose: string;
+  appSupportEmail: string;
+  appSupportContactNumber: string;
+  privacyPolicy: string;
+  termsAndConditions: string;
+  copyrightInfo: string;
+
+  updatedAt?: string;
+  updatedByName?: string;
+  updatedByRole?: string;
+}
+
+export interface SchoolInfoAuditEntry {
+  id: string;
+  section: 'About Us' | 'App Information' | 'School Logo';
+  action: 'CREATE' | 'UPDATE';
+  changedFields: string[];
+  summary: string;
+  actorName: string;
+  actorRole: string;
+  timestamp: string;
+  syncedToCloud?: boolean;
+}
+
 export interface Holiday {
   id: string;
   date: string; // YYYY-MM-DD
@@ -184,7 +231,7 @@ export interface GradeBoundary {
   points: number;
 }
 
-export type StudentStatus = 'Active' | 'Transferred' | 'Archived';
+export type StudentStatus = 'Active' | 'Transferred' | 'Graduated' | 'Archived';
 export type AadhaarStatus = 'Verified' | 'Pending' | 'Alternative_ID_Provided' | 'Exempted';
 
 export interface Student {

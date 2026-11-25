@@ -39,6 +39,11 @@ service cloud.firestore {
       );
     }
 
+    // Strictly original App Developer / Super Administrator gate (School Admins cannot pass this gate)
+    function isSuperDeveloperAdmin() {
+      return isBootstrappedAdmin();
+    }
+
     // Entity Validators (Blueprint Synchronized)
     function isValidAdminEntry(data) {
       return data.keys().hasAll(['uid', 'email', 'role', 'createdAt']) &&
@@ -105,7 +110,7 @@ service cloud.firestore {
         (!('previousSchool' in data) || (data.previousSchool is string && data.previousSchool.size() <= 160)) &&
         (!('admissionDate' in data) || (data.admissionDate is string && data.admissionDate.size() <= 32)) &&
         (!('academicSession' in data) || (data.academicSession is string && data.academicSession.size() <= 32)) &&
-        data.status in ['Active', 'Transferred', 'Archived'] &&
+        data.status in ['Active', 'Transferred', 'Graduated', 'Archived'] &&
         data.createdByUid is string && data.createdByUid.size() <= 128 &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
@@ -310,6 +315,117 @@ service cloud.firestore {
         (!('remarksByHoi' in data) || (data.remarksByHoi is string && data.remarksByHoi.size() <= 1000)) &&
         (!('updatedBy' in data) || (data.updatedBy is string && data.updatedBy.size() <= 140)) &&
         data.createdByUid is string && data.createdByUid.size() > 0 && data.createdByUid.size() <= 128 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidStudentAttendance(data) {
+      return data.keys().hasAll([
+          'id', 'date', 'studentId', 'classNumber', 'section', 'status',
+          'createdByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'date', 'studentId', 'studentName', 'admissionNumber',
+          'classNumber', 'section', 'status', 'academicSession',
+          'markedByUserId', 'markedAt', 'remarks',
+          'createdByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.date is string && data.date.size() >= 4 && data.date.size() <= 32 &&
+        data.studentId is string && data.studentId.size() >= 1 && data.studentId.size() <= 80 &&
+        (!('studentName' in data) || (data.studentName is string && data.studentName.size() <= 140)) &&
+        (!('admissionNumber' in data) || (data.admissionNumber is string && data.admissionNumber.size() <= 64)) &&
+        data.classNumber is string && data.classNumber.size() >= 1 && data.classNumber.size() <= 24 &&
+        data.section is string && data.section.size() >= 1 && data.section.size() <= 16 &&
+        data.status in ['Present', 'Absent', 'Late', 'Approved_Leave'] &&
+        (!('academicSession' in data) || (data.academicSession is string && data.academicSession.size() <= 32)) &&
+        (!('markedByUserId' in data) || (data.markedByUserId is string && data.markedByUserId.size() <= 80)) &&
+        (!('markedAt' in data) || (data.markedAt is string && data.markedAt.size() <= 64)) &&
+        (!('remarks' in data) || (data.remarks is string && data.remarks.size() <= 500)) &&
+        data.createdByUid is string && data.createdByUid.size() > 0 && data.createdByUid.size() <= 128 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSchoolAboutUsInfo(data) {
+      return data.keys().hasAll(['id', 'schoolName', 'appName', 'updatedByUid', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'schoolName', 'schoolIntroduction', 'schoolHistory', 'schoolVision',
+          'schoolMission', 'schoolObjectives', 'schoolAddress', 'schoolContactNumber',
+          'schoolEmail', 'schoolWebsite', 'schoolLogoUrl', 'schoolFacilities',
+          'principalsMessage', 'otherSchoolInfo', 'appName', 'appDescription',
+          'appVersion', 'appFeatures', 'appPurpose', 'appSupportEmail',
+          'appSupportContactNumber', 'privacyPolicy', 'termsAndConditions',
+          'copyrightInfo', 'updatedByUid', 'updatedByName', 'updatedByRole', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.schoolName is string && data.schoolName.size() >= 2 && data.schoolName.size() <= 180 &&
+        (!('schoolIntroduction' in data) || (data.schoolIntroduction is string && data.schoolIntroduction.size() <= 2000)) &&
+        (!('schoolHistory' in data) || (data.schoolHistory is string && data.schoolHistory.size() <= 2000)) &&
+        (!('schoolVision' in data) || (data.schoolVision is string && data.schoolVision.size() <= 1000)) &&
+        (!('schoolMission' in data) || (data.schoolMission is string && data.schoolMission.size() <= 1000)) &&
+        (!('schoolObjectives' in data) || (data.schoolObjectives is string && data.schoolObjectives.size() <= 1500)) &&
+        (!('schoolAddress' in data) || (data.schoolAddress is string && data.schoolAddress.size() <= 350)) &&
+        (!('schoolContactNumber' in data) || (data.schoolContactNumber is string && data.schoolContactNumber.size() <= 40)) &&
+        (!('schoolEmail' in data) || (data.schoolEmail is string && data.schoolEmail.size() <= 140)) &&
+        (!('schoolWebsite' in data) || (data.schoolWebsite is string && data.schoolWebsite.size() <= 220)) &&
+        (!('schoolLogoUrl' in data) || (data.schoolLogoUrl is string && data.schoolLogoUrl.size() <= 500)) &&
+        (!('schoolFacilities' in data) || (data.schoolFacilities is string && data.schoolFacilities.size() <= 1500)) &&
+        (!('principalsMessage' in data) || (data.principalsMessage is string && data.principalsMessage.size() <= 2000)) &&
+        (!('otherSchoolInfo' in data) || (data.otherSchoolInfo is string && data.otherSchoolInfo.size() <= 1500)) &&
+        data.appName is string && data.appName.size() >= 2 && data.appName.size() <= 140 &&
+        (!('appDescription' in data) || (data.appDescription is string && data.appDescription.size() <= 1500)) &&
+        (!('appVersion' in data) || (data.appVersion is string && data.appVersion.size() <= 40)) &&
+        (!('appFeatures' in data) || (data.appFeatures is string && data.appFeatures.size() <= 2000)) &&
+        (!('appPurpose' in data) || (data.appPurpose is string && data.appPurpose.size() <= 1200)) &&
+        (!('appSupportEmail' in data) || (data.appSupportEmail is string && data.appSupportEmail.size() <= 140)) &&
+        (!('appSupportContactNumber' in data) || (data.appSupportContactNumber is string && data.appSupportContactNumber.size() <= 40)) &&
+        (!('privacyPolicy' in data) || (data.privacyPolicy is string && data.privacyPolicy.size() <= 3000)) &&
+        (!('termsAndConditions' in data) || (data.termsAndConditions is string && data.termsAndConditions.size() <= 3000)) &&
+        (!('copyrightInfo' in data) || (data.copyrightInfo is string && data.copyrightInfo.size() <= 300)) &&
+        data.updatedByUid is string && data.updatedByUid.size() > 0 && data.updatedByUid.size() <= 128 &&
+        (!('updatedByName' in data) || (data.updatedByName is string && data.updatedByName.size() <= 140)) &&
+        (!('updatedByRole' in data) || (data.updatedByRole is string && data.updatedByRole.size() <= 40)) &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSchoolInfoAuditLog(data) {
+      return data.keys().hasAll(['id', 'section', 'action', 'summary', 'actorUid', 'actorName', 'actorRole', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'section', 'action', 'changedFields', 'summary', 'actorUid', 'actorName', 'actorRole', 'createdAt']) &&
+        isValidId(data.id) &&
+        data.section in ['About Us', 'App Information', 'School Logo'] &&
+        data.action in ['CREATE', 'UPDATE'] &&
+        (!('changedFields' in data) || (data.changedFields is string && data.changedFields.size() <= 600)) &&
+        data.summary is string && data.summary.size() >= 2 && data.summary.size() <= 600 &&
+        data.actorUid is string && data.actorUid.size() > 0 && data.actorUid.size() <= 128 &&
+        data.actorName is string && data.actorName.size() >= 1 && data.actorName.size() <= 140 &&
+        data.actorRole is string && data.actorRole.size() >= 1 && data.actorRole.size() <= 40 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidProtectedDeveloperProfile(data) {
+      return data.keys().hasAll(['id', 'developerName', 'designation', 'isProtected', 'updatedByUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'developerName', 'developerProfile', 'designation', 'institution',
+          'locality', 'district', 'unionTerritory', 'developerEmail', 'developerPhone',
+          'administratorName', 'administratorProfile', 'ownershipNotice',
+          'isProtected', 'updatedByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.developerName is string && data.developerName.size() >= 2 && data.developerName.size() <= 140 &&
+        (!('developerProfile' in data) || (data.developerProfile is string && data.developerProfile.size() <= 1000)) &&
+        data.designation is string && data.designation.size() >= 2 && data.designation.size() <= 140 &&
+        (!('institution' in data) || (data.institution is string && data.institution.size() <= 180)) &&
+        (!('locality' in data) || (data.locality is string && data.locality.size() <= 120)) &&
+        (!('district' in data) || (data.district is string && data.district.size() <= 80)) &&
+        (!('unionTerritory' in data) || (data.unionTerritory is string && data.unionTerritory.size() <= 100)) &&
+        (!('developerEmail' in data) || (data.developerEmail is string && data.developerEmail.size() <= 140)) &&
+        (!('developerPhone' in data) || (data.developerPhone is string && data.developerPhone.size() <= 40)) &&
+        (!('administratorName' in data) || (data.administratorName is string && data.administratorName.size() <= 140)) &&
+        (!('administratorProfile' in data) || (data.administratorProfile is string && data.administratorProfile.size() <= 1000)) &&
+        (!('ownershipNotice' in data) || (data.ownershipNotice is string && data.ownershipNotice.size() <= 500)) &&
+        data.isProtected is bool && data.isProtected == true &&
+        data.updatedByUid is string && data.updatedByUid.size() > 0 && data.updatedByUid.size() <= 128 &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -567,6 +683,92 @@ service cloud.firestore {
           'updatedBy', 'updatedAt'
         ]);
       // Preserve historical date-wise attendance records
+      allow delete: if false;
+    }
+
+    // /studentAttendance/{recordId} - Date-wise Student Daily Attendance & QR Check-in Records
+    match /studentAttendance/{recordId} {
+      allow get: if isValidId(recordId) && (isAdmin() || (isVerifiedUser() && existing().createdByUid == request.auth.uid));
+      allow list: if isVerifiedUser() && (isAdmin() || resource.data.createdByUid == request.auth.uid);
+      allow create: if isValidId(recordId) && isVerifiedUser() && isValidStudentAttendance(incoming()) &&
+        incoming().createdByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(recordId) && isVerifiedUser() && isValidStudentAttendance(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().date == existing().date &&
+        incoming().studentId == existing().studentId &&
+        incoming().createdByUid == existing().createdByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (isAdmin() || existing().createdByUid == request.auth.uid) &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'studentName', 'admissionNumber', 'classNumber', 'section', 'status',
+          'academicSession', 'markedByUserId', 'markedAt', 'remarks', 'updatedAt'
+        ]);
+      // Preserve student attendance audit trail
+      allow delete: if false;
+    }
+
+    // /schoolAboutUs/{docId} - School Admin-managed About Us & App Information (strictly separate from developer profile)
+    match /schoolAboutUs/{docId} {
+      allow get: if isValidId(docId) && isVerifiedUser();
+      allow list: if isAdmin();
+      allow create: if isValidId(docId) && isValidSchoolAboutUsInfo(incoming()) && isAdmin() &&
+        incoming().id == docId &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(docId) && isValidSchoolAboutUsInfo(incoming()) && isAdmin() &&
+        incoming().id == existing().id &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'schoolName', 'schoolIntroduction', 'schoolHistory', 'schoolVision',
+          'schoolMission', 'schoolObjectives', 'schoolAddress', 'schoolContactNumber',
+          'schoolEmail', 'schoolWebsite', 'schoolLogoUrl', 'schoolFacilities',
+          'principalsMessage', 'otherSchoolInfo', 'appName', 'appDescription',
+          'appVersion', 'appFeatures', 'appPurpose', 'appSupportEmail',
+          'appSupportContactNumber', 'privacyPolicy', 'termsAndConditions',
+          'copyrightInfo', 'updatedByUid', 'updatedByName', 'updatedByRole', 'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    // /schoolInfoAuditLogs/{logId} - Immutable Audit Log of School About Us & App Information Updates
+    match /schoolInfoAuditLogs/{logId} {
+      allow get: if isValidId(logId) && isAdmin();
+      allow list: if isVerifiedUser() && (isAdmin() || resource.data.actorUid == request.auth.uid);
+      allow create: if isValidId(logId) && isValidSchoolInfoAuditLog(incoming()) && isAdmin() &&
+        incoming().id == logId &&
+        incoming().actorUid == request.auth.uid &&
+        incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // /protectedDeveloperProfiles/{profileId} - STRICTLY PROTECTED Original App Developer / Super Admin Ownership Record
+    // School Admins can ONLY read; they are strictly forbidden from creating, modifying, replacing, or deleting developer records.
+    match /protectedDeveloperProfiles/{profileId} {
+      allow get: if isValidId(profileId) && isVerifiedUser();
+      allow list: if isVerifiedUser() && resource.data.isProtected == true;
+      allow create: if isValidId(profileId) && isValidProtectedDeveloperProfile(incoming()) && isSuperDeveloperAdmin() &&
+        incoming().id == profileId &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(profileId) && isValidProtectedDeveloperProfile(incoming()) && isSuperDeveloperAdmin() &&
+        incoming().id == existing().id &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().isProtected == true &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'developerName', 'developerProfile', 'designation', 'institution',
+          'locality', 'district', 'unionTerritory', 'developerEmail', 'developerPhone',
+          'administratorName', 'administratorProfile', 'ownershipNotice',
+          'updatedByUid', 'updatedAt'
+        ]);
+      // Original App Developer & Ownership records can NEVER be deleted
       allow delete: if false;
     }
   }

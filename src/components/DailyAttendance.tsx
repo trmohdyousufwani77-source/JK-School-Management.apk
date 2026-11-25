@@ -125,6 +125,13 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
   const [selectedClass, setSelectedClass] = useState<string>('5');
   const [selectedSection, setSelectedSection] = useState<string>('A');
 
+  // Primary Daily Attendance module tabs: Daily Register vs Chronological QR-Scanned Attendance Log
+  const [attendanceMainTab, setAttendanceMainTab] = useState<'register' | 'qr-log'>('register');
+  const [qrLogSortOrder, setQrLogSortOrder] = useState<'desc' | 'asc'>('desc');
+  const [qrLogSearch, setQrLogSearch] = useState<string>('');
+  const [qrLogClassFilter, setQrLogClassFilter] = useState<string>('all');
+  const [qrLogDateFilter, setQrLogDateFilter] = useState<string>('');
+
   // Audit modal state for corrections
   const [showAuditTrailModal, setShowAuditTrailModal] = useState<boolean>(false);
   const [correctionReason, setCorrectionReason] = useState<string>('');
@@ -435,6 +442,11 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
   } | null>(null);
   const [isLocating, setIsLocating] = useState<boolean>(false);
   const [gpsError, setGpsError] = useState<string | null>(null);
+  const [geoWarningToast, setGeoWarningToast] = useState<{
+    message: string;
+    reason?: string;
+  } | null>(null);
+  const geoWarningTimeoutRef = useRef<number | null>(null);
   const [studentGpsMap, setStudentGpsMap] = useState<{
     [studentId: string]: {
       latitude?: number;
@@ -445,6 +457,30 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
     };
   }>({});
   const [selectedLocationForMap, setSelectedLocationForMap] = useState<CheckInLocationData | null>(null);
+
+  const triggerGeoWarningToast = (reason?: string) => {
+    if (geoWarningTimeoutRef.current !== null) {
+      window.clearTimeout(geoWarningTimeoutRef.current);
+      geoWarningTimeoutRef.current = null;
+    }
+    setGeoWarningToast({
+      message: 'Geolocation unavailable — geofencing audit is incomplete for this QR scan.',
+      reason,
+    });
+    geoWarningTimeoutRef.current = window.setTimeout(() => {
+      setGeoWarningToast(null);
+      geoWarningTimeoutRef.current = null;
+    }, 6500);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (geoWarningTimeoutRef.current !== null) {
+        window.clearTimeout(geoWarningTimeoutRef.current);
+        geoWarningTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   // Web NFC Touchless Attendance State
   const [showNfcModal, setShowNfcModal] = useState<boolean>(false);
@@ -537,7 +573,7 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
     }
   };
 
-  // Subtle dual-chime audio + haptic feedback for rapid QR/NFC check-ins
+  // Subtle bell-like 'ping' audio + haptic feedback for rapid touchless QR/NFC check-ins
   const playSuccessBeep = () => {
     if (!scanFeedbackEnabled) return;
     triggerHapticFeedback('success');
@@ -545,31 +581,40 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (!AudioCtx) return;
       const ctx = new AudioCtx();
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
       const now = ctx.currentTime;
       const osc1 = ctx.createOscillator();
       const osc2 = ctx.createOscillator();
-      const gain = ctx.createGain();
+      const gain1 = ctx.createGain();
+      const gain2 = ctx.createGain();
 
       osc1.type = 'sine';
-      osc1.frequency.setValueAtTime(880, now); // A5
+      osc1.frequency.setValueAtTime(1046.5, now); // C6 crisp ping
       osc2.type = 'sine';
-      osc2.frequency.setValueAtTime(1174.66, now + 0.07); // D6 subtle confirmation chime
+      osc2.frequency.setValueAtTime(1567.98, now); // G6 subtle harmonic shimmer
 
-      gain.gain.setValueAtTime(0.001, now);
-      gain.gain.linearRampToValueAtTime(0.09, now + 0.015);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.21);
+      gain1.gain.setValueAtTime(0.001, now);
+      gain1.gain.linearRampToValueAtTime(0.085, now + 0.012);
+      gain1.gain.exponentialRampToValueAtTime(0.0008, now + 0.24);
 
-      osc1.connect(gain);
-      osc2.connect(gain);
-      gain.connect(ctx.destination);
+      gain2.gain.setValueAtTime(0.001, now);
+      gain2.gain.linearRampToValueAtTime(0.032, now + 0.015);
+      gain2.gain.exponentialRampToValueAtTime(0.0008, now + 0.18);
+
+      osc1.connect(gain1);
+      osc2.connect(gain2);
+      gain1.connect(ctx.destination);
+      gain2.connect(ctx.destination);
 
       osc1.start(now);
-      osc1.stop(now + 0.075);
-      osc2.start(now + 0.07);
-      osc2.stop(now + 0.21);
+      osc1.stop(now + 0.25);
+      osc2.start(now);
+      osc2.stop(now + 0.2);
       window.setTimeout(() => {
         ctx.close().catch(() => {});
-      }, 280);
+      }, 320);
     } catch {
       // AudioContext policy
     }
@@ -618,10 +663,14 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
       accuracy: number;
       distanceFromSchool: number;
       isWithinBoundary: boolean;
-    }) => void
+    }) => void,
+    onError?: (reason: string) => void
   ) => {
-    if (!navigator.geolocation) {
-      setGpsError('Geolocation is not supported by your browser.');
+    if (typeof navigator === 'undefined' || !navigator.geolocation) {
+      const reason = 'Device geolocation is disabled or unsupported by this browser.';
+      setCurrentGps(null);
+      setGpsError(reason);
+      onError?.(reason);
       return;
     }
 
@@ -650,28 +699,23 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
         };
 
         setCurrentGps(gpsData);
+        setGpsError(null);
         setIsLocating(false);
         if (onSuccess) onSuccess(gpsData);
       },
       (err) => {
         setIsLocating(false);
-        setGpsError(err.message);
-        // Fallback realistic on-campus coordinates (24m from school center) for demo/test environments
-        const schoolLat = school.latitude ?? 28.3670;
-        const schoolLng = school.longitude ?? 79.4304;
-        const fallbackLat = schoolLat + 0.00015;
-        const fallbackLng = schoolLng + 0.00012;
-        const dist = calculateHaversineDistanceMeters(fallbackLat, fallbackLng, schoolLat, schoolLng);
-        const fallbackGps = {
-          latitude: fallbackLat,
-          longitude: fallbackLng,
-          accuracy: 8,
-          distanceFromSchool: dist,
-          isWithinBoundary: true,
-          timestamp: new Date().toISOString(),
-        };
-        setCurrentGps(fallbackGps);
-        if (onSuccess) onSuccess(fallbackGps);
+        const reason =
+          err.code === 1
+            ? 'Location permission denied'
+            : err.code === 2
+            ? 'Device GPS signal unavailable'
+            : err.code === 3
+            ? 'Location request timed out'
+            : err.message || 'Unable to resolve device location';
+        setCurrentGps(null);
+        setGpsError(reason);
+        onError?.(reason);
       },
       { enableHighAccuracy: true, timeout: 8000, maximumAge: 30000 }
     );
@@ -1910,7 +1954,7 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
   };
 
   // Instant mark present via QR Scanner with GPS verification, duplicate suppression & history logging
-  const handleScanStudent = (student: Student) => {
+  const handleScanStudent = (student: Student, options?: { skipAudio?: boolean }) => {
     const now = Date.now();
     const lastScan = recentScannedIdsRef.current.get(student.id);
 
@@ -1932,8 +1976,12 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
     recentScannedIdsRef.current.set(student.id, now);
     setActiveSessionScanCount((prev) => prev + 1);
 
-    // Audio, Haptic & Visual Reticle Flash Feedback
-    playSuccessBeep();
+    // Audio ('ping'), Haptic & Visual Reticle Flash Feedback
+    if (options?.skipAudio) {
+      triggerHapticFeedback('success');
+    } else {
+      playSuccessBeep();
+    }
     setFlashGreenOverlay(true);
     setTimeout(() => setFlashGreenOverlay(false), 380);
 
@@ -1960,6 +2008,28 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
     }));
     setIsSaved(false);
 
+    // Check offline connectivity status & persist check-in immediately into attendanceRecords
+    const isRemoteOffline = isOffline || (typeof navigator !== 'undefined' && !navigator.onLine);
+    const markedAtIso = new Date().toISOString();
+    const baseRecord: AttendanceRecord = {
+      id: `att-${student.id}-${selectedDate}`,
+      date: selectedDate,
+      studentId: student.id,
+      classNumber: student.classNumber || selectedClass,
+      section: student.section || selectedSection,
+      status: 'Present',
+      academicSession: school.academicSession,
+      markedByUserId: currentUser.id,
+      markedAt: markedAtIso,
+      isOfflineSynced: !isRemoteOffline,
+      remarks: isRemoteOffline ? 'QR Scanned (Remote / Offline Queue Cached)' : 'QR Scanned Check-in',
+      latitude: currentGps?.latitude,
+      longitude: currentGps?.longitude,
+      distanceFromSchoolMeters: currentGps?.distanceFromSchool,
+      isLocationVerified: currentGps?.isWithinBoundary,
+      locationAccuracyMeters: currentGps?.accuracy,
+    };
+
     if (currentGps) {
       setStudentGpsMap((prev) => ({
         ...prev,
@@ -1972,41 +2042,40 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
         },
       }));
     } else {
-      requestBrowserGeolocation((loc) => {
-        setStudentGpsMap((prev) => ({
-          ...prev,
-          [student.id]: {
-            latitude: loc.latitude,
-            longitude: loc.longitude,
-            distanceMeters: loc.distanceFromSchool,
-            isLocationVerified: loc.isWithinBoundary,
-            accuracyMeters: loc.accuracy,
-          },
-        }));
-      });
+      requestBrowserGeolocation(
+        (loc) => {
+          setStudentGpsMap((prev) => ({
+            ...prev,
+            [student.id]: {
+              latitude: loc.latitude,
+              longitude: loc.longitude,
+              distanceMeters: loc.distanceFromSchool,
+              isLocationVerified: loc.isWithinBoundary,
+              accuracyMeters: loc.accuracy,
+            },
+          }));
+          // Backfill real geolocation coordinates onto the saved QR-scanned record once GPS locks
+          onSaveAttendance(
+            [
+              {
+                ...baseRecord,
+                latitude: loc.latitude,
+                longitude: loc.longitude,
+                distanceFromSchoolMeters: loc.distanceFromSchool,
+                isLocationVerified: loc.isWithinBoundary,
+                locationAccuracyMeters: loc.accuracy,
+              },
+            ],
+            []
+          );
+        },
+        (reason) => {
+          triggerGeoWarningToast(reason);
+        }
+      );
     }
 
-    // Check offline connectivity status & persist check-in immediately into attendanceRecords
-    const isRemoteOffline = isOffline || (typeof navigator !== 'undefined' && !navigator.onLine);
-    const scannedRecord: AttendanceRecord = {
-      id: `att-${student.id}-${selectedDate}`,
-      date: selectedDate,
-      studentId: student.id,
-      classNumber: student.classNumber || selectedClass,
-      section: student.section || selectedSection,
-      status: 'Present',
-      academicSession: school.academicSession,
-      markedByUserId: currentUser.id,
-      markedAt: new Date().toISOString(),
-      isOfflineSynced: !isRemoteOffline,
-      remarks: isRemoteOffline ? 'QR Scanned (Remote / Offline Queue Cached)' : 'QR Scanned Check-in',
-      latitude: currentGps?.latitude,
-      longitude: currentGps?.longitude,
-      distanceFromSchoolMeters: currentGps?.distanceFromSchool,
-      isLocationVerified: currentGps?.isWithinBoundary,
-      locationAccuracyMeters: currentGps?.accuracy,
-    };
-
+    const scannedRecord = baseRecord;
     onSaveAttendance([scannedRecord], []);
 
     if (isRemoteOffline) {
@@ -2663,6 +2732,221 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
     }
   }, [studentsBelowThreshold, attendanceThresholdPct, adminThresholdAlertsEnabled]);
 
+  // Chronological log of all QR-scanned attendances (student name, scan timestamp, geolocation coordinates)
+  const qrScannedChronologicalLog = useMemo(() => {
+    const studentById = new Map<string, Student>();
+    students.forEach((s) => studentById.set(s.id, s));
+
+    type QrLogItem = {
+      id: string;
+      studentId: string;
+      studentName: string;
+      admissionNumber: string;
+      rollNumber: number;
+      classNumber: string;
+      section: string;
+      date: string;
+      timestampIso: string;
+      timestampMs: number;
+      formattedTime: string;
+      status: AttendanceStatus;
+      latitude?: number;
+      longitude?: number;
+      accuracyMeters?: number;
+      distanceMeters?: number;
+      isLocationVerified?: boolean;
+      isOfflineSynced: boolean;
+      remarks: string;
+    };
+
+    const dedupMap = new Map<string, QrLogItem>();
+
+    // 1. Collect persisted QR-scanned attendance records
+    attendanceRecords.forEach((rec) => {
+      const rem = (rec.remarks || '').toLowerCase();
+      if (!rem.includes('qr')) return;
+      const stu = studentById.get(rec.studentId);
+      const gpsFallback = studentGpsMap[rec.studentId];
+      const lat = rec.latitude ?? gpsFallback?.latitude;
+      const lng = rec.longitude ?? gpsFallback?.longitude;
+      const iso = rec.markedAt || `${rec.date}T09:00:00.000Z`;
+      const parsedDt = new Date(iso);
+      const ms = Number.isNaN(parsedDt.getTime()) ? Date.parse(rec.date) || 0 : parsedDt.getTime();
+      const formattedTime = !Number.isNaN(parsedDt.getTime())
+        ? parsedDt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
+        : '—';
+
+      dedupMap.set(rec.id, {
+        id: rec.id,
+        studentId: rec.studentId,
+        studentName: stu?.fullName || `Student ${rec.studentId}`,
+        admissionNumber: stu?.admissionNumber || '—',
+        rollNumber: stu?.rollNumber ?? 0,
+        classNumber: rec.classNumber || stu?.classNumber || '—',
+        section: rec.section || stu?.section || 'A',
+        date: rec.date,
+        timestampIso: iso,
+        timestampMs: ms,
+        formattedTime,
+        status: rec.status,
+        latitude: lat,
+        longitude: lng,
+        accuracyMeters: rec.locationAccuracyMeters ?? gpsFallback?.accuracyMeters,
+        distanceMeters: rec.distanceFromSchoolMeters ?? gpsFallback?.distanceMeters,
+        isLocationVerified: rec.isLocationVerified ?? gpsFallback?.isLocationVerified,
+        isOfflineSynced: rec.isOfflineSynced !== false,
+        remarks: rec.remarks || 'QR Scanned Check-in',
+      });
+    });
+
+    // 2. Merge live session QR scan history if any entries haven't appeared yet
+    scanHistoryLog.forEach((entry) => {
+      if (entry.status === 'Failed') return;
+      const key = `att-${entry.studentId}-${selectedDate}`;
+      if (dedupMap.has(key)) return;
+      const stu = studentById.get(entry.studentId);
+      const gps = studentGpsMap[entry.studentId] || (currentGps
+        ? {
+            latitude: currentGps.latitude,
+            longitude: currentGps.longitude,
+            accuracyMeters: currentGps.accuracy,
+            distanceMeters: currentGps.distanceFromSchool,
+            isLocationVerified: currentGps.isWithinBoundary,
+          }
+        : undefined);
+      const numericIdMatch = entry.id.match(/\d{13}/);
+      const parsedMs = numericIdMatch ? Number(numericIdMatch[0]) : Date.now();
+      const iso = new Date(parsedMs).toISOString();
+      const normalizedStatus: AttendanceStatus = 'Present';
+      dedupMap.set(entry.id, {
+        id: entry.id,
+        studentId: entry.studentId,
+        studentName: entry.studentName,
+        admissionNumber: stu?.admissionNumber || '—',
+        rollNumber: entry.rollNumber,
+        classNumber: entry.classNumber,
+        section: entry.section,
+        date: selectedDate,
+        timestampIso: iso,
+        timestampMs: parsedMs,
+        formattedTime: entry.timestamp,
+        status: normalizedStatus,
+        latitude: gps?.latitude,
+        longitude: gps?.longitude,
+        accuracyMeters: gps?.accuracyMeters,
+        distanceMeters: gps?.distanceMeters,
+        isLocationVerified: gps?.isLocationVerified,
+        isOfflineSynced: !isOffline,
+        remarks: entry.status === 'Duplicate' ? 'QR Scanned Check-in (Re-verified)' : 'QR Scanned Check-in',
+      });
+    });
+
+    const queryText = qrLogSearch.trim().toLowerCase();
+    return Array.from(dedupMap.values())
+      .filter((item) => {
+        if (qrLogClassFilter !== 'all' && item.classNumber !== qrLogClassFilter) return false;
+        if (qrLogDateFilter && item.date !== qrLogDateFilter) return false;
+        if (queryText) {
+          const hay = `${item.studentName} ${item.admissionNumber} ${item.classNumber}-${item.section} ${item.remarks}`.toLowerCase();
+          if (!hay.includes(queryText)) return false;
+        }
+        return true;
+      })
+      .sort((a, b) =>
+        qrLogSortOrder === 'desc' ? b.timestampMs - a.timestampMs : a.timestampMs - b.timestampMs
+      );
+  }, [
+    attendanceRecords,
+    currentGps,
+    isOffline,
+    qrLogClassFilter,
+    qrLogDateFilter,
+    qrLogSearch,
+    qrLogSortOrder,
+    scanHistoryLog,
+    selectedDate,
+    studentGpsMap,
+    students,
+  ]);
+
+  // Export current filtered chronological QR-scanned attendance audit log to CSV
+  const handleDownloadQrLogCsv = () => {
+    if (qrScannedChronologicalLog.length === 0) return;
+
+    const escapeCsvText = (val: string | number | undefined | null): string => {
+      const raw = String(val ?? '');
+      const neutralized = /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
+      return `"${neutralized.replace(/"/g, '""')}"`;
+    };
+
+    const escapeCsvNum = (val: number | undefined | null, decimals?: number): string => {
+      if (val === undefined || val === null || Number.isNaN(val)) return '""';
+      const formatted = decimals !== undefined ? val.toFixed(decimals) : String(val);
+      return `"${formatted}"`;
+    };
+
+    const headers = [
+      '#',
+      'Student Name',
+      'Admission Number',
+      'Class',
+      'Section',
+      'Roll Number',
+      'Date',
+      'Scan Timestamp',
+      'ISO Timestamp',
+      'Latitude',
+      'Longitude',
+      'GPS Accuracy (m)',
+      'Distance From Campus (m)',
+      'Geofence Verification',
+      'Attendance Status',
+      'Sync Status',
+      'Remarks',
+    ];
+
+    const rows = qrScannedChronologicalLog.map((entry, idx) => {
+      const hasCoords = entry.latitude !== undefined && entry.longitude !== undefined;
+      const geofenceLabel = !hasCoords
+        ? 'Unavailable (Audit Incomplete)'
+        : entry.isLocationVerified
+        ? 'Campus Verified'
+        : 'Outside Boundary';
+      return [
+        escapeCsvNum(idx + 1),
+        escapeCsvText(entry.studentName),
+        escapeCsvText(entry.admissionNumber),
+        escapeCsvText(entry.classNumber),
+        escapeCsvText(entry.section),
+        entry.rollNumber > 0 ? escapeCsvNum(entry.rollNumber) : '""',
+        escapeCsvText(entry.date),
+        escapeCsvText(entry.formattedTime),
+        escapeCsvText(entry.timestampIso),
+        escapeCsvNum(entry.latitude, 6),
+        escapeCsvNum(entry.longitude, 6),
+        entry.accuracyMeters !== undefined ? escapeCsvNum(Math.round(entry.accuracyMeters)) : '""',
+        entry.distanceMeters !== undefined ? escapeCsvNum(Math.round(entry.distanceMeters)) : '""',
+        escapeCsvText(geofenceLabel),
+        escapeCsvText(entry.status),
+        escapeCsvText(entry.isOfflineSynced ? 'Synced' : 'Offline Pending'),
+        escapeCsvText(entry.remarks),
+      ].join(',');
+    });
+
+    const csvContent = `\uFEFF${headers.join(',')}\n${rows.join('\n')}`;
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const datePart = qrLogDateFilter || selectedDate;
+    const classPart = qrLogClassFilter !== 'all' ? `_Class_${qrLogClassFilter}` : '';
+    link.href = url;
+    link.download = `QR_Attendance_Audit_Log_${datePart}${classPart}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="space-y-6">
       
@@ -2752,6 +3036,15 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
               <span>Offline Mode (Locally Queued)</span>
             </div>
           )}
+          <button
+            type="button"
+            onClick={handleTriggerScannerFromFab}
+            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-extrabold bg-slate-900 hover:bg-indigo-700 text-white shadow-sm border border-indigo-400/30 transition-all active:scale-95 whitespace-nowrap shrink-0"
+            title="Launch Touchless Student ID Card QR Code Scanner for instant attendance marking"
+          >
+            <QrCode className="w-4 h-4 text-amber-300" />
+            <span>{language === 'ur' ? 'کیو آر کوڈ اسکینر' : 'Touchless QR Scanner'}</span>
+          </button>
           <button
             type="button"
             onClick={() => {
@@ -2896,6 +3189,337 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
         </div>
       )}
 
+      {/* Module View Switcher Tabs: Daily Attendance Register vs Chronological QR Scan Log */}
+      <div
+        role="tablist"
+        aria-label="Daily Attendance Views"
+        className="bg-white p-1.5 rounded-2xl border border-slate-200/80 shadow-xs inline-flex flex-wrap items-center gap-1.5 no-print"
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={attendanceMainTab === 'register'}
+          onClick={() => setAttendanceMainTab('register')}
+          className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+            attendanceMainTab === 'register'
+              ? 'bg-indigo-600 text-white shadow-sm'
+              : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+          }`}
+        >
+          <CalendarCheck className="w-4 h-4" />
+          <span>{language === 'ur' ? 'روزانہ حاضری رجسٹر' : 'Daily Attendance Register'}</span>
+        </button>
+
+        <button
+          type="button"
+          role="tab"
+          aria-selected={attendanceMainTab === 'qr-log'}
+          onClick={() => setAttendanceMainTab('qr-log')}
+          className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+            attendanceMainTab === 'qr-log'
+              ? 'bg-slate-900 text-white shadow-sm'
+              : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+          }`}
+        >
+          <QrCode className="w-4 h-4 text-amber-400" />
+          <span>{language === 'ur' ? 'کیو آر اسکین حاضری لاگ' : 'QR-Scanned Attendance Log'}</span>
+          <span
+            className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-extrabold ${
+              attendanceMainTab === 'qr-log'
+                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/30'
+                : 'bg-slate-100 text-slate-700 border border-slate-200'
+            }`}
+          >
+            {qrScannedChronologicalLog.length}
+          </span>
+        </button>
+      </div>
+
+      {/* =================================================================== */}
+      {/* TAB 2: CHRONOLOGICAL QR-SCANNED ATTENDANCE LOG (WITH GEOLOCATION)   */}
+      {/* =================================================================== */}
+      {attendanceMainTab === 'qr-log' && (
+        <section
+          aria-label="Chronological QR-Scanned Attendance Log"
+          className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden"
+        >
+          {/* Header & Quick Actions */}
+          <div className="p-5 border-b border-slate-100 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-slate-900 text-amber-300 flex items-center justify-center shrink-0">
+                <QrCode className="w-5 h-5" />
+              </div>
+              <div>
+                <h2 className="text-base font-black text-slate-900">
+                  {language === 'ur'
+                    ? 'کیو آر اسکین شدہ حاضری کا زمانی ریکارڈ'
+                    : 'Chronological QR-Scanned Attendance Log'}
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Complete timestamped audit of all touchless QR code student check-ins with captured GPS geolocation coordinates.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                data-testid="download-qr-log-csv-btn"
+                onClick={handleDownloadQrLogCsv}
+                disabled={qrScannedChronologicalLog.length === 0}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-extrabold bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white shadow-xs transition-colors"
+                title={
+                  qrScannedChronologicalLog.length === 0
+                    ? 'No filtered QR attendance records available to export'
+                    : `Export ${qrScannedChronologicalLog.length} filtered QR audit log record(s) to CSV`
+                }
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>
+                  Download CSV
+                  {qrScannedChronologicalLog.length > 0 ? ` (${qrScannedChronologicalLog.length})` : ''}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => requestBrowserGeolocation()}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 transition-colors"
+                title="Refresh current device GPS coordinates for upcoming QR scans"
+              >
+                <MapPin className="w-3.5 h-3.5 text-emerald-600" />
+                <span>
+                  {currentGps
+                    ? `GPS Ready (${currentGps.latitude.toFixed(4)}, ${currentGps.longitude.toFixed(4)})`
+                    : 'Acquire GPS Fix'}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={handleTriggerScannerFromFab}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-extrabold bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs transition-colors"
+              >
+                <Camera className="w-3.5 h-3.5 text-amber-300" />
+                <span>Launch QR Scanner</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Summary Strip */}
+          <div className="px-5 py-3.5 bg-slate-50/70 border-b border-slate-100 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+            <div className="p-3 rounded-xl bg-white border border-slate-200/80">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Total QR Scans</span>
+              <p className="text-lg font-black text-slate-900 font-mono mt-0.5">{qrScannedChronologicalLog.length}</p>
+            </div>
+            <div className="p-3 rounded-xl bg-white border border-slate-200/80">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">With GPS Coordinates</span>
+              <p className="text-lg font-black text-emerald-700 font-mono mt-0.5">
+                {qrScannedChronologicalLog.filter((item) => item.latitude !== undefined && item.longitude !== undefined).length}
+              </p>
+            </div>
+            <div className="p-3 rounded-xl bg-white border border-slate-200/80">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Campus Verified</span>
+              <p className="text-lg font-black text-indigo-700 font-mono mt-0.5">
+                {qrScannedChronologicalLog.filter((item) => item.isLocationVerified).length}
+              </p>
+            </div>
+            <div className="p-3 rounded-xl bg-white border border-slate-200/80">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Latest Scan Time</span>
+              <p className="text-sm font-extrabold text-slate-800 font-mono mt-1 truncate">
+                {qrScannedChronologicalLog.length > 0
+                  ? `${qrScannedChronologicalLog[0].date} · ${qrScannedChronologicalLog[0].formattedTime}`
+                  : 'No scans yet'}
+              </p>
+            </div>
+          </div>
+
+          {/* Filter & Chronological Sort Controls */}
+          <div className="p-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[220px]">
+              <input
+                type="text"
+                value={qrLogSearch}
+                onChange={(e) => setQrLogSearch(e.target.value)}
+                placeholder="Search by student name or admission no..."
+                aria-label="Search QR-scanned attendance log"
+                className="px-3 py-2 rounded-xl border border-slate-300 bg-slate-50 text-slate-800 text-xs w-full sm:w-64 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+              <select
+                value={qrLogClassFilter}
+                onChange={(e) => setQrLogClassFilter(e.target.value)}
+                aria-label="Filter QR log by class"
+                className="px-3 py-2 rounded-xl border border-slate-300 bg-slate-50 text-slate-800 font-semibold text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                <option value="all">All Classes</option>
+                {school.classesOffered.map((cls) => (
+                  <option key={cls} value={cls}>
+                    Class {cls}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="date"
+                value={qrLogDateFilter}
+                onChange={(e) => setQrLogDateFilter(e.target.value)}
+                aria-label="Filter QR log by date"
+                className="px-3 py-2 rounded-xl border border-slate-300 bg-slate-50 text-slate-800 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+              {(qrLogSearch || qrLogClassFilter !== 'all' || qrLogDateFilter) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setQrLogSearch('');
+                    setQrLogClassFilter('all');
+                    setQrLogDateFilter('');
+                  }}
+                  className="px-2.5 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100"
+                >
+                  Clear Filters
+                </button>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setQrLogSortOrder((prev) => (prev === 'desc' ? 'asc' : 'desc'))}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs transition-colors"
+            >
+              <ArrowUpDown className="w-3.5 h-3.5 text-indigo-600" />
+              <span>{qrLogSortOrder === 'desc' ? 'Newest First' : 'Oldest First'}</span>
+            </button>
+          </div>
+
+          {/* Chronological Table */}
+          <div className="overflow-x-auto">
+            {qrScannedChronologicalLog.length === 0 ? (
+              <div className="p-10 text-center space-y-3">
+                <div className="w-12 h-12 rounded-2xl bg-slate-100 text-slate-400 flex items-center justify-center mx-auto">
+                  <QrCode className="w-6 h-6" />
+                </div>
+                <div>
+                  <p className="text-sm font-bold text-slate-800">No QR-Scanned Attendances Recorded Yet</p>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Scan any student&apos;s ID card QR code using the Touchless QR Scanner to populate this chronological log with timestamps and geolocation coordinates.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleTriggerScannerFromFab}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-xs transition-colors"
+                >
+                  <Camera className="w-4 h-4 text-amber-300" />
+                  <span>Start Scanning Student QR Codes</span>
+                </button>
+              </div>
+            ) : (
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                    <th className="py-3 px-4 w-12">#</th>
+                    <th className="py-3 px-4">Student Name</th>
+                    <th className="py-3 px-4">Scan Timestamp</th>
+                    <th className="py-3 px-4">Geolocation Coordinates</th>
+                    <th className="py-3 px-4">Status &amp; Sync</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {qrScannedChronologicalLog.map((entry, idx) => (
+                    <tr key={entry.id} className="hover:bg-slate-50/80 transition-colors">
+                      <td className="py-3 px-4 font-mono text-slate-400 font-semibold">
+                        {idx + 1}
+                      </td>
+                      <td className="py-3 px-4">
+                        <div className="font-bold text-slate-900">{entry.studentName}</div>
+                        <div className="text-[11px] text-slate-500 flex items-center gap-2 flex-wrap mt-0.5">
+                          <span className="font-mono text-indigo-700 font-semibold">{entry.admissionNumber}</span>
+                          <span>•</span>
+                          <span>Class {entry.classNumber}-{entry.section}</span>
+                          {entry.rollNumber > 0 && (
+                            <>
+                              <span>•</span>
+                              <span>Roll #{entry.rollNumber}</span>
+                            </>
+                          )}
+                        </div>
+                      </td>
+                      <td className="py-3 px-4">
+                        <div className="font-mono font-bold text-slate-900 flex items-center gap-1.5">
+                          <Clock className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                          <span>{entry.formattedTime}</span>
+                        </div>
+                        <div className="text-[11px] text-slate-500 font-mono mt-0.5">
+                          {entry.date}
+                        </div>
+                      </td>
+                      <td className="py-3 px-4">
+                        {entry.latitude !== undefined && entry.longitude !== undefined ? (
+                          <div className="space-y-1">
+                            <div className="font-mono font-bold text-slate-800 flex items-center gap-1.5">
+                              <MapPin className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                              <span>
+                                {entry.latitude.toFixed(6)}, {entry.longitude.toFixed(6)}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1.5 flex-wrap text-[10px]">
+                              {entry.isLocationVerified ? (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold">
+                                  <ShieldCheck className="w-3 h-3" />
+                                  Campus Verified
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 font-bold">
+                                  <Navigation className="w-3 h-3" />
+                                  Captured
+                                </span>
+                              )}
+                              {entry.distanceMeters !== undefined && (
+                                <span className="text-slate-500 font-mono">
+                                  {Math.round(entry.distanceMeters)}m from campus
+                                </span>
+                              )}
+                              {entry.accuracyMeters !== undefined && (
+                                <span className="text-slate-400 font-mono">
+                                  ±{Math.round(entry.accuracyMeters)}m
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 text-[11px] text-slate-400 italic">
+                            <MapPin className="w-3.5 h-3.5 text-slate-300" />
+                            <span>Coordinates unavailable (GPS not permitted)</span>
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                            {entry.status}
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                              entry.isOfflineSynced
+                                ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                                : 'bg-amber-50 text-amber-800 border-amber-200'
+                            }`}
+                          >
+                            {entry.isOfflineSynced ? 'Synced' : 'Queued Offline'}
+                          </span>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* =================================================================== */}
+      {/* TAB 1: DAILY ATTENDANCE REGISTER                                    */}
+      {/* =================================================================== */}
+      {attendanceMainTab === 'register' && (
+      <>
       {/* Control Bar: Date & Class Selector */}
       <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-sm flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3 text-xs">
@@ -3195,7 +3819,13 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
                   ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
                   : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
               }`}>
-                {currentGps?.isWithinBoundary ? '✓ Verified Within School Boundary' : '⚠ Outside School Boundary'}
+                {currentGps
+                  ? currentGps.isWithinBoundary
+                    ? '✓ Verified Within School Boundary'
+                    : '⚠ Outside School Boundary'
+                  : gpsError
+                  ? '⚠ Geolocation Unavailable'
+                  : '⏳ Locating Device...'}
               </span>
             </div>
             <p className="text-[11px] text-slate-400 truncate mt-0.5 flex items-center gap-1.5 flex-wrap">
@@ -3206,6 +3836,8 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
                   ? `Device Distance: ${currentGps.distanceFromSchool}m from campus center (${currentGps.latitude.toFixed(4)}°N, ${currentGps.longitude.toFixed(4)}°E)`
                   : isLocating
                   ? 'Requesting browser GPS permission...'
+                  : gpsError
+                  ? `${gpsError} (geofencing audit incomplete)`
                   : 'GPS Ready'}
               </span>
             </p>
@@ -4065,6 +4697,8 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
           </table>
         </div>
       </div>
+      </>
+      )}
 
       {/* Sync Status Pill & Floating Action Button (FAB) for Instant QR Camera Scanner */}
       <div
@@ -4550,7 +5184,10 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
                     onToggleAutoSync={handleToggleScannerAutoSync}
                     isOffline={isOffline}
                     onTriggerBackgroundSync={handleScannerBackgroundSync}
-                    onScanSuccess={(student) => handleScanStudent(student)}
+                    onScanSuccess={(student) => handleScanStudent(student, { skipAudio: true })}
+                    soundEnabled={scanFeedbackEnabled}
+                    onToggleSound={setScanFeedbackEnabled}
+                    autoClearMs={3000}
                     onScanFailure={(rawText, reason) => {
                       playErrorTone();
                       setScanFailureLogs((prev) => [
@@ -5828,6 +6465,65 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
           </div>
         );
       })()}
+
+      {/* Compact Floating Geolocation Warning Toast (Visible over QR Scanner Modal & Tabs) */}
+      {geoWarningToast && (
+        <div
+          role="status"
+          aria-live="polite"
+          data-testid="geo-audit-warning-toast"
+          className="fixed bottom-5 right-5 z-[120] max-w-sm w-[calc(100vw-2.5rem)] rounded-2xl bg-amber-950/95 border border-amber-500/60 text-amber-100 shadow-2xl p-3.5 backdrop-blur-md"
+        >
+          <div className="flex items-start gap-2.5">
+            <div className="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-400/40 flex items-center justify-center shrink-0 mt-0.5">
+              <AlertTriangle className="w-4 h-4 text-amber-300" />
+            </div>
+            <div className="min-w-0 flex-1 space-y-1">
+              <p className="text-xs font-extrabold text-amber-200 leading-snug">
+                Geofencing Audit Incomplete
+              </p>
+              <p className="text-[11px] text-amber-100/90 leading-relaxed">
+                {geoWarningToast.message}
+              </p>
+              {geoWarningToast.reason && (
+                <p className="text-[10px] font-mono text-amber-300/90 truncate">
+                  Reason: {geoWarningToast.reason}
+                </p>
+              )}
+              <div className="pt-1 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    requestBrowserGeolocation(
+                      () => setGeoWarningToast(null),
+                      (reason) => triggerGeoWarningToast(reason)
+                    );
+                  }}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-500/25 hover:bg-amber-500/40 border border-amber-400/40 text-[10px] font-bold text-amber-100 transition-colors"
+                >
+                  <MapPin className="w-3 h-3" />
+                  <span>Retry GPS</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setGeoWarningToast(null)}
+                  className="text-[10px] font-semibold text-amber-300/80 hover:text-white px-1.5 py-1"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setGeoWarningToast(null)}
+              aria-label="Close geolocation warning"
+              className="text-amber-300/70 hover:text-white p-0.5 shrink-0"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
 
     </div>
   );

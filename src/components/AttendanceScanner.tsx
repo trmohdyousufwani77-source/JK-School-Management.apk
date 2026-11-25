@@ -22,6 +22,9 @@ import {
   Download,
   Search,
   Trash2,
+  Upload,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
 import { AttendanceRecord, Student } from '../types';
 import { extractAdmissionOrIdFromQrText } from '../utils/calculations';
@@ -315,6 +318,61 @@ interface AttendanceScannerProps {
   onPromptSelectClass?: () => void;
   cameraFacing?: 'environment' | 'user';
   language?: 'en' | 'ur';
+  soundEnabled?: boolean;
+  onToggleSound?: (next: boolean) => void;
+  autoClearMs?: number;
+}
+
+/**
+ * Plays a subtle, crisp Web Audio API 'ping' tone for touchless QR check-in confirmation.
+ */
+export function playQrSuccessPing(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
+    const now = ctx.currentTime;
+
+    // Subtle bell-like ping: fundamental C6 (1046.5 Hz) + soft G6 (1568 Hz) overtone
+    const oscPrimary = ctx.createOscillator();
+    const oscHarmonic = ctx.createOscillator();
+    const gainPrimary = ctx.createGain();
+    const gainHarmonic = ctx.createGain();
+
+    oscPrimary.type = 'sine';
+    oscPrimary.frequency.setValueAtTime(1046.5, now);
+
+    oscHarmonic.type = 'sine';
+    oscHarmonic.frequency.setValueAtTime(1567.98, now);
+
+    gainPrimary.gain.setValueAtTime(0.001, now);
+    gainPrimary.gain.linearRampToValueAtTime(0.085, now + 0.012);
+    gainPrimary.gain.exponentialRampToValueAtTime(0.0008, now + 0.24);
+
+    gainHarmonic.gain.setValueAtTime(0.001, now);
+    gainHarmonic.gain.linearRampToValueAtTime(0.032, now + 0.015);
+    gainHarmonic.gain.exponentialRampToValueAtTime(0.0008, now + 0.18);
+
+    oscPrimary.connect(gainPrimary);
+    oscHarmonic.connect(gainHarmonic);
+    gainPrimary.connect(ctx.destination);
+    gainHarmonic.connect(ctx.destination);
+
+    oscPrimary.start(now);
+    oscPrimary.stop(now + 0.25);
+    oscHarmonic.start(now);
+    oscHarmonic.stop(now + 0.2);
+
+    window.setTimeout(() => {
+      ctx.close().catch(() => {});
+    }, 320);
+  } catch {
+    // Ignore restricted audio environments
+  }
 }
 
 export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
@@ -326,7 +384,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
   selectedSection = '',
   draftStatus = EMPTY_DRAFT_STATUS,
   continuousScanning: controlledContinuous,
-  defaultContinuousScanning = false,
+  defaultContinuousScanning = true,
   onToggleContinuousScanning,
   autoSync: controlledAutoSync,
   defaultAutoSync = false,
@@ -338,6 +396,9 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
   onPromptSelectClass,
   cameraFacing = 'environment',
   language = 'en',
+  soundEnabled: controlledSoundEnabled,
+  onToggleSound,
+  autoClearMs = 3000,
 }) => {
   const reactId = useId().replace(/:/g, '');
   const scannerRegionId = `html5qr-reader-${reactId}`;
@@ -349,6 +410,10 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
   const [internalContinuous, setInternalContinuous] = useState<boolean>(defaultContinuousScanning);
   const continuousScanning =
     controlledContinuous !== undefined ? controlledContinuous : internalContinuous;
+
+  const [internalSoundEnabled, setInternalSoundEnabled] = useState<boolean>(true);
+  const isSoundEnabled =
+    controlledSoundEnabled !== undefined ? controlledSoundEnabled : internalSoundEnabled;
 
   const [internalAutoSync, setInternalAutoSync] = useState<boolean>(defaultAutoSync);
   const autoSyncEnabled =
@@ -400,11 +465,18 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
   const [scanLogDateFrom, setScanLogDateFrom] = useState<string>('');
   const [scanLogDateTo, setScanLogDateTo] = useState<string>('');
   const [eventLog, setEventLog] = useState<ScannerEventLog[]>([]);
+  const [autoClearRemainingMs, setAutoClearRemainingMs] = useState<number | null>(null);
+  const [isSuccessFlashActive, setIsSuccessFlashActive] = useState<boolean>(false);
 
   const qrInstanceRef = useRef<Html5Qrcode | null>(null);
   const recentScanMapRef = useRef<Map<string, number>>(new Map());
   const continuousRef = useRef<boolean>(continuousScanning);
+  const soundEnabledRef = useRef<boolean>(isSoundEnabled);
   const autoSyncRef = useRef<boolean>(autoSyncEnabled);
+  const autoClearTimeoutRef = useRef<number | null>(null);
+  const autoClearIntervalRef = useRef<number | null>(null);
+  const successFlashTimeoutRef = useRef<number | null>(null);
+  const startScannerRef = useRef<((explicitCameraId?: string) => Promise<void>) | null>(null);
   const isSyncingRef = useRef<boolean>(false);
   const studentsRef = useRef<Student[]>(students);
   const classRef = useRef<{ cls: string; sec: string }>({ cls: selectedClass, sec: selectedSection });
@@ -413,6 +485,10 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
   useEffect(() => {
     continuousRef.current = continuousScanning;
   }, [continuousScanning]);
+
+  useEffect(() => {
+    soundEnabledRef.current = isSoundEnabled;
+  }, [isSoundEnabled]);
 
   useEffect(() => {
     autoSyncRef.current = autoSyncEnabled;
@@ -484,14 +560,83 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     };
   }, [attendanceRecords, students]);
 
-  // Auto-dismiss brief continuous scan toast overlay after 2.2s
+  const clearAutoClearTimers = useCallback(() => {
+    if (autoClearTimeoutRef.current !== null) {
+      window.clearTimeout(autoClearTimeoutRef.current);
+      autoClearTimeoutRef.current = null;
+    }
+    if (autoClearIntervalRef.current !== null) {
+      window.clearInterval(autoClearIntervalRef.current);
+      autoClearIntervalRef.current = null;
+    }
+  }, []);
+
+  // Auto-clear scanner state 3 seconds after a successful QR read so camera is ready for next student
+  const scheduleAutoClear = useCallback(
+    (resumeCameraOnClear: boolean) => {
+      clearAutoClearTimers();
+      const duration = Math.max(500, autoClearMs);
+      const startedAt = Date.now();
+      setAutoClearRemainingMs(duration);
+
+      autoClearIntervalRef.current = window.setInterval(() => {
+        const elapsed = Date.now() - startedAt;
+        const left = Math.max(0, duration - elapsed);
+        setAutoClearRemainingMs(left);
+        if (left <= 0 && autoClearIntervalRef.current !== null) {
+          window.clearInterval(autoClearIntervalRef.current);
+          autoClearIntervalRef.current = null;
+        }
+      }, 100);
+
+      autoClearTimeoutRef.current = window.setTimeout(() => {
+        clearAutoClearTimers();
+        setFeedbackBanner(null);
+        setContinuousToast(null);
+        setAutoClearRemainingMs(null);
+        setManualInput('');
+        if (resumeCameraOnClear) {
+          setIsPausedSingleShot(false);
+          if (startScannerRef.current) {
+            void startScannerRef.current();
+          }
+        }
+      }, duration);
+    },
+    [autoClearMs, clearAutoClearTimers]
+  );
+
+  const triggerSuccessVisualFlash = useCallback(() => {
+    if (successFlashTimeoutRef.current !== null) {
+      window.clearTimeout(successFlashTimeoutRef.current);
+      successFlashTimeoutRef.current = null;
+    }
+    setIsSuccessFlashActive(true);
+    successFlashTimeoutRef.current = window.setTimeout(() => {
+      setIsSuccessFlashActive(false);
+      successFlashTimeoutRef.current = null;
+    }, 900);
+  }, []);
+
   useEffect(() => {
-    if (!continuousToast) return;
-    const timer = window.setTimeout(() => {
-      setContinuousToast(null);
-    }, 2200);
-    return () => window.clearTimeout(timer);
-  }, [continuousToast]);
+    return () => {
+      clearAutoClearTimers();
+      if (successFlashTimeoutRef.current !== null) {
+        window.clearTimeout(successFlashTimeoutRef.current);
+        successFlashTimeoutRef.current = null;
+      }
+    };
+  }, [clearAutoClearTimers]);
+
+  const handleToggleSound = useCallback(
+    (next: boolean) => {
+      if (controlledSoundEnabled === undefined) {
+        setInternalSoundEnabled(next);
+      }
+      onToggleSound?.(next);
+    },
+    [controlledSoundEnabled, onToggleSound]
+  );
 
   const handleToggleContinuous = useCallback(
     (next: boolean) => {
@@ -759,6 +904,15 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
 
       if (result.ok && result.student) {
         const matched = result.student;
+
+        // Visual green border flash on scanner overlay to complement auditory feedback
+        triggerSuccessVisualFlash();
+
+        // Play subtle auditory 'ping' feedback for immediate touchless confidence
+        if (soundEnabledRef.current) {
+          playQrSuccessPing();
+        }
+
         const scanTime = new Date().toLocaleTimeString([], {
           hour: '2-digit',
           minute: '2-digit',
@@ -834,13 +988,16 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
           setIsPausedSingleShot(true);
           void stopCameraSafely();
         } else {
-          // Continuous Scanning mode: keep camera active & show brief viewfinder success toast/overlay
+          // Continuous Scanning mode: keep camera active & show viewfinder success overlay
           setContinuousToast({
             id: `toast-${Date.now()}-${matched.id}`,
             studentName: matched.fullName,
-            detail: `Class ${matched.classNumber}-${matched.section} · Roll #${matched.rollNumber} · Ready for next scan`,
+            detail: `Class ${matched.classNumber}-${matched.section} · Roll #${matched.rollNumber} · Ready for next student`,
           });
         }
+
+        // Auto-clear after 3 seconds so camera & viewfinder are ready for the next student automatically
+        scheduleAutoClear(result.shouldPauseCamera);
       } else if (result.duplicate && result.student) {
         const dupTime = new Date().toLocaleTimeString([], {
           hour: '2-digit',
@@ -915,7 +1072,15 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
         onScanFailure?.(decodedText, result.reason || 'Unrecognized QR');
       }
     },
-    [appendEvent, isOffline, onScanFailure, onScanSuccess, stopCameraSafely]
+    [
+      appendEvent,
+      isOffline,
+      onScanFailure,
+      onScanSuccess,
+      scheduleAutoClear,
+      stopCameraSafely,
+      triggerSuccessVisualFlash,
+    ]
   );
 
   const startScanner = useCallback(
@@ -986,6 +1151,10 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
   );
 
   useEffect(() => {
+    startScannerRef.current = startScanner;
+  }, [startScanner]);
+
+  useEffect(() => {
     void startScanner();
     return () => {
       void stopCameraSafely();
@@ -993,6 +1162,47 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     // Run on mount / cameraFacing change only
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameraFacing]);
+
+  const qrFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [isDecodingFile, setIsDecodingFile] = useState<boolean>(false);
+
+  const handleScanQrImageFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setIsDecodingFile(true);
+    try {
+      await stopCameraSafely();
+      const tempId = `${scannerRegionId}-file`;
+      let tempEl = document.getElementById(tempId);
+      if (!tempEl) {
+        tempEl = document.createElement('div');
+        tempEl.id = tempId;
+        tempEl.style.display = 'none';
+        document.body.appendChild(tempEl);
+      }
+      const fileScanner = new Html5Qrcode(tempId, { verbose: false });
+      try {
+        const decodedText = await fileScanner.scanFile(file, false);
+        handleDecodedPayload(decodedText, 'QR Camera');
+      } finally {
+        try {
+          fileScanner.clear();
+        } catch {
+          // ignore
+        }
+        tempEl.remove();
+      }
+    } catch {
+      setFeedbackBanner({
+        type: 'error',
+        title: 'No QR Code Detected in Image',
+        detail: 'Please upload a clear photo or downloaded JPEG/PNG of the student ID card QR code.',
+      });
+    } finally {
+      setIsDecodingFile(false);
+    }
+  };
 
   const handleManualSubmit = () => {
     const trimmed = manualInput.trim();
@@ -1167,6 +1377,27 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
                 {autoSyncEnabled ? 'ON' : 'OFF'}
               </span>
             </div>
+
+            {/* Subtle Ping Sound Feedback Toggle */}
+            <button
+              type="button"
+              onClick={() => {
+                const next = !isSoundEnabled;
+                soundEnabledRef.current = next;
+                handleToggleSound(next);
+                if (next) playQrSuccessPing();
+              }}
+              aria-label={isSoundEnabled ? 'Mute QR scan ping sound' : 'Unmute QR scan ping sound'}
+              title={isSoundEnabled ? 'Ping sound active on scan (click to mute)' : 'Ping sound muted (click to enable)'}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl border text-[11px] font-bold transition-colors ${
+                isSoundEnabled
+                  ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25'
+                  : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              {isSoundEnabled ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
+              <span>{isSoundEnabled ? 'Ping Sound ON' : 'Muted'}</span>
+            </button>
           </div>
         </div>
 
@@ -1194,22 +1425,27 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
             </span>
           </div>
 
-          {pendingSyncScans.length > 0 && isNetworkAvailable && syncState !== 'syncing' && (
-            <button
-              type="button"
-              onClick={() => void executeBackgroundSync(pendingSyncScans)}
-              className="px-2.5 py-1 rounded-lg bg-indigo-600/25 hover:bg-indigo-600/40 text-indigo-200 font-semibold transition-colors whitespace-nowrap shrink-0"
-            >
-              Sync {pendingSyncScans.length} Now
-            </button>
-          )}
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-mono text-emerald-300/90 bg-emerald-500/10 border border-emerald-500/25 px-2 py-0.5 rounded-md">
+              Auto-clear: {(autoClearMs / 1000).toFixed(0)}s
+            </span>
+            {pendingSyncScans.length > 0 && isNetworkAvailable && syncState !== 'syncing' && (
+              <button
+                type="button"
+                onClick={() => void executeBackgroundSync(pendingSyncScans)}
+                className="px-2.5 py-1 rounded-lg bg-indigo-600/25 hover:bg-indigo-600/40 text-indigo-200 font-semibold transition-colors whitespace-nowrap shrink-0"
+              >
+                Sync {pendingSyncScans.length} Now
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
-      {/* Feedback Banner (Success / Duplicate / Failure) */}
+      {/* Feedback Banner (Success / Duplicate / Failure) with 3-second Auto-Clear Countdown */}
       {feedbackBanner && (
         <div
-          className={`p-3 rounded-2xl border text-xs flex items-center justify-between gap-3 ${
+          className={`p-3 rounded-2xl border text-xs space-y-2 ${
             feedbackBanner.type === 'success'
               ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-200'
               : feedbackBanner.type === 'duplicate'
@@ -1217,36 +1453,91 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
               : 'bg-rose-500/15 border-rose-500/40 text-rose-200'
           }`}
         >
-          <div className="flex items-center gap-2.5 min-w-0">
-            {feedbackBanner.type === 'success' ? (
-              <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
-            ) : feedbackBanner.type === 'duplicate' ? (
-              <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0" />
-            ) : (
-              <ShieldAlert className="w-5 h-5 text-rose-400 shrink-0" />
-            )}
-            <div className="min-w-0">
-              <p className="font-extrabold truncate">{feedbackBanner.title}</p>
-              <p className="text-[11px] opacity-85 truncate">{feedbackBanner.detail}</p>
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 min-w-0">
+              {feedbackBanner.type === 'success' ? (
+                <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+              ) : feedbackBanner.type === 'duplicate' ? (
+                <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0" />
+              ) : (
+                <ShieldAlert className="w-5 h-5 text-rose-400 shrink-0" />
+              )}
+              <div className="min-w-0">
+                <p className="font-extrabold truncate">{feedbackBanner.title}</p>
+                <p className="text-[11px] opacity-85 truncate">{feedbackBanner.detail}</p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              {feedbackBanner.type === 'success' && autoClearRemainingMs !== null && (
+                <span
+                  data-testid="auto-clear-countdown"
+                  className="px-2 py-1 rounded-lg bg-emerald-950/80 border border-emerald-400/40 text-emerald-200 font-mono text-[10px] font-bold"
+                >
+                  Ready in {Math.max(0.1, autoClearRemainingMs / 1000).toFixed(1)}s
+                </span>
+              )}
+              {isPausedSingleShot && !continuousScanning && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearAutoClearTimers();
+                    setAutoClearRemainingMs(null);
+                    setFeedbackBanner(null);
+                    void startScanner();
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shrink-0 transition-colors"
+                >
+                  <Play className="w-3.5 h-3.5" />
+                  <span>Scan Next</span>
+                </button>
+              )}
             </div>
           </div>
 
-          {isPausedSingleShot && !continuousScanning && (
-            <button
-              type="button"
-              onClick={() => void startScanner()}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shrink-0 transition-colors"
-            >
-              <Play className="w-3.5 h-3.5" />
-              <span>Scan Next</span>
-            </button>
+          {feedbackBanner.type === 'success' && autoClearRemainingMs !== null && (
+            <div className="w-full h-1 rounded-full bg-emerald-950/70 overflow-hidden">
+              <div
+                className="h-full bg-emerald-400 transition-all duration-100 ease-linear"
+                style={{ width: `${Math.max(0, Math.min(100, (autoClearRemainingMs / autoClearMs) * 100))}%` }}
+              />
+            </div>
           )}
         </div>
       )}
 
       {/* html5-qrcode Camera Viewfinder Box */}
-      <div className="relative rounded-2xl bg-black border border-slate-800 overflow-hidden min-h-[240px] flex flex-col items-center justify-center">
+      <div
+        data-testid="scanner-viewfinder-container"
+        className={`relative rounded-2xl bg-black border-2 overflow-hidden min-h-[240px] flex flex-col items-center justify-center transition-all duration-200 ${
+          isSuccessFlashActive
+            ? 'border-emerald-400 ring-4 ring-emerald-400/70 shadow-[0_0_32px_rgba(16,185,129,0.55)]'
+            : feedbackBanner?.type === 'success'
+            ? 'border-emerald-500/80 ring-2 ring-emerald-500/35'
+            : 'border-slate-800'
+        }`}
+      >
         <div id={scannerRegionId} className="w-full" />
+
+        {/* Visual 'Success' State Overlay (Green Border Flash + Glowing Corner Brackets) */}
+        {isSuccessFlashActive && (
+          <div
+            aria-hidden="true"
+            data-testid="scanner-success-flash"
+            className="pointer-events-none absolute inset-0 z-40 rounded-2xl border-[5px] border-emerald-400 bg-emerald-400/20 shadow-[inset_0_0_36px_rgba(16,185,129,0.65)] animate-pulse"
+          >
+            <span className="absolute top-2.5 left-2.5 w-6 h-6 border-t-4 border-l-4 border-emerald-300 rounded-tl-lg" />
+            <span className="absolute top-2.5 right-2.5 w-6 h-6 border-t-4 border-r-4 border-emerald-300 rounded-tr-lg" />
+            <span className="absolute bottom-2.5 left-2.5 w-6 h-6 border-b-4 border-l-4 border-emerald-300 rounded-bl-lg" />
+            <span className="absolute bottom-2.5 right-2.5 w-6 h-6 border-b-4 border-r-4 border-emerald-300 rounded-br-lg" />
+            <div className="absolute inset-0 flex items-center justify-center">
+              <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-emerald-600/95 border border-emerald-300 text-white text-xs font-extrabold shadow-lg">
+                <CheckCircle2 className="w-4 h-4 text-emerald-100" />
+                <span>QR Processed</span>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Brief Continuous Scanning Success Toast Overlay (keeps viewfinder active) */}
         {continuousToast && continuousScanning && (
@@ -1309,16 +1600,54 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
                     {cameraError || 'Allow camera permission or use Student ID entry / Quick Tap below.'}
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => void startScanner()}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs transition-colors"
-                >
-                  <Camera className="w-3.5 h-3.5" />
-                  <span>Retry Camera</span>
-                </button>
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void startScanner()}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs transition-colors"
+                  >
+                    <Camera className="w-3.5 h-3.5" />
+                    <span>Retry Camera</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isDecodingFile}
+                    onClick={() => qrFileInputRef.current?.click()}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs transition-colors"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>{isDecodingFile ? 'Scanning ID Card...' : 'Scan ID Card QR Photo'}</span>
+                  </button>
+                </div>
               </>
             )}
+          </div>
+        )}
+
+        <input
+          ref={qrFileInputRef}
+          type="file"
+          accept="image/*"
+          onChange={handleScanQrImageFile}
+          className="hidden"
+          aria-label="Upload student ID card QR image"
+        />
+
+        {isScanningActive && (
+          <div className="absolute bottom-2.5 inset-x-3 z-20 flex items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-950/85 border border-emerald-500/40 text-emerald-300 text-[10px] font-bold">
+              <ScanLine className="w-3.5 h-3.5 animate-pulse" />
+              <span>Touchless ID Card QR Active • Hold Student QR inside frame</span>
+            </span>
+            <button
+              type="button"
+              disabled={isDecodingFile}
+              onClick={() => qrFileInputRef.current?.click()}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-950/85 hover:bg-slate-800 border border-slate-700 text-slate-200 text-[10px] font-bold transition-colors"
+            >
+              <Upload className="w-3 h-3 text-amber-300" />
+              <span>Scan QR Photo</span>
+            </button>
           </div>
         )}
       </div>

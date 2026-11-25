@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useMemo } from 'react';
 import {
   Users,
   Search,
@@ -253,7 +253,7 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({
         if (!selectedSet.has(st.id)) return;
         const nextSection = promoteTargetSection === 'KEEP' ? st.section : promoteTargetSection;
         const nextClass = isGraduated ? st.classNumber : promoteTargetClass;
-        const nextStatus: StudentStatus = isGraduated ? 'Archived' : st.status;
+        const nextStatus: StudentStatus = isGraduated ? 'Graduated' : st.status;
         const histEvent: StudentHistoryEvent = {
           id: `hist-${Date.now()}-${st.id.slice(-4)}`,
           date: nowIso,
@@ -645,18 +645,64 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({
     img.src = profileQrDataUrl;
   };
 
-  // Filtered Students list
+  const isStudentGraduated = (s: Student): boolean =>
+    s.status === 'Graduated' ||
+    (s.status === 'Archived' &&
+      (s.history || []).some((h) => /graduated|alumni/i.test(`${h.title} ${h.details}`)));
+
+  const availableClassOptions = useMemo(() => {
+    const set = new Set<string>(school.classesOffered);
+    uniqueStudents.forEach((s) => {
+      if (s.classNumber) set.add(s.classNumber);
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  }, [school.classesOffered, uniqueStudents]);
+
+  const availableSectionOptions = useMemo(() => {
+    const set = new Set<string>(['A', 'B', 'C']);
+    uniqueStudents.forEach((s) => {
+      if (s.section) set.add(s.section);
+    });
+    return Array.from(set).sort();
+  }, [uniqueStudents]);
+
+  const statusCounts = useMemo(() => {
+    const active = uniqueStudents.filter((s) => s.status === 'Active').length;
+    const transferred = uniqueStudents.filter((s) => s.status === 'Transferred').length;
+    const graduated = uniqueStudents.filter((s) => isStudentGraduated(s)).length;
+    const archived = uniqueStudents.filter((s) => s.status === 'Archived').length;
+    return { active, transferred, graduated, archived, all: uniqueStudents.length };
+  }, [uniqueStudents]);
+
+  const hasActiveAdvancedFilters =
+    searchTerm.trim().length > 0 ||
+    selectedClass !== 'all' ||
+    selectedSection !== 'all' ||
+    selectedStatus !== 'Active';
+
+  // Filtered Students list (supports Class, Section, Status: Active / Transferred / Graduated / Archived / All, plus free-text search)
   const filteredStudents = uniqueStudents.filter((s) => {
+    const q = searchTerm.trim().toLowerCase();
     const matchesSearch =
-      s.fullName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      s.admissionNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      s.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      s.fatherName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      s.rollNumber.toString().includes(searchTerm);
+      !q ||
+      s.fullName.toLowerCase().includes(q) ||
+      s.admissionNumber.toLowerCase().includes(q) ||
+      s.id.toLowerCase().includes(q) ||
+      s.fatherName.toLowerCase().includes(q) ||
+      (s.motherName || '').toLowerCase().includes(q) ||
+      s.rollNumber.toString().includes(q) ||
+      `class ${s.classNumber}`.includes(q) ||
+      `${s.classNumber}-${s.section}`.toLowerCase().includes(q) ||
+      s.status.toLowerCase().includes(q);
 
     const matchesClass = selectedClass === 'all' || s.classNumber === selectedClass;
     const matchesSection = selectedSection === 'all' || s.section === selectedSection;
-    const matchesStatus = selectedStatus === 'all' || s.status === selectedStatus;
+    const matchesStatus =
+      selectedStatus === 'all'
+        ? true
+        : selectedStatus === 'Graduated'
+        ? isStudentGraduated(s)
+        : s.status === selectedStatus;
 
     return matchesSearch && matchesClass && matchesSection && matchesStatus;
   });
@@ -1327,57 +1373,151 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({
         </div>
       )}
 
-      {/* Filter and Search Bar */}
-      <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col md:flex-row gap-3">
-        {/* Search */}
-        <div className="relative flex-1">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            placeholder={language === 'ur' ? 'نام، رول نمبر، داخلہ نمبر یا طالب علم ID سے تلاش کریں...' : 'Search by name, roll no, SRN or ID...'}
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 text-xs sm:text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50/50"
-          />
+      {/* Advanced Search & Filter Bar (Class, Section & Status: Active / Transferred / Graduated) */}
+      <div
+        data-testid="student-advanced-filter-bar"
+        className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-sm space-y-3"
+      >
+        <div className="flex flex-col lg:flex-row gap-3">
+          {/* Free-text Search */}
+          <div className="relative flex-1">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              placeholder={
+                language === 'ur'
+                  ? 'نام، رول نمبر، داخلہ نمبر، کلاس یا حیثیت سے تلاش کریں...'
+                  : 'Search by name, admission no, roll no, parent, class-section, or status...'
+              }
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              aria-label="Search students"
+              className="w-full pl-10 pr-8 py-2 text-xs sm:text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50/50"
+            />
+            {searchTerm && (
+              <button
+                type="button"
+                onClick={() => setSearchTerm('')}
+                aria-label="Clear search term"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          {/* Structured Advanced Filters: Assigned Class, Section, and Enrollment Status */}
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <select
+              value={selectedClass}
+              onChange={(e) => setSelectedClass(e.target.value)}
+              aria-label="Filter by assigned class"
+              className="px-3 py-2 border border-slate-200 rounded-xl bg-slate-50/50 font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              <option value="all">{language === 'ur' ? 'تمام جماعتیں' : 'All Classes'}</option>
+              {availableClassOptions.map((c) => (
+                <option key={c} value={c}>
+                  Class {c}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={selectedSection}
+              onChange={(e) => setSelectedSection(e.target.value)}
+              aria-label="Filter by assigned section"
+              className="px-3 py-2 border border-slate-200 rounded-xl bg-slate-50/50 font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              <option value="all">{language === 'ur' ? 'تمام شعبہ جات' : 'All Sections'}</option>
+              {availableSectionOptions.map((sec) => (
+                <option key={sec} value={sec}>
+                  Section {sec}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={selectedStatus}
+              onChange={(e) => setSelectedStatus(e.target.value)}
+              aria-label="Filter by student status"
+              className="px-3 py-2 border border-slate-200 rounded-xl bg-slate-50/50 font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              <option value="Active">Active ({statusCounts.active})</option>
+              <option value="Transferred">Transferred ({statusCounts.transferred})</option>
+              <option value="Graduated">Graduated ({statusCounts.graduated})</option>
+              <option value="Archived">Archived ({statusCounts.archived})</option>
+              <option value="all">All Statuses ({statusCounts.all})</option>
+            </select>
+
+            {hasActiveAdvancedFilters && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchTerm('');
+                  setSelectedClass('all');
+                  setSelectedSection('all');
+                  setSelectedStatus('Active');
+                }}
+                className="inline-flex items-center gap-1 px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition-colors"
+              >
+                <X className="w-3.5 h-3.5" />
+                <span>Reset</span>
+              </button>
+            )}
+          </div>
         </div>
 
-        {/* Filters */}
-        <div className="flex flex-wrap gap-2 text-xs">
-          {/* Class filter */}
-          <select
-            value={selectedClass}
-            onChange={(e) => setSelectedClass(e.target.value)}
-            className="px-3 py-2 border border-slate-200 rounded-xl bg-slate-50/50 font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          >
-            <option value="all">{language === 'ur' ? 'تمام جماعتیں' : 'All Classes'}</option>
-            {school.classesOffered.map((c) => (
-              <option key={c} value={c}>Class {c}</option>
-            ))}
-          </select>
+        {/* Quick Status Filter Tabs & Active Filter Summary */}
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100 text-[11px]">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mr-1">
+              Status Filter:
+            </span>
+            {[
+              { id: 'Active', label: 'Active', count: statusCounts.active, activeCls: 'bg-emerald-600 text-white border-emerald-600' },
+              { id: 'Transferred', label: 'Transferred', count: statusCounts.transferred, activeCls: 'bg-amber-600 text-white border-amber-600' },
+              { id: 'Graduated', label: 'Graduated', count: statusCounts.graduated, activeCls: 'bg-indigo-600 text-white border-indigo-600' },
+              { id: 'all', label: 'All Students', count: statusCounts.all, activeCls: 'bg-slate-900 text-white border-slate-900' },
+            ].map((chip) => {
+              const isSelected = selectedStatus === chip.id;
+              return (
+                <button
+                  key={chip.id}
+                  type="button"
+                  onClick={() => setSelectedStatus(chip.id)}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border font-bold transition-colors ${
+                    isSelected
+                      ? chip.activeCls
+                      : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                  }`}
+                >
+                  <span>{chip.label}</span>
+                  <span className={`font-mono text-[10px] ${isSelected ? 'opacity-90' : 'text-slate-400'}`}>
+                    {chip.count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
 
-          {/* Section filter */}
-          <select
-            value={selectedSection}
-            onChange={(e) => setSelectedSection(e.target.value)}
-            className="px-3 py-2 border border-slate-200 rounded-xl bg-slate-50/50 font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          >
-            <option value="all">{language === 'ur' ? 'تمام شعبہ جات' : 'All Sections'}</option>
-            <option value="A">Section A</option>
-            <option value="B">Section B</option>
-            <option value="C">Section C</option>
-          </select>
-
-          {/* Status filter */}
-          <select
-            value={selectedStatus}
-            onChange={(e) => setSelectedStatus(e.target.value)}
-            className="px-3 py-2 border border-slate-200 rounded-xl bg-slate-50/50 font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          >
-            <option value="Active">Active ({students.filter(s => s.status === 'Active').length})</option>
-            <option value="Transferred">Transferred ({students.filter(s => s.status === 'Transferred').length})</option>
-            <option value="Archived">Archived ({students.filter(s => s.status === 'Archived').length})</option>
-            <option value="all">All Statuses</option>
-          </select>
+          <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500">
+            {selectedClass !== 'all' && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-200 font-bold">
+                Class {selectedClass}
+                <button type="button" onClick={() => setSelectedClass('all')} aria-label="Remove class filter">
+                  <X className="w-3 h-3" />
+                </button>
+              </span>
+            )}
+            {selectedSection !== 'all' && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-200 font-bold">
+                Sec {selectedSection}
+                <button type="button" onClick={() => setSelectedSection('all')} aria-label="Remove section filter">
+                  <X className="w-3 h-3" />
+                </button>
+              </span>
+            )}
+          </div>
         </div>
       </div>
 
@@ -1554,6 +1694,11 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({
                       {s.status === 'Transferred' && (
                         <div className="mt-1 text-[10px] font-bold text-amber-700">
                           Transferred {s.transferDate ? `(${s.transferDate})` : ''}
+                        </div>
+                      )}
+                      {isStudentGraduated(s) && (
+                        <div className="mt-1 inline-flex items-center px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-200 text-[10px] font-bold">
+                          Graduated
                         </div>
                       )}
                     </td>
@@ -3059,6 +3204,7 @@ const StudentFormModal: React.FC<StudentFormModalProps> = ({
               >
                 <option value="Active">Active</option>
                 <option value="Transferred">Transferred</option>
+                <option value="Graduated">Graduated</option>
                 <option value="Archived">Archived</option>
               </select>
             </div>

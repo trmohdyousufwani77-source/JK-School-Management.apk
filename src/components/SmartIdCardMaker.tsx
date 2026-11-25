@@ -144,6 +144,7 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
   );
   const [individualExportBusy, setIndividualExportBusy] = useState<'pdf' | 'jpeg' | null>(null);
   const [editingExportBusy, setEditingExportBusy] = useState<'pdf' | 'jpeg' | null>(null);
+  const [isPrintingAllActive, setIsPrintingAllActive] = useState<boolean>(false);
 
   // Always keep ID card design synced with the centralized Official School Logo & signatures in SchoolProfile
   const effectiveDesignConfig = useMemo<IdCardDesignConfig>(
@@ -207,6 +208,54 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
       }
     } finally {
       setEditingExportBusy(null);
+    }
+  };
+
+  // Generate a single printable multi-card PDF containing QR ID cards for ALL active students school-wide
+  const handlePrintAllActiveStudentsPdf = async () => {
+    if (activeStudentsList.length === 0) {
+      showToast('No active students found to include in the printable QR ID card PDF.');
+      return;
+    }
+    setIsPrintingAllActive(true);
+    try {
+      const sortedActive = [...activeStudentsList].sort((a, b) => {
+        const clsCmp = a.classNumber.localeCompare(b.classNumber, undefined, { numeric: true });
+        if (clsCmp !== 0) return clsCmp;
+        const secCmp = (a.section || '').localeCompare(b.section || '');
+        if (secCmp !== 0) return secCmp;
+        return (a.rollNumber || 0) - (b.rollNumber || 0);
+      });
+
+      const allActiveCards: SchoolIdCardRecord[] = sortedActive.map((st) => {
+        const existing = records.find(
+          (r) =>
+            r.category === 'student' &&
+            (r.linkedStudentId === st.id || r.admissionNumber === st.admissionNumber)
+        );
+        const generated = studentToIdCardRecord(st, school, effectiveDesignConfig, existing);
+        return {
+          ...generated,
+          schoolName: generated.schoolName || school.name,
+          schoolLogoDataUrl: school.logoDataUrl || generated.schoolLogoDataUrl,
+          principalSignatureDataUrl:
+            school.headmasterSignatureDataUrl || generated.principalSignatureDataUrl,
+          schoolStampDataUrl: school.officialStampDataUrl || generated.schoolStampDataUrl,
+        };
+      });
+
+      const sessionTag = (school.academicSession || '2026-2027').replace(/[^a-zA-Z0-9_-]+/g, '_');
+      await exportIdCardsToPdf(
+        allActiveCards,
+        effectiveDesignConfig,
+        qrPrivacy,
+        `All_Active_Students_QR_ID_Cards_${sessionTag}.pdf`
+      );
+      showToast(
+        `Generated single printable PDF with QR ID cards for all ${allActiveCards.length} active students.`
+      );
+    } finally {
+      setIsPrintingAllActive(false);
     }
   };
 
@@ -986,6 +1035,21 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 whitespace-nowrap shrink-0">
+          <button
+            type="button"
+            data-testid="print-all-active-students-btn"
+            disabled={isPrintingAllActive || activeStudentsList.length === 0}
+            onClick={() => void handlePrintAllActiveStudentsPdf()}
+            title={`Generate a single printable A4 PDF containing QR ID cards for all ${activeStudentsList.length} active students`}
+            className="px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-extrabold flex items-center gap-1.5 shadow-xs transition-colors"
+          >
+            <Printer className="w-3.5 h-3.5 text-amber-300" />
+            <span>
+              {isPrintingAllActive
+                ? `Generating PDF (${activeStudentsList.length})...`
+                : `Print All Active Students (${activeStudentsList.length})`}
+            </span>
+          </button>
           <button
             type="button"
             onClick={() => setActiveView('individual-student-id')}
@@ -2494,6 +2558,19 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
+                disabled={isPrintingAllActive || activeStudentsList.length === 0}
+                onClick={() => void handlePrintAllActiveStudentsPdf()}
+                className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold flex items-center gap-1.5 disabled:opacity-40 shadow-xs"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                <span>
+                  {isPrintingAllActive
+                    ? 'Generating PDF...'
+                    : `Print All Active Students (${activeStudentsList.length})`}
+                </span>
+              </button>
+              <button
+                type="button"
                 onClick={() => setSelectedPrintIds(records.map((r) => r.id))}
                 className="px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-semibold text-slate-700 hover:bg-slate-50"
               >
@@ -2511,7 +2588,7 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
                 disabled={selectedPrintIds.length === 0}
                 onClick={() => {
                   const chosen = records.filter((r) => selectedPrintIds.includes(r.id));
-                  exportIdCardsToPdf(chosen, designConfig, qrPrivacy);
+                  exportIdCardsToPdf(chosen, effectiveDesignConfig, qrPrivacy);
                   showToast(`Exported ${chosen.length} ID cards to A4 PDF.`);
                 }}
                 className="px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold flex items-center gap-1.5 disabled:opacity-40"

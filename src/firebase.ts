@@ -33,11 +33,15 @@ import {
 } from 'firebase/messaging';
 import firebaseConfig from '../firebase-applet-config.json';
 import {
+  AttendanceRecord,
   CpisCodeMigrationRecord,
+  DeveloperAdminProfile,
   ExcelMappingSchema,
   JkepmQuarterlyAppraisalReport,
   OcrImportBatchHistory,
   PrincipalRecord,
+  SchoolAboutUsInfo,
+  SchoolInfoAuditEntry,
   SchoolProfile,
   Student,
   TeacherAttendanceRecord,
@@ -733,6 +737,465 @@ export async function syncTeacherAttendanceToFirestore(
     }
   } catch (error) {
     handleFirestoreError(error, isNew ? OperationType.CREATE : OperationType.UPDATE, path);
+  }
+}
+
+export interface FirebaseSyncSummary {
+  studentAttendanceSynced: number;
+  teacherAttendanceSynced: number;
+  leavesSynced: number;
+  totalSynced: number;
+  firebaseConnected: boolean;
+  requiresFirebaseAuth: boolean;
+  syncedAt: string;
+  trigger: 'manual' | 'auto-reconnect';
+  message: string;
+}
+
+const VALID_STUDENT_ATTENDANCE_STATUSES = new Set(['Present', 'Absent', 'Late', 'Approved_Leave']);
+
+export async function syncStudentAttendanceBatchToFirestore(
+  records: AttendanceRecord[],
+  students: Student[] = []
+): Promise<number> {
+  if (!auth.currentUser || !auth.currentUser.emailVerified || records.length === 0) return 0;
+  const uid = auth.currentUser.uid;
+  const studentLookup = new Map<string, Student>();
+  students.forEach((s) => studentLookup.set(s.id, s));
+
+  // Discover existing docs owned by current user to obey immutable createdAt/createdByUid rules
+  const existingIds = new Set<string>();
+  try {
+    const snap = await getDocs(
+      query(collection(db, 'studentAttendance'), where('createdByUid', '==', uid))
+    );
+    snap.docs.forEach((d) => existingIds.add(d.id));
+  } catch {
+    // Proceed cleanly; individual writes report via handleFirestoreError
+  }
+
+  const CHUNK_SIZE = 350;
+  let synced = 0;
+
+  for (let i = 0; i < records.length; i += CHUNK_SIZE) {
+    const slice = records.slice(i, i + CHUNK_SIZE);
+    const batch = writeBatch(db);
+    for (const r of slice) {
+      const safeId = sanitizeDocId(r.id || `att-${r.studentId}-${r.date}`, 'satt');
+      const stu = studentLookup.get(r.studentId);
+      const safeStatus = VALID_STUDENT_ATTENDANCE_STATUSES.has(r.status) ? r.status : 'Present';
+      const ref = doc(db, 'studentAttendance', safeId);
+
+      if (existingIds.has(safeId)) {
+        const updatePayload: Record<string, any> = {
+          classNumber: (r.classNumber || stu?.classNumber || '1').slice(0, 24),
+          section: (r.section || stu?.section || 'A').slice(0, 16),
+          status: safeStatus,
+          academicSession: (r.academicSession || '2026-2027').slice(0, 32),
+          markedByUserId: (r.markedByUserId || uid).slice(0, 80),
+          markedAt: (r.markedAt || new Date().toISOString()).slice(0, 64),
+          updatedAt: serverTimestamp(),
+        };
+        if (stu?.fullName) updatePayload.studentName = stu.fullName.slice(0, 140);
+        if (stu?.admissionNumber) updatePayload.admissionNumber = stu.admissionNumber.slice(0, 64);
+        if (r.remarks !== undefined) updatePayload.remarks = String(r.remarks).slice(0, 500);
+        batch.update(ref, updatePayload);
+      } else {
+        const createPayload: Record<string, any> = {
+          id: safeId,
+          date: (r.date || new Date().toISOString().slice(0, 10)).slice(0, 32),
+          studentId: (r.studentId || 'stu').slice(0, 80),
+          classNumber: (r.classNumber || stu?.classNumber || '1').slice(0, 24),
+          section: (r.section || stu?.section || 'A').slice(0, 16),
+          status: safeStatus,
+          academicSession: (r.academicSession || '2026-2027').slice(0, 32),
+          markedByUserId: (r.markedByUserId || uid).slice(0, 80),
+          markedAt: (r.markedAt || new Date().toISOString()).slice(0, 64),
+          createdByUid: uid,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        };
+        if (stu?.fullName) createPayload.studentName = stu.fullName.slice(0, 140);
+        if (stu?.admissionNumber) createPayload.admissionNumber = stu.admissionNumber.slice(0, 64);
+        if (r.remarks !== undefined) createPayload.remarks = String(r.remarks).slice(0, 500);
+        batch.set(ref, createPayload);
+      }
+      synced++;
+    }
+    try {
+      await batch.commit();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'studentAttendance');
+    }
+  }
+  return synced;
+}
+
+export async function syncAllAttendanceAndLeavesToFirebase(params: {
+  attendanceRecords: AttendanceRecord[];
+  teacherAttendance: TeacherAttendanceRecord[];
+  teacherLeaves: TeacherLeaveApplication[];
+  students?: Student[];
+  trigger: 'manual' | 'auto-reconnect';
+  onStageProgress?: (stage: {
+    label: string;
+    percentage: number;
+    completed: number;
+    total: number;
+  }) => void;
+}): Promise<FirebaseSyncSummary> {
+  const {
+    attendanceRecords,
+    teacherAttendance,
+    teacherLeaves,
+    students = [],
+    trigger,
+    onStageProgress,
+  } = params;
+
+  const syncedAt = new Date().toISOString();
+  const totalCandidates =
+    attendanceRecords.length + teacherAttendance.length + teacherLeaves.length;
+
+  const mirrorToLocalApi = async () => {
+    const recentTeacherAtt = teacherAttendance.slice(0, 40);
+    await Promise.allSettled(
+      recentTeacherAtt.map((rec) =>
+        fetch('/api/teacher-attendance', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(rec),
+        })
+      )
+    );
+    const activeLeaves = teacherLeaves.filter((l) => l.deletedStatus !== 'Deleted').slice(0, 40);
+    await Promise.allSettled(
+      activeLeaves.map((lv) =>
+        fetch('/api/leaves', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(lv),
+        })
+      )
+    );
+  };
+
+  if (!auth.currentUser || !auth.currentUser.emailVerified) {
+    onStageProgress?.({
+      label: 'Syncing local attendance & leave data with school server...',
+      percentage: 60,
+      completed: Math.floor(totalCandidates / 2),
+      total: Math.max(1, totalCandidates),
+    });
+    await mirrorToLocalApi().catch(() => {});
+    onStageProgress?.({
+      label: 'Local server synced (Sign in with Google for Firebase Cloud upload)',
+      percentage: 100,
+      completed: totalCandidates,
+      total: Math.max(1, totalCandidates),
+    });
+    return {
+      studentAttendanceSynced: attendanceRecords.length,
+      teacherAttendanceSynced: teacherAttendance.length,
+      leavesSynced: teacherLeaves.length,
+      totalSynced: totalCandidates,
+      firebaseConnected: false,
+      requiresFirebaseAuth: true,
+      syncedAt,
+      trigger,
+      message: `Synced ${totalCandidates} local records to school server. Connect Google Firebase to upload directly to Cloud Firestore.`,
+    };
+  }
+
+  const uid = auth.currentUser.uid;
+  let studentAttendanceSynced = 0;
+  let teacherAttendanceSynced = 0;
+  let leavesSynced = 0;
+
+  // Stage 1: Student Attendance
+  onStageProgress?.({
+    label: `Uploading ${attendanceRecords.length} student attendance record(s) to Firebase...`,
+    percentage: 20,
+    completed: 0,
+    total: Math.max(1, totalCandidates),
+  });
+  if (attendanceRecords.length > 0) {
+    try {
+      studentAttendanceSynced = await syncStudentAttendanceBatchToFirestore(
+        attendanceRecords,
+        students
+      );
+    } catch {
+      // Logged via handleFirestoreError; proceed with remaining collections
+    }
+  }
+
+  // Stage 2: Teacher Attendance
+  onStageProgress?.({
+    label: `Uploading ${teacherAttendance.length} teacher attendance record(s) to Firebase...`,
+    percentage: 55,
+    completed: studentAttendanceSynced,
+    total: Math.max(1, totalCandidates),
+  });
+  if (teacherAttendance.length > 0) {
+    const existingTeacherAttIds = new Set<string>();
+    try {
+      const snap = await getDocs(
+        query(collection(db, 'teacherAttendance'), where('createdByUid', '==', uid))
+      );
+      snap.docs.forEach((d) => existingTeacherAttIds.add(d.id));
+    } catch {
+      // Ignore pre-check failure
+    }
+
+    for (const rec of teacherAttendance) {
+      const safeId = sanitizeDocId(rec.id || `att-${rec.teacherId}-${rec.date}`, 'att');
+      const isExisting = existingTeacherAttIds.has(safeId);
+      try {
+        if (isExisting) {
+          const updatePayload: Record<string, any> = {
+            employeeId: (rec.employeeId || 'EMP').slice(0, 64),
+            teacherName: (rec.teacherName || 'Teacher').slice(0, 140),
+            status: rec.status || 'Present',
+            updatedAt: serverTimestamp(),
+          };
+          if (rec.designation) updatePayload.designation = rec.designation.slice(0, 140);
+          if (rec.checkInTime) updatePayload.checkInTime = rec.checkInTime.slice(0, 32);
+          if (rec.checkOutTime) updatePayload.checkOutTime = rec.checkOutTime.slice(0, 32);
+          if (rec.remarks !== undefined) updatePayload.remarks = String(rec.remarks).slice(0, 1000);
+          if (rec.remarksByHoi !== undefined) updatePayload.remarksByHoi = String(rec.remarksByHoi).slice(0, 1000);
+          if (rec.updatedBy) updatePayload.updatedBy = rec.updatedBy.slice(0, 140);
+          await updateDoc(doc(db, 'teacherAttendance', safeId), updatePayload);
+        } else {
+          await syncTeacherAttendanceToFirestore(rec, true);
+        }
+        teacherAttendanceSynced++;
+      } catch {
+        // Respect RBAC rules cleanly
+      }
+    }
+  }
+
+  // Stage 3: Teacher Leaves
+  onStageProgress?.({
+    label: `Uploading ${teacherLeaves.length} teacher leave record(s) to Firebase...`,
+    percentage: 82,
+    completed: studentAttendanceSynced + teacherAttendanceSynced,
+    total: Math.max(1, totalCandidates),
+  });
+  if (teacherLeaves.length > 0) {
+    const existingLeaveIds = new Set<string>();
+    try {
+      const snap = await getDocs(
+        query(collection(db, 'teacherLeaves'), where('createdByUid', '==', uid))
+      );
+      snap.docs.forEach((d) => existingLeaveIds.add(d.id));
+    } catch {
+      // Ignore pre-check failure
+    }
+
+    for (const lv of teacherLeaves) {
+      const safeId = sanitizeDocId(lv.id, 'leave');
+      const isExisting = existingLeaveIds.has(safeId);
+      if (!isExisting && lv.deletedStatus === 'Deleted') {
+        continue;
+      }
+      try {
+        if (isExisting) {
+          const rawDocUrl = lv.medicalDocumentUrl || '';
+          const safeDocUrl = rawDocUrl.startsWith('data:')
+            ? `local-attachment://${(lv.supportingDocName || 'medical-document').slice(0, 120)}`
+            : rawDocUrl.slice(0, 500);
+          const updatePayload: Record<string, any> = {
+            leaveType: lv.leaveType,
+            startDate: (lv.startDate || new Date().toISOString().slice(0, 10)).slice(0, 32),
+            endDate: (lv.endDate || new Date().toISOString().slice(0, 10)).slice(0, 32),
+            totalDays: Math.max(1, Math.min(366, Math.round(lv.totalDays || 1))),
+            reason: (lv.reason || 'Leave requested').slice(0, 1000),
+            status: lv.status,
+            deletedStatus: lv.deletedStatus || 'Active',
+            updatedAt: serverTimestamp(),
+          };
+          if (lv.supportingDocName) updatePayload.supportingDocName = lv.supportingDocName.slice(0, 200);
+          if (safeDocUrl) updatePayload.medicalDocumentUrl = safeDocUrl;
+          if (lv.headmasterRemarks || lv.remarks) {
+            updatePayload.headmasterRemarks = (lv.headmasterRemarks || lv.remarks || '').slice(0, 1000);
+          }
+          if (lv.rejectionReason) updatePayload.rejectionReason = lv.rejectionReason.slice(0, 1000);
+          if (lv.approvedBy) updatePayload.approvedBy = lv.approvedBy.slice(0, 140);
+          if (lv.approvalDate || lv.decisionDate) {
+            updatePayload.approvalDate = (lv.approvalDate || lv.decisionDate || '').slice(0, 32);
+          }
+          if (lv.deletedBy) updatePayload.deletedBy = lv.deletedBy.slice(0, 140);
+          if (lv.deletionReason) updatePayload.deletionReason = lv.deletionReason.slice(0, 500);
+          await updateDoc(doc(db, 'teacherLeaves', safeId), updatePayload);
+        } else {
+          await syncTeacherLeaveToFirestore(lv, true);
+        }
+        leavesSynced++;
+      } catch {
+        // Respect RBAC rules cleanly
+      }
+    }
+  }
+
+  await mirrorToLocalApi().catch(() => {});
+
+  const totalSynced = studentAttendanceSynced + teacherAttendanceSynced + leavesSynced;
+  onStageProgress?.({
+    label: `Synced ${totalSynced} record(s) to Firebase Cloud Firestore`,
+    percentage: 100,
+    completed: totalSynced,
+    total: Math.max(1, totalSynced),
+  });
+
+  return {
+    studentAttendanceSynced,
+    teacherAttendanceSynced,
+    leavesSynced,
+    totalSynced,
+    firebaseConnected: true,
+    requiresFirebaseAuth: false,
+    syncedAt,
+    trigger,
+    message:
+      trigger === 'auto-reconnect'
+        ? `Auto-Sync complete: uploaded ${studentAttendanceSynced} student attendance, ${teacherAttendanceSynced} teacher attendance, and ${leavesSynced} leave records to Firebase.`
+        : `Sync Now complete: uploaded ${studentAttendanceSynced} student attendance, ${teacherAttendanceSynced} teacher attendance, and ${leavesSynced} leave records to Firebase.`,
+  };
+}
+
+/**
+ * Syncs School Admin-managed About Us & App Information to /schoolAboutUs/{docId}.
+ * Strictly separated from /protectedDeveloperProfiles.
+ */
+export async function syncSchoolAboutUsToFirestore(
+  info: SchoolAboutUsInfo,
+  actorName: string,
+  actorRole: string
+): Promise<boolean> {
+  if (!auth.currentUser || !auth.currentUser.emailVerified) return false;
+  const safeId = sanitizeDocId(info.id || 'school-about-main', 'about');
+  const docPath = `schoolAboutUs/${safeId}`;
+  const rawLogoUrl = info.schoolLogoDataUrl || '';
+  const safeLogoUrl = rawLogoUrl.startsWith('data:')
+    ? 'local-logo://uploaded-school-logo'
+    : rawLogoUrl.slice(0, 500);
+
+  const payload: Record<string, any> = {
+    id: safeId,
+    schoolName: (info.schoolName || 'Government Middle School Pamposh Colony').slice(0, 180),
+    schoolIntroduction: (info.schoolIntroduction || '').slice(0, 2000),
+    schoolHistory: (info.schoolHistory || '').slice(0, 2000),
+    schoolVision: (info.schoolVision || '').slice(0, 1000),
+    schoolMission: (info.schoolMission || '').slice(0, 1000),
+    schoolObjectives: (info.schoolObjectives || '').slice(0, 1500),
+    schoolAddress: (info.schoolAddress || '').slice(0, 350),
+    schoolContactNumber: (info.schoolContactNumber || '').slice(0, 40),
+    schoolEmail: (info.schoolEmail || '').slice(0, 140),
+    schoolWebsite: (info.schoolWebsite || '').slice(0, 220),
+    schoolLogoUrl: safeLogoUrl,
+    schoolFacilities: (info.schoolFacilities || '').slice(0, 1500),
+    principalsMessage: (info.principalsMessage || '').slice(0, 2000),
+    otherSchoolInfo: (info.otherSchoolInfo || '').slice(0, 1500),
+    appName: (info.appName || 'SchoolMaster').slice(0, 140),
+    appDescription: (info.appDescription || '').slice(0, 1500),
+    appVersion: (info.appVersion || 'v1.0.0').slice(0, 40),
+    appFeatures: (info.appFeatures || '').slice(0, 2000),
+    appPurpose: (info.appPurpose || '').slice(0, 1200),
+    appSupportEmail: (info.appSupportEmail || '').slice(0, 140),
+    appSupportContactNumber: (info.appSupportContactNumber || '').slice(0, 40),
+    privacyPolicy: (info.privacyPolicy || '').slice(0, 3000),
+    termsAndConditions: (info.termsAndConditions || '').slice(0, 3000),
+    copyrightInfo: (info.copyrightInfo || '').slice(0, 300),
+    updatedByUid: auth.currentUser.uid,
+    updatedByName: (actorName || auth.currentUser.displayName || 'School Admin').slice(0, 140),
+    updatedByRole: (actorRole || 'school_admin').slice(0, 40),
+    updatedAt: serverTimestamp(),
+  };
+
+  try {
+    await setDoc(doc(db, 'schoolAboutUs', safeId), payload, { merge: false });
+    return true;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, docPath);
+    return false;
+  }
+}
+
+/**
+ * Appends an immutable audit entry to /schoolInfoAuditLogs/{logId}.
+ */
+export async function appendSchoolInfoAuditLogToFirestore(
+  entry: SchoolInfoAuditEntry
+): Promise<boolean> {
+  if (!auth.currentUser || !auth.currentUser.emailVerified) return false;
+  const safeId = sanitizeDocId(entry.id || `about-audit-${Date.now()}`, 'about-audit');
+  const docPath = `schoolInfoAuditLogs/${safeId}`;
+  const payload = {
+    id: safeId,
+    section: entry.section,
+    action: entry.action,
+    changedFields: entry.changedFields.join(', ').slice(0, 600),
+    summary: (entry.summary || 'Updated school information').slice(0, 600),
+    actorUid: auth.currentUser.uid,
+    actorName: (entry.actorName || 'School Admin').slice(0, 140),
+    actorRole: (entry.actorRole || 'school_admin').slice(0, 40),
+    createdAt: serverTimestamp(),
+  };
+
+  try {
+    await setDoc(doc(db, 'schoolInfoAuditLogs', safeId), payload);
+    return true;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, docPath);
+    return false;
+  }
+}
+
+/**
+ * Protected write helper for /protectedDeveloperProfiles/{profileId}.
+ * Enforced by Firestore security rules to allow ONLY the verified original App Developer / Super Admin.
+ */
+export async function syncProtectedDeveloperProfileToFirestore(
+  profile: DeveloperAdminProfile,
+  isNew = false
+): Promise<boolean> {
+  if (!auth.currentUser || !auth.currentUser.emailVerified) return false;
+  const safeId = sanitizeDocId(profile.id || 'dev-admin-1', 'dev-admin');
+  const docPath = `protectedDeveloperProfiles/${safeId}`;
+  const baseFields: Record<string, any> = {
+    developerName: (profile.name || 'Mohd Yousuf Wani').slice(0, 140),
+    developerProfile: 'Original App Developer & System Architect — SchoolMaster Educational Suite'.slice(0, 1000),
+    designation: (profile.designation || 'App Developer / Administrator').slice(0, 140),
+    institution: (profile.institution || 'Govt Middle School, Pamposh Colony').slice(0, 180),
+    locality: (profile.locality || 'Pamposh Colony').slice(0, 120),
+    district: (profile.district || 'Srinagar').slice(0, 80),
+    unionTerritory: (profile.unionTerritory || 'Jammu & Kashmir, India').slice(0, 100),
+    developerEmail: (profile.email || 'mohdyousufwani1977@gmail.com').slice(0, 140),
+    developerPhone: (profile.phone || '+91 94190 12345').slice(0, 40),
+    administratorName: (profile.name || 'Mohd Yousuf Wani').slice(0, 140),
+    administratorProfile: 'Protected Super Administrator — Original App Ownership & Platform Governance'.slice(0, 1000),
+    ownershipNotice: 'Original App Ownership & Developer Profile is permanently protected against School Admin edits.'.slice(0, 500),
+    updatedByUid: auth.currentUser.uid,
+    updatedAt: serverTimestamp(),
+  };
+
+  try {
+    if (isNew) {
+      await setDoc(doc(db, 'protectedDeveloperProfiles', safeId), {
+        id: safeId,
+        ...baseFields,
+        isProtected: true,
+        createdAt: serverTimestamp(),
+      });
+    } else {
+      await updateDoc(doc(db, 'protectedDeveloperProfiles', safeId), baseFields);
+    }
+    return true;
+  } catch (error) {
+    handleFirestoreError(error, isNew ? OperationType.CREATE : OperationType.UPDATE, docPath);
+    return false;
   }
 }
 

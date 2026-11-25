@@ -66,7 +66,7 @@
         "previousSchool": { "type": "string", "maxLength": 160 },
         "admissionDate": { "type": "string", "maxLength": 32 },
         "academicSession": { "type": "string", "maxLength": 32 },
-        "status": { "type": "string", "enum": ["Active", "Transferred", "Archived"] },
+        "status": { "type": "string", "enum": ["Active", "Transferred", "Graduated", "Archived"] },
         "createdByUid": { "type": "string", "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -355,6 +355,121 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "StudentAttendanceEntry": {
+      "title": "StudentAttendanceEntry",
+      "description": "Date-wise student daily attendance record (including touchless QR scan check-ins and offline-synced roll-call entries).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "date": { "type": "string", "minLength": 4, "maxLength": 32 },
+        "studentId": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "studentName": { "type": "string", "maxLength": 140 },
+        "admissionNumber": { "type": "string", "maxLength": 64 },
+        "classNumber": { "type": "string", "minLength": 1, "maxLength": 24 },
+        "section": { "type": "string", "minLength": 1, "maxLength": 16 },
+        "status": {
+          "type": "string",
+          "enum": ["Present", "Absent", "Late", "Approved_Leave"]
+        },
+        "academicSession": { "type": "string", "maxLength": 32 },
+        "markedByUserId": { "type": "string", "maxLength": 80 },
+        "markedAt": { "type": "string", "maxLength": 64 },
+        "remarks": { "type": "string", "maxLength": 500 },
+        "createdByUid": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "date",
+        "studentId",
+        "classNumber",
+        "section",
+        "status",
+        "createdByUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "SchoolAboutUsInfo": {
+      "title": "SchoolAboutUsInfo",
+      "description": "School Admin-managed About Us and App Information metadata, strictly separated from protected developer records.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "schoolName": { "type": "string", "minLength": 2, "maxLength": 180 },
+        "schoolIntroduction": { "type": "string", "maxLength": 2000 },
+        "schoolHistory": { "type": "string", "maxLength": 2000 },
+        "schoolVision": { "type": "string", "maxLength": 1000 },
+        "schoolMission": { "type": "string", "maxLength": 1000 },
+        "schoolObjectives": { "type": "string", "maxLength": 1500 },
+        "schoolAddress": { "type": "string", "maxLength": 350 },
+        "schoolContactNumber": { "type": "string", "maxLength": 40 },
+        "schoolEmail": { "type": "string", "maxLength": 140 },
+        "schoolWebsite": { "type": "string", "maxLength": 220 },
+        "schoolLogoUrl": { "type": "string", "maxLength": 500 },
+        "schoolFacilities": { "type": "string", "maxLength": 1500 },
+        "principalsMessage": { "type": "string", "maxLength": 2000 },
+        "otherSchoolInfo": { "type": "string", "maxLength": 1500 },
+        "appName": { "type": "string", "minLength": 2, "maxLength": 140 },
+        "appDescription": { "type": "string", "maxLength": 1500 },
+        "appVersion": { "type": "string", "maxLength": 40 },
+        "appFeatures": { "type": "string", "maxLength": 2000 },
+        "appPurpose": { "type": "string", "maxLength": 1200 },
+        "appSupportEmail": { "type": "string", "maxLength": 140 },
+        "appSupportContactNumber": { "type": "string", "maxLength": 40 },
+        "privacyPolicy": { "type": "string", "maxLength": 3000 },
+        "termsAndConditions": { "type": "string", "maxLength": 3000 },
+        "copyrightInfo": { "type": "string", "maxLength": 300 },
+        "updatedByUid": { "type": "string", "maxLength": 128 },
+        "updatedByName": { "type": "string", "maxLength": 140 },
+        "updatedByRole": { "type": "string", "maxLength": 40 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "schoolName", "appName", "updatedByUid", "updatedAt"]
+    },
+    "SchoolInfoAuditLog": {
+      "title": "SchoolInfoAuditLog",
+      "description": "Immutable audit trail recording every update to School About Us and App Information by School Admins.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "section": { "type": "string", "enum": ["About Us", "App Information", "School Logo"] },
+        "action": { "type": "string", "enum": ["CREATE", "UPDATE"] },
+        "changedFields": { "type": "string", "maxLength": 600 },
+        "summary": { "type": "string", "minLength": 2, "maxLength": 600 },
+        "actorUid": { "type": "string", "maxLength": 128 },
+        "actorName": { "type": "string", "maxLength": 140 },
+        "actorRole": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "section", "action", "summary", "actorUid", "actorName", "actorRole", "createdAt"]
+    },
+    "ProtectedDeveloperProfile": {
+      "title": "ProtectedDeveloperProfile",
+      "description": "Strictly protected separate collection storing original App Developer and Super Administrator ownership details (read-only for School Admins).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "developerName": { "type": "string", "minLength": 2, "maxLength": 140 },
+        "developerProfile": { "type": "string", "maxLength": 1000 },
+        "designation": { "type": "string", "maxLength": 140 },
+        "institution": { "type": "string", "maxLength": 180 },
+        "locality": { "type": "string", "maxLength": 120 },
+        "district": { "type": "string", "maxLength": 80 },
+        "unionTerritory": { "type": "string", "maxLength": 100 },
+        "developerEmail": { "type": "string", "maxLength": 140 },
+        "developerPhone": { "type": "string", "maxLength": 40 },
+        "administratorName": { "type": "string", "maxLength": 140 },
+        "administratorProfile": { "type": "string", "maxLength": 1000 },
+        "ownershipNotice": { "type": "string", "maxLength": 500 },
+        "isProtected": { "type": "boolean" },
+        "updatedByUid": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "developerName", "designation", "isProtected", "updatedByUid", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -409,6 +524,22 @@
     "/teacherAttendance/{recordId}": {
       "schema": { "$ref": "#/entities/TeacherAttendanceEntry" },
       "description": "Date-wise teacher daily attendance and service register entries with Arrival/Departure times, Designation, Attendance Status, and HOI Remarks."
+    },
+    "/studentAttendance/{recordId}": {
+      "schema": { "$ref": "#/entities/StudentAttendanceEntry" },
+      "description": "Date-wise student daily attendance entries including QR code scanner check-ins and automated offline-to-online sync uploads."
+    },
+    "/schoolAboutUs/{docId}": {
+      "schema": { "$ref": "#/entities/SchoolAboutUsInfo" },
+      "description": "School Admin-managed About Us and App Information details."
+    },
+    "/schoolInfoAuditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/SchoolInfoAuditLog" },
+      "description": "Immutable audit log of School About Us and App Information updates."
+    },
+    "/protectedDeveloperProfiles/{profileId}": {
+      "schema": { "$ref": "#/entities/ProtectedDeveloperProfile" },
+      "description": "Strictly protected separate collection storing original App Developer and Super Administrator profile details, read-only for School Admins."
     }
   }
 }

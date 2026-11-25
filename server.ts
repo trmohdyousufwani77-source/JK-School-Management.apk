@@ -557,6 +557,176 @@ async function startServer() {
     return res.json({ ok: true, record: mergedRecord });
   });
 
+  // =========================================================================
+  // ABOUT US & APP INFORMATION API (RBAC ENFORCED + SEPARATE PROTECTED DEV PROFILE)
+  // =========================================================================
+  let schoolAboutUsRecord: Record<string, any> = {
+    id: 'school-about-main',
+    schoolName: 'Govt Middle School Pamposh Colony',
+    schoolAddress: 'Pamposh Colony, Palapora Zone, Iddgah',
+    appName: 'SchoolMaster (HPC & JKHRMS)',
+    appVersion: 'v1.0.0',
+    updatedAt: new Date().toISOString(),
+  };
+  const schoolInfoAuditLogStore: Array<Record<string, any>> = [];
+
+  // Strictly separated protected developer / ownership record (NEVER writable by School Admin)
+  const protectedDeveloperRecord: Record<string, any> = Object.seal({
+    id: 'dev-admin-1',
+    developerName: 'Mohd Yousuf Wani',
+    designation: 'App Developer / Administrator',
+    institution: 'Govt Middle School, Pamposh Colony',
+    locality: 'Pamposh Colony',
+    district: 'Srinagar',
+    unionTerritory: 'Jammu & Kashmir, India',
+    developerEmail: 'mohdyousufwani1977@gmail.com',
+    developerPhone: '+91 94190 12345',
+    ownershipNotice: 'Protected Original App Developer & Super Administrator Ownership Record',
+    isProtected: true,
+    updatedAt: '2026-11-14T00:00:00.000Z',
+  });
+
+  const ALLOWED_SCHOOL_ADMIN_ROLES = new Set([
+    'school_admin',
+    'admin',
+    'head_teacher',
+    'primary_admin',
+    'senior_admin',
+    'junior_admin',
+    'super_admin',
+    'app_developer',
+  ]);
+
+  const ALLOWED_SCHOOL_INFO_FIELDS = new Set([
+    'schoolName',
+    'schoolIntroduction',
+    'schoolHistory',
+    'schoolVision',
+    'schoolMission',
+    'schoolObjectives',
+    'schoolAddress',
+    'schoolContactNumber',
+    'schoolEmail',
+    'schoolWebsite',
+    'schoolFacilities',
+    'principalsMessage',
+    'otherSchoolInfo',
+    'appName',
+    'appDescription',
+    'appVersion',
+    'appFeatures',
+    'appPurpose',
+    'appSupportEmail',
+    'appSupportContactNumber',
+    'privacyPolicy',
+    'termsAndConditions',
+    'copyrightInfo',
+  ]);
+
+  app.get('/api/school-about-us', (_req, res) => {
+    return res.json({
+      ok: true,
+      data: schoolAboutUsRecord,
+      auditLogs: schoolInfoAuditLogStore.slice(0, 100),
+    });
+  });
+
+  app.put('/api/school-about-us', (req, res) => {
+    const role = String(req.headers['x-user-role'] || req.body?.actorRole || '').toLowerCase().trim();
+    const actorName = String(req.headers['x-user-name'] || req.body?.actorName || 'School Admin').slice(0, 140);
+    if (!ALLOWED_SCHOOL_ADMIN_ROLES.has(role)) {
+      return res.status(403).json({
+        ok: false,
+        error: 'Forbidden: Only authorized School Administrators can update About Us and App Information.',
+      });
+    }
+
+    const incomingData = req.body?.data && typeof req.body.data === 'object' ? req.body.data : req.body;
+    const sanitizedPatch: Record<string, string> = {};
+    const changedFields: string[] = [];
+
+    for (const [key, val] of Object.entries(incomingData || {})) {
+      if (!ALLOWED_SCHOOL_INFO_FIELDS.has(key)) continue;
+      const strVal = String(val ?? '').trim().slice(0, 3000);
+      if (schoolAboutUsRecord[key] !== strVal) {
+        changedFields.push(key);
+      }
+      sanitizedPatch[key] = strVal;
+    }
+
+    if (sanitizedPatch.schoolName !== undefined && sanitizedPatch.schoolName.length < 2) {
+      return res.status(400).json({ ok: false, error: 'School Name must be at least 2 characters.' });
+    }
+    if (sanitizedPatch.appName !== undefined && sanitizedPatch.appName.length < 2) {
+      return res.status(400).json({ ok: false, error: 'App Name must be at least 2 characters.' });
+    }
+
+    const now = new Date().toISOString();
+    schoolAboutUsRecord = {
+      ...schoolAboutUsRecord,
+      ...sanitizedPatch,
+      updatedByName: actorName,
+      updatedByRole: role,
+      updatedAt: now,
+    };
+
+    const section =
+      req.body?.section === 'App Information' || req.body?.section === 'School Logo'
+        ? req.body.section
+        : 'About Us';
+    const auditEntry = {
+      id: `about-audit-${Date.now()}`,
+      section,
+      action: 'UPDATE',
+      changedFields,
+      summary:
+        String(req.body?.summary || '').slice(0, 600) ||
+        `Updated ${section} (${changedFields.length > 0 ? changedFields.join(', ') : 'metadata saved'})`,
+      actorName,
+      actorRole: role,
+      timestamp: now,
+    };
+    schoolInfoAuditLogStore.unshift(auditEntry);
+
+    return res.json({
+      ok: true,
+      data: schoolAboutUsRecord,
+      auditEntry,
+    });
+  });
+
+  // Read-only protected developer record endpoint (NEVER modifiable by School Admin)
+  app.get('/api/protected-developer-profile', (_req, res) => {
+    return res.json({
+      ok: true,
+      readOnlyForSchoolAdmin: true,
+      profile: { ...protectedDeveloperRecord },
+    });
+  });
+
+  app.put('/api/protected-developer-profile', (req, res) => {
+    const role = String(req.headers['x-user-role'] || '').toLowerCase().trim();
+    const devEmail = String(req.headers['x-developer-email'] || '').toLowerCase().trim();
+    if ((role !== 'super_admin' && role !== 'app_developer') || devEmail !== 'mohdyousufwani1977@gmail.com') {
+      return res.status(403).json({
+        ok: false,
+        error:
+          'Forbidden: Developer & Original App Ownership records are strictly protected and cannot be modified by School Admin or Teacher accounts.',
+      });
+    }
+    return res.json({
+      ok: true,
+      profile: { ...protectedDeveloperRecord },
+    });
+  });
+
+  app.delete('/api/protected-developer-profile', (_req, res) => {
+    return res.status(403).json({
+      ok: false,
+      error: 'Forbidden: Protected App Developer and Original Ownership records cannot be deleted.',
+    });
+  });
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },

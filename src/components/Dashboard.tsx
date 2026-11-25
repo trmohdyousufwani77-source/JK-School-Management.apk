@@ -14,6 +14,7 @@ import {
   XCircle,
   AlertCircle,
   FileSpreadsheet,
+  ChevronLeft,
   ChevronRight,
   Sparkles,
   CalendarDays,
@@ -565,6 +566,130 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [attendanceTrendClass, setAttendanceTrendClass] = useState<string>('all');
   const [attendanceTrendMode, setAttendanceTrendMode] = useState<'rate' | 'counts'>('rate');
   const [attendanceTrendGranularity, setAttendanceTrendGranularity] = useState<'weekly30' | 'daily'>('weekly30');
+
+  // School-Wide Daily Attendance Calendar Heat Map state & computation
+  const [heatMapMonth, setHeatMapMonth] = useState<string>(() => {
+    const base = latestAttendanceDate || new Date().toISOString().slice(0, 10);
+    return base.slice(0, 7); // YYYY-MM
+  });
+  const [heatMapClassFilter, setHeatMapClassFilter] = useState<string>('all');
+  const [selectedHeatMapDate, setSelectedHeatMapDate] = useState<string | null>(null);
+
+  const heatMapCalendarData = useMemo(() => {
+    const [yearStr, monthStr] = heatMapMonth.split('-');
+    const year = Number(yearStr) || new Date().getFullYear();
+    const monthIndex = (Number(monthStr) || 1) - 1; // 0-indexed
+    const firstDayOfMonth = new Date(year, monthIndex, 1);
+    const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
+    const leadingEmptyCells = firstDayOfMonth.getDay(); // 0 = Sun ... 6 = Sat
+
+    // Aggregate attendance records per YYYY-MM-DD for this month
+    const perDateMap = new Map<
+      string,
+      { present: number; late: number; absent: number; leave: number; total: number }
+    >();
+
+    attendanceRecords.forEach((rec) => {
+      if (!rec.date || !rec.date.startsWith(heatMapMonth)) return;
+      if (heatMapClassFilter !== 'all' && rec.classNumber !== heatMapClassFilter) return;
+      const bucket = perDateMap.get(rec.date) || {
+        present: 0,
+        late: 0,
+        absent: 0,
+        leave: 0,
+        total: 0,
+      };
+      bucket.total += 1;
+      if (rec.status === 'Present') bucket.present += 1;
+      else if (rec.status === 'Late') bucket.late += 1;
+      else if (rec.status === 'Absent') bucket.absent += 1;
+      else bucket.leave += 1;
+      perDateMap.set(rec.date, bucket);
+    });
+
+    const holidayByDate = new Map<string, string>();
+    (school.holidays || []).forEach((h) => {
+      if (h.date && h.date.startsWith(heatMapMonth)) {
+        holidayByDate.set(h.date, h.name);
+      }
+    });
+
+    type HeatMapCell = {
+      dateStr: string;
+      dayNum: number;
+      dayOfWeek: number;
+      present: number;
+      late: number;
+      absent: number;
+      leave: number;
+      total: number;
+      rate: number | null;
+      holidayName?: string;
+    };
+
+    const days: HeatMapCell[] = [];
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dd = String(d).padStart(2, '0');
+      const dateStr = `${heatMapMonth}-${dd}`;
+      const dow = new Date(year, monthIndex, d).getDay();
+      const bucket = perDateMap.get(dateStr);
+      const attended = bucket ? bucket.present + bucket.late : 0;
+      const rate = bucket && bucket.total > 0 ? Math.round((attended / bucket.total) * 1000) / 10 : null;
+      days.push({
+        dateStr,
+        dayNum: d,
+        dayOfWeek: dow,
+        present: bucket?.present ?? 0,
+        late: bucket?.late ?? 0,
+        absent: bucket?.absent ?? 0,
+        leave: bucket?.leave ?? 0,
+        total: bucket?.total ?? 0,
+        rate,
+        holidayName: holidayByDate.get(dateStr),
+      });
+    }
+
+    const recordedDays = days.filter((d) => d.rate !== null);
+    const avgRate =
+      recordedDays.length > 0
+        ? Math.round(
+            (recordedDays.reduce((acc, d) => acc + (d.rate ?? 0), 0) / recordedDays.length) * 10
+          ) / 10
+        : null;
+    const peakDay =
+      recordedDays.length > 0
+        ? [...recordedDays].sort((a, b) => (b.rate ?? 0) - (a.rate ?? 0))[0]
+        : null;
+    const lowestDay =
+      recordedDays.length > 0
+        ? [...recordedDays].sort((a, b) => (a.rate ?? 0) - (b.rate ?? 0))[0]
+        : null;
+
+    const monthLabel = firstDayOfMonth.toLocaleDateString('en-US', {
+      month: 'long',
+      year: 'numeric',
+    });
+
+    return {
+      year,
+      monthIndex,
+      monthLabel,
+      leadingEmptyCells,
+      days,
+      recordedDaysCount: recordedDays.length,
+      avgRate,
+      peakDay,
+      lowestDay,
+    };
+  }, [attendanceRecords, heatMapClassFilter, heatMapMonth, school.holidays]);
+
+  const shiftHeatMapMonth = (deltaMonths: number) => {
+    const [yStr, mStr] = heatMapMonth.split('-');
+    const dt = new Date(Number(yStr) || new Date().getFullYear(), (Number(mStr) || 1) - 1 + deltaMonths, 1);
+    const nextYm = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`;
+    setHeatMapMonth(nextYm);
+    setSelectedHeatMapDate(null);
+  };
 
   const attendanceTrendData = useMemo(() => {
     // Filter records by selected class if specified
@@ -2142,6 +2267,451 @@ export const Dashboard: React.FC<DashboardProps> = ({
               </div>
             </div>
           </div>
+
+          {/* Headmaster At-a-Glance Weekly Student Attendance Health Trend Widget (Recharts LineChart) */}
+          {(() => {
+            const latestPoint = weeklyAttendanceTrendData[weeklyAttendanceTrendData.length - 1];
+            const latestRate = latestPoint ? latestPoint.rate : todayPercentage;
+            const healthMeta =
+              latestRate >= 85
+                ? {
+                    label: language === 'ur' ? 'بہترین حاضری' : 'Healthy (≥ 85%)',
+                    badgeCls: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+                    dotCls: 'bg-emerald-500',
+                    stroke: '#059669',
+                  }
+                : latestRate >= 75
+                ? {
+                    label: language === 'ur' ? 'نگرانی درکار' : 'Watch (75–84%)',
+                    badgeCls: 'bg-amber-50 text-amber-800 border-amber-200',
+                    dotCls: 'bg-amber-500',
+                    stroke: '#D97706',
+                  }
+                : {
+                    label: language === 'ur' ? 'فوری توجہ درکار' : 'Action Needed (< 75%)',
+                    badgeCls: 'bg-rose-50 text-rose-800 border-rose-200',
+                    dotCls: 'bg-rose-500',
+                    stroke: '#E11D48',
+                  };
+
+            return (
+              <section
+                aria-label="Weekly Student Attendance Percentage Trend"
+                className="bg-white p-5 rounded-3xl border border-slate-200/90 shadow-sm space-y-4"
+              >
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-slate-100 pb-3.5">
+                  <div className="flex items-start gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-indigo-50 text-indigo-600 border border-indigo-100 flex items-center justify-center shrink-0">
+                      <LineChartIcon className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h2 className="text-sm sm:text-base font-black text-slate-900">
+                          {language === 'ur'
+                            ? 'ہفتہ وار طلباء کی حاضری کا فیصد رجحان'
+                            : 'Weekly Student Attendance Percentage Trend'}
+                        </h2>
+                        <span
+                          className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold border ${healthMeta.badgeCls}`}
+                        >
+                          <span className={`w-1.5 h-1.5 rounded-full ${healthMeta.dotCls}`} />
+                          <span>{healthMeta.label}</span>
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        {language === 'ur'
+                          ? 'ہیڈ ماسٹر کے لیے روزانہ اور ہفتہ وار حاضری کی صحت کا فوری جائزہ'
+                          : 'Headmaster attendance health monitor tracking weekly student attendance % against the 85% RTE benchmark'}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <select
+                      value={attendanceTrendClass}
+                      onChange={(e) => setAttendanceTrendClass(e.target.value)}
+                      aria-label="Filter weekly attendance trend by class"
+                      className="px-2.5 py-1.5 rounded-xl border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    >
+                      <option value="all">{t.all} Classes</option>
+                      {classesList.map((c) => (
+                        <option key={c} value={c}>Class {c}</option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => onNavigateTab('attendance')}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold transition-colors shadow-xs"
+                    >
+                      <CalendarCheck className="w-3.5 h-3.5" />
+                      <span>Daily Roll-Call</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Compact Health KPIs */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                  <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/70">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                      Latest Week Rate
+                    </span>
+                    <div className="flex items-baseline gap-1.5 mt-1">
+                      <span className="text-xl font-black text-slate-900 font-mono">
+                        {latestRate}%
+                      </span>
+                      {latestPoint?.deltaFromPrev !== null && latestPoint?.deltaFromPrev !== undefined && (
+                        <span
+                          className={`text-[11px] font-bold font-mono ${
+                            latestPoint.deltaFromPrev >= 0 ? 'text-emerald-600' : 'text-rose-600'
+                          }`}
+                        >
+                          {latestPoint.deltaFromPrev >= 0 ? '+' : ''}
+                          {latestPoint.deltaFromPrev}% WoW
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/70">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                      Weekly Average
+                    </span>
+                    <p className="text-xl font-black text-indigo-700 font-mono mt-1">
+                      {trendAvgRate}%
+                    </p>
+                  </div>
+
+                  <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/70">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                      Today&apos;s Snapshot
+                    </span>
+                    <p className="text-xl font-black text-emerald-700 font-mono mt-1">
+                      {todayPercentage}%
+                      <span className="text-[11px] font-semibold text-slate-500 ml-1">
+                        ({presentCount} present)
+                      </span>
+                    </p>
+                  </div>
+
+                  <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/70">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                      Target Benchmark
+                    </span>
+                    <p className="text-xl font-black text-slate-800 font-mono mt-1">
+                      85%
+                      <span className="text-[11px] font-semibold text-slate-500 ml-1">
+                        RTE Goal
+                      </span>
+                    </p>
+                  </div>
+                </div>
+
+                {/* Recharts Weekly Trend Line */}
+                <div className="h-[220px] w-full bg-slate-50/40 rounded-2xl border border-slate-100 p-2">
+                  {weeklyAttendanceTrendData.length === 0 ? (
+                    <div className="h-full flex flex-col items-center justify-center text-slate-400 text-xs gap-1.5">
+                      <LineChartIcon className="w-6 h-6 opacity-50" />
+                      <p>No student attendance records available for the selected class filter.</p>
+                    </div>
+                  ) : (
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart
+                        data={weeklyAttendanceTrendData}
+                        margin={{ top: 12, right: 18, left: -14, bottom: 4 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
+                        <XAxis
+                          dataKey="displayDate"
+                          stroke="#64748B"
+                          fontSize={11}
+                          tickLine={false}
+                          axisLine={{ stroke: '#CBD5E1' }}
+                        />
+                        <YAxis
+                          domain={[50, 100]}
+                          stroke="#64748B"
+                          fontSize={11}
+                          tickLine={false}
+                          unit="%"
+                          axisLine={{ stroke: '#CBD5E1' }}
+                        />
+                        <Tooltip content={<CustomAttendanceTooltip />} />
+                        <ReferenceLine
+                          y={85}
+                          stroke="#10B981"
+                          strokeDasharray="4 4"
+                          strokeWidth={1.5}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="rate"
+                          name={language === 'ur' ? 'ہفتہ وار حاضری (%)' : 'Weekly Attendance (%)'}
+                          stroke={healthMeta.stroke}
+                          strokeWidth={3}
+                          dot={(dotProps: any) => {
+                            const { cx, cy, payload, index } = dotProps;
+                            if (typeof cx !== 'number' || typeof cy !== 'number') return <g key={index} />;
+                            const isDipPoint = Boolean(payload?.isDip);
+                            return (
+                              <circle
+                                key={`hm-dot-${index}`}
+                                cx={cx}
+                                cy={cy}
+                                r={isDipPoint ? 5.5 : 4.5}
+                                fill={isDipPoint ? '#E11D48' : healthMeta.stroke}
+                                stroke="#FFFFFF"
+                                strokeWidth={2}
+                              />
+                            );
+                          }}
+                          activeDot={{ r: 7, fill: healthMeta.stroke, stroke: '#FFFFFF', strokeWidth: 2 }}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  )}
+                </div>
+              </section>
+            );
+          })()}
+
+          {/* Calendar-Style School-Wide Daily Attendance Heat Map */}
+          {(() => {
+            const getCellStyle = (rate: number | null, isSunday: boolean, holidayName?: string) => {
+              if (rate === null) {
+                if (holidayName) {
+                  return 'bg-amber-50/70 border-amber-200 text-amber-700 hover:border-amber-400';
+                }
+                if (isSunday) {
+                  return 'bg-slate-50 border-slate-100 text-slate-400';
+                }
+                return 'bg-slate-100/80 border-slate-200/70 text-slate-500 hover:border-slate-300';
+              }
+              if (rate >= 95) return 'bg-emerald-600 border-emerald-700 text-white shadow-xs hover:brightness-105';
+              if (rate >= 88) return 'bg-emerald-400 border-emerald-500 text-emerald-950 hover:brightness-105';
+              if (rate >= 80) return 'bg-emerald-200 border-emerald-300 text-emerald-950 hover:brightness-95';
+              if (rate >= 70) return 'bg-amber-300 border-amber-400 text-amber-950 hover:brightness-95';
+              return 'bg-rose-500 border-rose-600 text-white shadow-xs hover:brightness-105';
+            };
+
+            const activeCell =
+              (selectedHeatMapDate
+                ? heatMapCalendarData.days.find((d) => d.dateStr === selectedHeatMapDate)
+                : null) ||
+              heatMapCalendarData.days.filter((d) => d.rate !== null).slice(-1)[0] ||
+              null;
+
+            return (
+              <section
+                aria-label="School-Wide Daily Attendance Calendar Heat Map"
+                data-testid="dashboard-attendance-heatmap"
+                className="bg-white p-5 rounded-3xl border border-slate-200/90 shadow-sm space-y-4"
+              >
+                {/* Header & Month / Class Controls */}
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-slate-100 pb-3.5">
+                  <div className="flex items-start gap-3">
+                    <div className="w-10 h-10 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-700 flex items-center justify-center shrink-0">
+                      <CalendarDays className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h2 className="text-sm sm:text-base font-black text-slate-900">
+                        {language === 'ur'
+                          ? 'اسکول گیر روزانہ حاضری کیلنڈر ہیٹ میپ'
+                          : 'School-Wide Daily Attendance Calendar Heat Map'}
+                      </h2>
+                      <p className="text-[11px] text-slate-500">
+                        Color intensity highlights daily attendance highs and dips across the month. Select any day for detailed headcount.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <select
+                      value={heatMapClassFilter}
+                      onChange={(e) => setHeatMapClassFilter(e.target.value)}
+                      aria-label="Filter calendar heat map by class"
+                      className="px-2.5 py-1.5 rounded-xl border border-slate-200 bg-slate-50 font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    >
+                      <option value="all">All Classes (School-Wide)</option>
+                      {school.classesOffered.map((cls) => (
+                        <option key={cls} value={cls}>
+                          Class {cls}
+                        </option>
+                      ))}
+                    </select>
+
+                    <div className="inline-flex items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200">
+                      <button
+                        type="button"
+                        onClick={() => shiftHeatMapMonth(-1)}
+                        aria-label="Previous month"
+                        className="p-1.5 rounded-lg hover:bg-white text-slate-700 transition-colors"
+                      >
+                        <ChevronLeft className="w-3.5 h-3.5" />
+                      </button>
+                      <span className="px-2.5 font-extrabold text-slate-900 min-w-[122px] text-center">
+                        {heatMapCalendarData.monthLabel}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => shiftHeatMapMonth(1)}
+                        aria-label="Next month"
+                        className="p-1.5 rounded-lg hover:bg-white text-slate-700 transition-colors"
+                      >
+                        <ChevronRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setHeatMapMonth((latestAttendanceDate || new Date().toISOString().slice(0, 10)).slice(0, 7));
+                        setSelectedHeatMapDate(null);
+                      }}
+                      className="px-2.5 py-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 font-bold text-slate-700 transition-colors"
+                    >
+                      Latest Active
+                    </button>
+                  </div>
+                </div>
+
+                {/* Monthly Summary KPIs */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                  <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/80">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Monthly Avg Rate</span>
+                    <p className="text-lg font-black text-slate-900 font-mono mt-0.5">
+                      {heatMapCalendarData.avgRate !== null ? `${heatMapCalendarData.avgRate}%` : '—'}
+                    </p>
+                  </div>
+                  <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/80">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Tracked School Days</span>
+                    <p className="text-lg font-black text-indigo-700 font-mono mt-0.5">
+                      {heatMapCalendarData.recordedDaysCount}
+                    </p>
+                  </div>
+                  <div className="p-3 rounded-2xl bg-emerald-50/70 border border-emerald-200/80">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700">Peak Attendance Day</span>
+                    <p className="text-sm font-black text-emerald-900 font-mono mt-1 truncate">
+                      {heatMapCalendarData.peakDay
+                        ? `${heatMapCalendarData.peakDay.dateStr} (${heatMapCalendarData.peakDay.rate}%)`
+                        : 'No data'}
+                    </p>
+                  </div>
+                  <div className="p-3 rounded-2xl bg-rose-50/70 border border-rose-200/80">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-rose-700">Lowest Attendance Day</span>
+                    <p className="text-sm font-black text-rose-900 font-mono mt-1 truncate">
+                      {heatMapCalendarData.lowestDay
+                        ? `${heatMapCalendarData.lowestDay.dateStr} (${heatMapCalendarData.lowestDay.rate}%)`
+                        : 'No data'}
+                    </p>
+                  </div>
+                </div>
+
+                {/* 7-Column Calendar Heat Map Grid */}
+                <div className="space-y-1.5">
+                  <div className="grid grid-cols-7 gap-1.5 text-center text-[10px] font-extrabold uppercase tracking-wider text-slate-500">
+                    {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((dow) => (
+                      <div key={dow} className="py-1">
+                        {dow}
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="grid grid-cols-7 gap-1.5">
+                    {Array.from({ length: heatMapCalendarData.leadingEmptyCells }).map((_, idx) => (
+                      <div key={`empty-${idx}`} className="h-14 sm:h-16 rounded-xl bg-slate-50/40" aria-hidden="true" />
+                    ))}
+
+                    {heatMapCalendarData.days.map((day) => {
+                      const isSelected = activeCell?.dateStr === day.dateStr;
+                      const isSunday = day.dayOfWeek === 0;
+                      const styleCls = getCellStyle(day.rate, isSunday, day.holidayName);
+                      return (
+                        <button
+                          key={day.dateStr}
+                          type="button"
+                          onClick={() => setSelectedHeatMapDate(day.dateStr)}
+                          title={
+                            day.rate !== null
+                              ? `${day.dateStr}: ${day.rate}% attendance (${day.present + day.late}/${day.total} present)`
+                              : day.holidayName
+                              ? `${day.dateStr}: Holiday (${day.holidayName})`
+                              : `${day.dateStr}: No attendance recorded`
+                          }
+                          className={`h-14 sm:h-16 rounded-xl border p-1.5 flex flex-col items-center justify-between transition-all cursor-pointer ${styleCls} ${
+                            isSelected ? 'ring-2 ring-indigo-600 ring-offset-1 scale-[1.02]' : ''
+                          }`}
+                        >
+                          <div className="w-full flex items-center justify-between text-[10px] font-bold opacity-90">
+                            <span>{day.dayNum}</span>
+                            {day.holidayName && <span className="text-[9px] font-extrabold">HOL</span>}
+                          </div>
+                          <div className="font-mono font-black text-xs sm:text-sm leading-none">
+                            {day.rate !== null ? `${Math.round(day.rate)}%` : '—'}
+                          </div>
+                          <div className="text-[9px] font-medium opacity-80 leading-none truncate max-w-full">
+                            {day.total > 0 ? `${day.present + day.late}/${day.total}` : isSunday ? 'Off' : 'No log'}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Color Scale Legend + Selected Day Drilldown Bar */}
+                <div className="pt-2 border-t border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-3 text-[11px]">
+                  <div className="flex flex-wrap items-center gap-2 text-slate-600 font-semibold">
+                    <span className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">Intensity:</span>
+                    <span className="inline-flex items-center gap-1">
+                      <span className="w-3 h-3 rounded bg-rose-500 border border-rose-600" />
+                      <span>&lt;70%</span>
+                    </span>
+                    <span className="inline-flex items-center gap-1">
+                      <span className="w-3 h-3 rounded bg-amber-300 border border-amber-400" />
+                      <span>70–79%</span>
+                    </span>
+                    <span className="inline-flex items-center gap-1">
+                      <span className="w-3 h-3 rounded bg-emerald-200 border border-emerald-300" />
+                      <span>80–87%</span>
+                    </span>
+                    <span className="inline-flex items-center gap-1">
+                      <span className="w-3 h-3 rounded bg-emerald-400 border border-emerald-500" />
+                      <span>88–94%</span>
+                    </span>
+                    <span className="inline-flex items-center gap-1">
+                      <span className="w-3 h-3 rounded bg-emerald-600 border border-emerald-700" />
+                      <span>95–100%</span>
+                    </span>
+                    <span className="inline-flex items-center gap-1">
+                      <span className="w-3 h-3 rounded bg-slate-100 border border-slate-200" />
+                      <span>No Data</span>
+                    </span>
+                  </div>
+
+                  {activeCell && (
+                    <div className="inline-flex flex-wrap items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-700">
+                      <span className="font-mono font-extrabold text-slate-900">{activeCell.dateStr}</span>
+                      <span>•</span>
+                      {activeCell.rate !== null ? (
+                        <>
+                          <span className="font-extrabold text-emerald-700">{activeCell.rate}%</span>
+                          <span className="text-slate-500">
+                            (Present: <strong>{activeCell.present}</strong>
+                            {activeCell.late > 0 ? `, Late: ${activeCell.late}` : ''}, Absent:{' '}
+                            <strong className="text-rose-700">{activeCell.absent}</strong>
+                            {activeCell.leave > 0 ? `, Leave: ${activeCell.leave}` : ''})
+                          </span>
+                        </>
+                      ) : (
+                        <span className="italic text-slate-500">
+                          {activeCell.holidayName ? `Holiday: ${activeCell.holidayName}` : 'No attendance records on this date'}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </section>
+            );
+          })()}
 
           {/* 10-Item Primary Admin Dashboard Menu */}
           <div className="bg-white p-5 rounded-3xl border border-slate-200/90 shadow-sm space-y-4">

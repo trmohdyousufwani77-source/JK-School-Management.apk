@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Header } from './components/Header';
 import { Sidebar, TabType } from './components/Sidebar';
 import { BottomNav } from './components/BottomNav';
@@ -49,9 +49,11 @@ import {
 import {
   deleteExcelMappingSchemaFromFirestore,
   deletePrincipalFromFirestore,
+  FirebaseSyncSummary,
   signInWithGoogleAdmin,
   signOutFirebaseAdmin,
   subscribeFirebaseAuth,
+  syncAllAttendanceAndLeavesToFirebase,
   syncExcelMappingSchemaToFirestore,
   syncPrincipalToFirestore,
   syncSchoolProfileToFirestore,
@@ -740,15 +742,36 @@ function SchoolMasterApp() {
       }
       return [enrichedRecord, ...prev];
     });
-    fetch('/api/teacher-attendance', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(enrichedRecord),
-    }).catch(() => {});
-    syncTeacherAttendanceToFirestore(enrichedRecord, !existingRecord).catch(() => {});
+    const isCurrentlyOffline = isOffline || (typeof navigator !== 'undefined' && !navigator.onLine);
+    if (isCurrentlyOffline) {
+      const queueItem: OfflineSyncItem = {
+        id: `tatt-${enrichedRecord.id}`,
+        category: 'attendance',
+        title: `Teacher: ${enrichedRecord.teacherName} (${enrichedRecord.employeeId})`,
+        subtitle: `Status: ${enrichedRecord.status} • Date: ${enrichedRecord.date}`,
+        timestamp: enrichedRecord.updatedAt || new Date().toISOString(),
+        sizeBytes: 980,
+        payload: enrichedRecord,
+        status: 'pending',
+      };
+      setOfflineSyncQueue((prev) => [
+        ...prev.filter((item) => item.id !== queueItem.id),
+        queueItem,
+      ]);
+      try {
+        localStorage.setItem('sm_had_offline_period_v1', 'true');
+      } catch { /* ignore */ }
+    } else {
+      fetch('/api/teacher-attendance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(enrichedRecord),
+      }).catch(() => {});
+      syncTeacherAttendanceToFirestore(enrichedRecord, !existingRecord).catch(() => {});
+    }
   };
 
-  // 12. Offline Mode & Sync Queue
+  // 12. Offline Mode & Automated Firebase Sync Queue
   const [isOffline, setIsOffline] = useState<boolean>(() => {
     const saved = localStorage.getItem(`${STORAGE_KEY_PREFIX}is_offline`);
     return saved !== null ? JSON.parse(saved) : false;
@@ -763,9 +786,37 @@ function SchoolMasterApp() {
     }
     return defaultPendingSyncQueue;
   });
+  const [lastFirebaseSyncSummary, setLastFirebaseSyncSummary] = useState<FirebaseSyncSummary | null>(() => {
+    try {
+      const raw = localStorage.getItem('sm_last_firebase_sync_v1');
+      return raw ? (JSON.parse(raw) as FirebaseSyncSummary) : null;
+    } catch {
+      return null;
+    }
+  });
+  const isSyncRunningRef = useRef<boolean>(false);
+  const prevIsOfflineRef = useRef<boolean>(isOffline);
+  const hadOfflinePeriodRef = useRef<boolean>(
+    (() => {
+      try {
+        return (
+          localStorage.getItem('sm_had_offline_period_v1') === 'true' ||
+          (typeof navigator !== 'undefined' && !navigator.onLine)
+        );
+      } catch {
+        return false;
+      }
+    })()
+  );
 
   useEffect(() => {
     localStorage.setItem(`${STORAGE_KEY_PREFIX}is_offline`, JSON.stringify(isOffline));
+    if (isOffline) {
+      hadOfflinePeriodRef.current = true;
+      try {
+        localStorage.setItem('sm_had_offline_period_v1', 'true');
+      } catch { /* ignore */ }
+    }
   }, [isOffline]);
 
   useEffect(() => {
@@ -1178,98 +1229,248 @@ function SchoolMasterApp() {
     setIsOffline(true);
   };
 
-  // Step-by-step synchronization showing granular progress and active uploading records
-  const handleSyncOfflineData = () => {
-    if (offlineSyncQueue.length === 0 || syncProgress?.isSyncing) return;
+  // Real Firebase & Local Server Sync Now (manual or automated on internet reconnect)
+  const handleSyncOfflineData = useCallback(
+    async (trigger: 'manual' | 'auto-reconnect' = 'manual') => {
+      if (isSyncRunningRef.current) return;
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return;
 
-    const itemsToSync = [...offlineSyncQueue];
-    const total = itemsToSync.length;
+      isSyncRunningRef.current = true;
+      try {
+        const unsyncedStudentAtt = attendanceRecords.filter((r) => r.isOfflineSynced === false);
+        const queuedItemsSnapshot: OfflineSyncItem[] =
+          offlineSyncQueue.length > 0
+            ? [...offlineSyncQueue]
+            : [
+                {
+                  id: `sync-stu-att-${Date.now()}`,
+                  category: 'attendance',
+                  title: `Student Attendance Register (${attendanceRecords.length} records)`,
+                  subtitle:
+                    unsyncedStudentAtt.length > 0
+                      ? `${unsyncedStudentAtt.length} unsynced offline check-in(s)`
+                      : 'Full local attendance snapshot → Firebase',
+                  timestamp: new Date().toISOString(),
+                  sizeBytes: Math.max(512, attendanceRecords.length * 320),
+                  payload: null,
+                  status: 'pending',
+                },
+                {
+                  id: `sync-tch-att-${Date.now()}`,
+                  category: 'attendance',
+                  title: `Teacher Attendance Register (${teacherAttendance.length} records)`,
+                  subtitle: 'Daily arrival/departure & service records → Firebase',
+                  timestamp: new Date().toISOString(),
+                  sizeBytes: Math.max(512, teacherAttendance.length * 360),
+                  payload: null,
+                  status: 'pending',
+                },
+                {
+                  id: `sync-leaves-${Date.now()}`,
+                  category: 'leave',
+                  title: `Teacher Leave Applications (${leaveApplications.length} records)`,
+                  subtitle: 'Casual & Medical Leave requests & decisions → Firebase',
+                  timestamp: new Date().toISOString(),
+                  sizeBytes: Math.max(512, leaveApplications.length * 420),
+                  payload: null,
+                  status: 'pending',
+                },
+              ];
 
-    let currentIndex = 0;
-    const completed: OfflineSyncItem[] = [];
+        const totalVisual = queuedItemsSnapshot.length;
+        setSyncProgress({
+          isSyncing: true,
+          currentIndex: 1,
+          totalCount: totalVisual,
+          currentItem: { ...queuedItemsSnapshot[0], status: 'uploading' },
+          completedItems: [],
+          pendingItems: queuedItemsSnapshot.slice(1),
+          percentage: 12,
+          speedKbps: 64,
+        });
 
-    // Initialize sync progress state
-    setSyncProgress({
-      isSyncing: true,
-      currentIndex: 1,
-      totalCount: total,
-      currentItem: { ...itemsToSync[0], status: 'uploading' },
-      completedItems: [],
-      pendingItems: itemsToSync.slice(1),
-      percentage: Math.max(5, Math.round((1 / total) * 15)),
-      speedKbps: 52,
-    });
+        const summary = await syncAllAttendanceAndLeavesToFirebase({
+          attendanceRecords,
+          teacherAttendance,
+          teacherLeaves: leaveApplications,
+          students,
+          trigger,
+          onStageProgress: ({ percentage, label }) => {
+            const completedIdx = Math.min(
+              totalVisual - 1,
+              Math.floor((percentage / 100) * totalVisual)
+            );
+            setSyncProgress({
+              isSyncing: percentage < 100,
+              currentIndex: Math.min(totalVisual, completedIdx + 1),
+              totalCount: totalVisual,
+              currentItem:
+                percentage < 100
+                  ? {
+                      ...(queuedItemsSnapshot[completedIdx] || queuedItemsSnapshot[0]),
+                      title: label,
+                      status: 'uploading',
+                    }
+                  : null,
+              completedItems: queuedItemsSnapshot
+                .slice(0, percentage >= 100 ? totalVisual : completedIdx)
+                .map((it) => ({ ...it, status: 'synced' as const })),
+              pendingItems:
+                percentage >= 100 ? [] : queuedItemsSnapshot.slice(completedIdx + 1),
+              percentage: Math.max(12, Math.min(100, percentage)),
+              speedKbps: percentage >= 100 ? 0 : 72,
+            });
+          },
+        });
 
-    const stepDurationMs = 650; // realistic upload latency per record
+        // Mark all local student attendance records as synced & clear offline queue
+        setAttendanceRecords((prev) =>
+          prev.map((r) => (r.isOfflineSynced === false ? { ...r, isOfflineSynced: true } : r))
+        );
+        setOfflineSyncQueue([]);
+        setIsOffline(false);
+        hadOfflinePeriodRef.current = false;
+        try {
+          localStorage.removeItem('sm_had_offline_period_v1');
+          localStorage.setItem('sm_last_firebase_sync_v1', JSON.stringify(summary));
+        } catch { /* ignore */ }
+        setLastFirebaseSyncSummary(summary);
 
-    const intervalId = setInterval(() => {
-      currentIndex += 1;
-
-      if (currentIndex <= total) {
-        const justFinished = itemsToSync[currentIndex - 1];
-        completed.push({ ...justFinished, status: 'synced' });
-
-        // Update local attendance store if record has attendance payload
-        if (justFinished.category === 'attendance' && justFinished.payload?.id) {
-          const rec = justFinished.payload as AttendanceRecord;
-          setAttendanceRecords((prev) => {
-            const idsToRemove = new Set([rec.id]);
-            return [...prev.filter((r) => !idsToRemove.has(r.id)), { ...rec, isOfflineSynced: true }];
-          });
-        }
-
-        if (currentIndex < total) {
-          const nextItem = itemsToSync[currentIndex];
-          const pct = Math.round((currentIndex / total) * 100);
-          setSyncProgress({
-            isSyncing: true,
-            currentIndex: currentIndex + 1,
-            totalCount: total,
-            currentItem: { ...nextItem, status: 'uploading' },
-            completedItems: [...completed],
-            pendingItems: itemsToSync.slice(currentIndex + 1),
-            percentage: pct,
-            speedKbps: 45 + Math.floor(Math.random() * 25),
-          });
-        } else {
-          // All records finished uploading
-          clearInterval(intervalId);
-          setSyncProgress({
-            isSyncing: false,
-            currentIndex: total,
-            totalCount: total,
-            currentItem: null,
-            completedItems: [...completed],
-            pendingItems: [],
-            percentage: 100,
-            speedKbps: 0,
-          });
-          setOfflineSyncQueue([]);
-          setIsOffline(false);
-        }
+        setSyncProgress({
+          isSyncing: false,
+          currentIndex: totalVisual,
+          totalCount: totalVisual,
+          currentItem: null,
+          completedItems: queuedItemsSnapshot.map((it) => ({ ...it, status: 'synced' as const })),
+          pendingItems: [],
+          percentage: 100,
+          speedKbps: 0,
+        });
+      } finally {
+        isSyncRunningRef.current = false;
       }
-    }, stepDurationMs);
-  };
+    },
+    [attendanceRecords, leaveApplications, offlineSyncQueue, students, teacherAttendance]
+  );
 
-  // Handlers for Leaves (Full CRUD + Review / Approve / Reject + Soft-Delete Audit + API & Firestore Sync)
+  // Automatically trigger Firebase 'Sync Now' when device regains internet after offline usage
+  useEffect(() => {
+    const handleBrowserOffline = () => {
+      hadOfflinePeriodRef.current = true;
+      try {
+        localStorage.setItem('sm_had_offline_period_v1', 'true');
+      } catch { /* ignore */ }
+    };
+
+    const handleBrowserOnline = () => {
+      const hasUnsyncedLocal =
+        hadOfflinePeriodRef.current ||
+        offlineSyncQueue.length > 0 ||
+        attendanceRecords.some((r) => r.isOfflineSynced === false);
+      if (hasUnsyncedLocal) {
+        void handleSyncOfflineData('auto-reconnect');
+      }
+    };
+
+    window.addEventListener('offline', handleBrowserOffline);
+    window.addEventListener('online', handleBrowserOnline);
+
+    // Also auto-sync if the user was offline before reload and is now back online
+    if (
+      typeof navigator !== 'undefined' &&
+      navigator.onLine &&
+      !isOffline &&
+      hadOfflinePeriodRef.current
+    ) {
+      const timer = window.setTimeout(() => {
+        void handleSyncOfflineData('auto-reconnect');
+      }, 900);
+      return () => {
+        window.clearTimeout(timer);
+        window.removeEventListener('offline', handleBrowserOffline);
+        window.removeEventListener('online', handleBrowserOnline);
+      };
+    }
+
+    return () => {
+      window.removeEventListener('offline', handleBrowserOffline);
+      window.removeEventListener('online', handleBrowserOnline);
+    };
+  }, [attendanceRecords, handleSyncOfflineData, isOffline, offlineSyncQueue.length]);
+
+  // Also trigger auto-sync when switching from Offline Mode -> Online Mode in-app
+  useEffect(() => {
+    if (prevIsOfflineRef.current && !isOffline) {
+      if (typeof navigator === 'undefined' || navigator.onLine) {
+        void handleSyncOfflineData('auto-reconnect');
+      }
+    }
+    prevIsOfflineRef.current = isOffline;
+  }, [isOffline, handleSyncOfflineData]);
+
+  // Handlers for Leaves (Full CRUD + Review / Approve / Reject + Soft-Delete Audit + Offline Queue + API & Firestore Sync)
   const handleApplyLeave = (newLeave: TeacherLeaveApplication) => {
     setLeaveApplications((prev) => [newLeave, ...prev]);
-    fetch('/api/leaves', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newLeave),
-    }).catch(() => {});
-    syncTeacherLeaveToFirestore(newLeave, true).catch(() => {});
+    const isCurrentlyOffline = isOffline || (typeof navigator !== 'undefined' && !navigator.onLine);
+    if (isCurrentlyOffline) {
+      const leaveQueueItem: OfflineSyncItem = {
+        id: `lv-${newLeave.id}`,
+        category: 'leave',
+        title: `Leave: ${newLeave.teacherName} (${newLeave.leaveType.replace(/_/g, ' ')})`,
+        subtitle: `${newLeave.startDate} to ${newLeave.endDate} • ${newLeave.totalDays} day(s)`,
+        timestamp: newLeave.updatedAt || new Date().toISOString(),
+        sizeBytes: 1120,
+        payload: newLeave,
+        status: 'pending',
+      };
+      setOfflineSyncQueue((prev) => [
+        ...prev.filter((item) => item.id !== leaveQueueItem.id),
+        leaveQueueItem,
+      ]);
+      hadOfflinePeriodRef.current = true;
+      try {
+        localStorage.setItem('sm_had_offline_period_v1', 'true');
+      } catch { /* ignore */ }
+    } else {
+      fetch('/api/leaves', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newLeave),
+      }).catch(() => {});
+      syncTeacherLeaveToFirestore(newLeave, true).catch(() => {});
+    }
   };
 
   const handleUpdateLeave = (updatedLeave: TeacherLeaveApplication) => {
     setLeaveApplications((prev) => prev.map((l) => (l.id === updatedLeave.id ? updatedLeave : l)));
-    fetch(`/api/leaves/${encodeURIComponent(updatedLeave.id)}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updatedLeave),
-    }).catch(() => {});
-    syncTeacherLeaveToFirestore(updatedLeave, false).catch(() => {});
+    const isCurrentlyOffline = isOffline || (typeof navigator !== 'undefined' && !navigator.onLine);
+    if (isCurrentlyOffline) {
+      const leaveQueueItem: OfflineSyncItem = {
+        id: `lv-${updatedLeave.id}`,
+        category: 'leave',
+        title: `Leave Update: ${updatedLeave.teacherName} (${updatedLeave.status})`,
+        subtitle: `${updatedLeave.startDate} to ${updatedLeave.endDate} • ${updatedLeave.totalDays} day(s)`,
+        timestamp: updatedLeave.updatedAt || new Date().toISOString(),
+        sizeBytes: 1120,
+        payload: updatedLeave,
+        status: 'pending',
+      };
+      setOfflineSyncQueue((prev) => [
+        ...prev.filter((item) => item.id !== leaveQueueItem.id),
+        leaveQueueItem,
+      ]);
+      hadOfflinePeriodRef.current = true;
+      try {
+        localStorage.setItem('sm_had_offline_period_v1', 'true');
+      } catch { /* ignore */ }
+    } else {
+      fetch(`/api/leaves/${encodeURIComponent(updatedLeave.id)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedLeave),
+      }).catch(() => {});
+      syncTeacherLeaveToFirestore(updatedLeave, false).catch(() => {});
+    }
   };
 
   const handleDeleteLeave = (leaveId: string, deletionReason: string) => {
@@ -1988,6 +2189,7 @@ function SchoolMasterApp() {
             activeProfile={activeDevAdmin}
             school={school}
             language={language}
+            onUpdateSchool={setSchool}
             onSaveProfile={handleSaveDevAdminProfile}
             onAddProfile={handleAddDevAdminProfile}
             onSelectActiveProfile={handleSelectActiveDevAdmin}
@@ -2009,10 +2211,20 @@ function SchoolMasterApp() {
         queuedChangesCount={offlineSyncQueue.length}
         queueItems={offlineSyncQueue}
         syncProgress={syncProgress}
-        onSyncNow={handleSyncOfflineData}
+        onSyncNow={() => void handleSyncOfflineData('manual')}
         onSimulateSampleQueue={handleSimulateSampleQueue}
         language={language}
         schoolName={school.name}
+        lastFirebaseSyncSummary={lastFirebaseSyncSummary}
+        localAttendanceCount={attendanceRecords.length + teacherAttendance.length}
+        localLeaveCount={leaveApplications.length}
+        firebaseSignedIn={Boolean(firebaseUser?.emailVerified)}
+        onConnectFirebase={async () => {
+          try {
+            await signInWithGoogleAdmin();
+            await handleSyncOfflineData('manual');
+          } catch { /* user cancelled popup */ }
+        }}
       />
 
       <Header

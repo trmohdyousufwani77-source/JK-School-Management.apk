@@ -37,6 +37,7 @@ import {
   saveSyncConflicts,
 } from '../utils/syncDiagnostics';
 import { SyncConflictResolutionModal } from './SyncConflictResolutionModal';
+import type { FirebaseSyncSummary } from '../firebase';
 
 interface OfflineIndicatorProps {
   isOffline?: boolean;
@@ -48,6 +49,11 @@ interface OfflineIndicatorProps {
   language?: 'en' | 'ur';
   schoolName?: string;
   onResolveConflictsCallback?: (resolved: SyncConflictItem[]) => void;
+  lastFirebaseSyncSummary?: FirebaseSyncSummary | null;
+  localAttendanceCount?: number;
+  localLeaveCount?: number;
+  firebaseSignedIn?: boolean;
+  onConnectFirebase?: () => void;
 }
 
 export const OfflineIndicator: React.FC<OfflineIndicatorProps> = ({
@@ -60,6 +66,11 @@ export const OfflineIndicator: React.FC<OfflineIndicatorProps> = ({
   language = 'en',
   schoolName = 'Government Boys Middle School Pamposh Colony',
   onResolveConflictsCallback,
+  lastFirebaseSyncSummary,
+  localAttendanceCount = 0,
+  localLeaveCount = 0,
+  firebaseSignedIn = false,
+  onConnectFirebase,
 }) => {
   const [browserOnline, setBrowserOnline] = useState<boolean>(
     typeof navigator !== 'undefined' ? navigator.onLine : true
@@ -325,39 +336,64 @@ export const OfflineIndicator: React.FC<OfflineIndicatorProps> = ({
   // 2. TEMPORARY SYNC SUCCESS BANNER
   if (showSyncSuccess) {
     return (
-      <aside aria-label="Sync Completed" className="bg-gradient-to-r from-emerald-700 via-emerald-600 to-teal-700 text-white text-xs px-4 py-2 flex items-center justify-between gap-3 shadow-md transition-all duration-300 no-print z-40">
-        <div className="flex items-center gap-2.5 font-medium max-w-4xl">
+      <aside aria-label="Sync Completed" className="bg-gradient-to-r from-emerald-700 via-emerald-600 to-teal-700 text-white text-xs px-4 py-2 flex flex-wrap items-center justify-between gap-3 shadow-md transition-all duration-300 no-print z-40">
+        <div className="flex items-center gap-2.5 font-medium max-w-5xl">
           <div className="w-6 h-6 rounded-full bg-white/20 flex items-center justify-center shrink-0">
             <CheckCircle2 className="w-4 h-4 text-emerald-100" />
           </div>
           <div>
             <span className="font-bold">
-              {language === 'ur'
+              {lastFirebaseSyncSummary
+                ? lastFirebaseSyncSummary.trigger === 'auto-reconnect'
+                  ? `Auto-Synced on Reconnect: ${lastFirebaseSyncSummary.studentAttendanceSynced} Student Att., ${lastFirebaseSyncSummary.teacherAttendanceSynced} Teacher Att., ${lastFirebaseSyncSummary.leavesSynced} Leaves`
+                  : `Sync Now Complete: ${lastFirebaseSyncSummary.studentAttendanceSynced} Student Att., ${lastFirebaseSyncSummary.teacherAttendanceSynced} Teacher Att., ${lastFirebaseSyncSummary.leavesSynced} Leaves`
+                : language === 'ur'
                 ? `تمام ${lastSyncedCount} آف لائن ریکارڈز کامیابی سے مرکزی ڈیٹا بیس سے ہم آہنگ ہو چکے ہیں!`
-                : `All ${lastSyncedCount} offline records successfully synchronized and verified with central database!`}
+                : `All ${lastSyncedCount} offline records successfully synchronized with Firebase!`}
             </span>
             <span className="text-emerald-100 text-[11px] block sm:inline sm:ml-2">
-              {language === 'ur' ? 'مقامی کیشے اپ ٹو ڈیٹ ہے۔' : 'Local device cache is fully up to date.'}
+              {lastFirebaseSyncSummary?.firebaseConnected
+                ? 'Uploaded to Firebase Cloud Firestore.'
+                : lastFirebaseSyncSummary?.requiresFirebaseAuth
+                ? 'Saved to school server — connect Google Firebase for cloud backup.'
+                : language === 'ur'
+                ? 'مقامی کیشے اپ ٹو ڈیٹ ہے۔'
+                : 'Local device cache is fully up to date.'}
             </span>
           </div>
         </div>
-        <button
-          onClick={() => setShowSyncSuccess(false)}
-          className="text-white/80 hover:text-white p-1 rounded transition-colors"
-          title="Dismiss"
-        >
-          <X className="w-3.5 h-3.5" />
-        </button>
+        <div className="flex items-center gap-2">
+          {lastFirebaseSyncSummary?.requiresFirebaseAuth && onConnectFirebase && (
+            <button
+              type="button"
+              onClick={onConnectFirebase}
+              className="px-2.5 py-1 rounded-lg bg-white text-emerald-900 hover:bg-emerald-50 text-[11px] font-bold transition-colors"
+            >
+              Connect Firebase
+            </button>
+          )}
+          <button
+            onClick={() => setShowSyncSuccess(false)}
+            className="text-white/80 hover:text-white p-1 rounded transition-colors"
+            title="Dismiss"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
       </aside>
     );
   }
 
-  // 3. RECONNECTED BADGE
+  // 3. RECONNECTED BADGE (auto-triggers Firebase Sync Now)
   if (showReconnectedBadge && !effectiveOffline) {
     return (
       <aside aria-label="Internet Connection Restored" className="bg-emerald-600 text-white text-xs px-4 py-1.5 flex items-center justify-center gap-2 font-medium shadow-sm transition-all duration-300 no-print z-40">
         <CheckCircle2 className="w-3.5 h-3.5 text-emerald-200" />
-        <span>{language === 'ur' ? 'انٹرنیٹ کنکشن بحال ہو گیا — سسٹم لائیو اور ہم آہنگ ہے' : 'Internet connection restored — System is live and ready'}</span>
+        <span>
+          {language === 'ur'
+            ? 'انٹرنیٹ کنکشن بحال ہو گیا — مقامی حاضری اور رخصت کا ڈیٹا فائربیس پر خودکار ہم آہنگ ہو رہا ہے'
+            : 'Internet restored — Automatically syncing locally stored attendance & leave records to Firebase'}
+        </span>
       </aside>
     );
   }
@@ -552,11 +588,12 @@ export const OfflineIndicator: React.FC<OfflineIndicatorProps> = ({
                 {onSyncNow && (
                   <button
                     onClick={onSyncNow}
-                    disabled={queuedChangesCount === 0}
+                    disabled={typeof navigator !== 'undefined' && !navigator.onLine}
                     className="px-3 py-1 rounded-lg bg-white text-amber-950 hover:bg-amber-50 text-[11px] font-bold transition-all shadow-sm flex items-center gap-1.5 active:scale-95 disabled:opacity-50"
+                    title="Upload all locally stored student attendance, teacher attendance, and leave data to Firebase"
                   >
                     <UploadCloud className="w-3.5 h-3.5 text-amber-700" />
-                    <span>{language === 'ur' ? 'ابھی ہم آہنگ کریں' : 'Sync Offline Data'}</span>
+                    <span>{language === 'ur' ? 'ابھی فائربیس سنک کریں' : 'Sync Now'}</span>
                   </button>
                 )}
               </div>
@@ -798,9 +835,61 @@ export const OfflineIndicator: React.FC<OfflineIndicatorProps> = ({
     );
   }
 
-  // If online and no queued items, return conflict modal if open or null
+  // Online compact Auto-Sync / Firebase Sync Now bar (always accessible to sync local attendance & leave data)
+  const formattedLastSync = lastFirebaseSyncSummary?.syncedAt
+    ? new Date(lastFirebaseSyncSummary.syncedAt).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+      })
+    : null;
+
   return (
     <>
+      {onSyncNow && (
+        <aside
+          aria-label="Firebase Auto-Sync Status"
+          className="bg-slate-900 text-slate-100 text-[11px] border-b border-slate-800 no-print z-30"
+        >
+          <div className="max-w-7xl mx-auto px-4 py-1.5 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 flex-wrap min-w-0">
+              <span className="inline-flex items-center gap-1.5 font-bold text-emerald-300">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
+                <span>
+                  {language === 'ur' ? 'آن لائن • خودکار فائربیس سنک فعال' : 'Online • Auto-Sync Active'}
+                </span>
+              </span>
+              <span className="text-slate-500 hidden sm:inline">|</span>
+              <span className="text-slate-300 truncate">
+                {localAttendanceCount} Attendance &amp; {localLeaveCount} Leave records cached locally
+                {formattedLastSync ? ` • Last synced ${formattedLastSync}` : ''}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              {!firebaseSignedIn && onConnectFirebase && (
+                <button
+                  type="button"
+                  onClick={onConnectFirebase}
+                  className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 text-[11px] font-bold transition-colors flex items-center gap-1"
+                  title="Sign in with Google to enable direct Cloud Firestore sync"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  <span>Connect Firebase</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={onSyncNow}
+                className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold transition-all shadow-xs flex items-center gap-1.5 active:scale-95"
+                title="Upload all locally stored attendance and leave data to Firebase now"
+              >
+                <UploadCloud className="w-3.5 h-3.5" />
+                <span>{language === 'ur' ? 'فائربیس سنک کریں' : 'Sync Now'}</span>
+              </button>
+            </div>
+          </div>
+        </aside>
+      )}
       {isConflictModalOpen && (
         <SyncConflictResolutionModal
           isOpen={isConflictModalOpen}
