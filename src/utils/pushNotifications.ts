@@ -8,7 +8,11 @@ export interface PushNotificationItem {
   message: string;
   messageUrdu?: string;
   category: 'System' | 'Academic' | 'Attendance' | 'Inspection' | 'Leave' | 'Exam';
-  targetRole?: 'teacher' | 'admin' | 'all';
+  targetRole?: 'teacher' | 'admin' | 'principal' | 'student' | 'all';
+  targetUserId?: string;
+  actionTab?: string;
+  entityId?: string;
+  schoolCode?: string;
   time: string;
   createdAt?: string;
   read: boolean;
@@ -102,9 +106,32 @@ export function emitPushNotification(
     title: created.title,
     message: created.message,
     category: created.category,
-    targetRole: created.targetRole,
+    targetRole: created.targetRole === 'principal' ? 'admin' : created.targetRole === 'student' ? 'all' : created.targetRole,
     priority: created.priority,
   }).catch(() => {});
+
+  // Sync notification to backend /api/notifications for multi-role, school-isolated delivery
+  if (typeof fetch !== 'undefined') {
+    fetch('/api/notifications', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: created.id,
+        title: created.title,
+        titleUrdu: created.titleUrdu,
+        message: created.message,
+        messageUrdu: created.messageUrdu,
+        category: created.category,
+        targetRole: created.targetRole || 'all',
+        targetUserId: created.targetUserId || '',
+        actionTab: created.actionTab || '',
+        entityId: created.entityId || '',
+        schoolCode: created.schoolCode || 'DEFAULT',
+        priority: created.priority || 'normal',
+        actorRole: created.category === 'System' || created.category === 'Inspection' ? 'admin' : 'teacher',
+      }),
+    }).catch(() => {});
+  }
 
   const prefs = loadPushPreferences();
   if (
@@ -127,10 +154,115 @@ export function emitPushNotification(
   return created;
 }
 
+/**
+ * Checks whether a notification should be visible to a given user role and optional userId.
+ */
+export function isNotificationVisibleForUser(
+  notif: PushNotificationItem,
+  userRole: string,
+  userId?: string
+): boolean {
+  const roleNorm = String(userRole || '').toLowerCase();
+  const isAdminSide =
+    roleNorm === 'admin' ||
+    roleNorm === 'primary_admin' ||
+    roleNorm === 'senior_admin' ||
+    roleNorm === 'junior_admin' ||
+    roleNorm === 'head_teacher' ||
+    roleNorm === 'principal';
+
+  if (notif.targetUserId && userId && notif.targetUserId !== userId && !isAdminSide) {
+    return false;
+  }
+
+  const target = notif.targetRole || 'all';
+  if (target === 'all') return true;
+  if (target === 'admin' || target === 'principal') return isAdminSide;
+  if (target === 'teacher') return roleNorm === 'teacher';
+  if (target === 'student') return roleNorm === 'student';
+  return true;
+}
+
+/**
+ * Teacher Leave Submitted -> Immediate alert to Administrators & Principal.
+ */
+export function dispatchNewLeaveRequestNotification(
+  leave: TeacherLeaveApplication,
+  schoolCode?: string
+): PushNotificationItem | null {
+  const prefs = loadPushPreferences();
+  if (!prefs.teacherLeaveAlerts) return null;
+
+  return emitPushNotification({
+    title: `New Leave Request: ${leave.teacherName}`,
+    titleUrdu: `نئی رخصت کی درخواست: ${leave.teacherName}`,
+    message: `${leave.leaveType.replace(/_/g, ' ')} requested from ${leave.startDate} to ${leave.endDate} (${leave.totalDays} day(s)). Click to review and approve/reject.`,
+    messageUrdu: `${leave.startDate} تا ${leave.endDate} (${leave.totalDays} دن) کے لیے نئی رخصت کی درخواست موصول ہوئی ہے۔`,
+    category: 'Leave',
+    targetRole: 'admin',
+    actionTab: 'teacher-leave',
+    entityId: leave.id,
+    schoolCode,
+    priority: 'high',
+  });
+}
+
+/**
+ * Teacher Cancelled/Deleted Pending Leave -> Notify Administrators & Principal.
+ */
+export function dispatchLeaveCancellationNotification(
+  leave: TeacherLeaveApplication,
+  reason?: string,
+  schoolCode?: string
+): PushNotificationItem | null {
+  const prefs = loadPushPreferences();
+  if (!prefs.teacherLeaveAlerts) return null;
+
+  return emitPushNotification({
+    title: `Leave Request Cancelled: ${leave.teacherName}`,
+    titleUrdu: `رخصت کی درخواست منسوخ: ${leave.teacherName}`,
+    message: `${leave.teacherName} withdrew ${leave.leaveType.replace(/_/g, ' ')} (${leave.startDate} to ${leave.endDate}).${reason ? ` Reason: ${reason}` : ''}`,
+    messageUrdu: `${leave.teacherName} نے ${leave.startDate} تا ${leave.endDate} کی رخصت کی درخواست منسوخ کر دی۔`,
+    category: 'Leave',
+    targetRole: 'admin',
+    actionTab: 'teacher-leave',
+    entityId: leave.id,
+    schoolCode,
+    priority: 'normal',
+  });
+}
+
+/**
+ * Admin marked Leave Under Review / Requested Info -> Notify Concerned Teacher.
+ */
+export function dispatchLeaveUnderReviewNotification(
+  leave: TeacherLeaveApplication,
+  remarks?: string,
+  schoolCode?: string
+): PushNotificationItem | null {
+  const prefs = loadPushPreferences();
+  if (!prefs.teacherLeaveAlerts) return null;
+
+  return emitPushNotification({
+    title: `Leave Under Review: ${leave.teacherName}`,
+    titleUrdu: `رخصت زیرِ غور: ${leave.teacherName}`,
+    message: `Your ${leave.leaveType.replace(/_/g, ' ')} (${leave.startDate} to ${leave.endDate}) is under review by Administration.${remarks ? ` Remarks: ${remarks}` : ''}`,
+    messageUrdu: `آپ کی رخصت کی درخواست زیرِ غور ہے۔${remarks ? ` نوٹ: ${remarks}` : ''}`,
+    category: 'Leave',
+    targetRole: 'teacher',
+    targetUserId: leave.teacherId,
+    actionTab: 'teacher-leave',
+    entityId: leave.id,
+    schoolCode,
+    priority: 'normal',
+  });
+}
+
 export function dispatchLeaveDecisionNotification(
   leave: TeacherLeaveApplication,
   decision: 'Approved' | 'Rejected',
-  remarks?: string
+  remarks?: string,
+  schoolCode?: string
 ): PushNotificationItem | null {
   const prefs = loadPushPreferences();
   if (!prefs.teacherLeaveAlerts) return null;
@@ -143,12 +275,100 @@ export function dispatchLeaveDecisionNotification(
     titleUrdu: isApproved
       ? `رخصت منظور: ${leave.teacherName}`
       : `رخصت نامنظور: ${leave.teacherName}`,
-    message: `${leave.leaveType.replace('_', ' ')} (${leave.startDate} to ${leave.endDate}, ${leave.totalDays} day(s)) has been ${decision.toLowerCase()}.${remarks ? ` Note: ${remarks}` : ''}`,
+    message: `${leave.leaveType.replace(/_/g, ' ')} (${leave.startDate} to ${leave.endDate}, ${leave.totalDays} day(s)) has been ${decision.toLowerCase()}.${remarks ? ` Note: ${remarks}` : ''}`,
     messageUrdu: `${leave.startDate} تا ${leave.endDate} (${leave.totalDays} دن) کی درخواست ${isApproved ? 'منظور' : 'نامنظور'} کر دی گئی ہے۔`,
     category: 'Leave',
     targetRole: 'teacher',
+    targetUserId: leave.teacherId,
+    actionTab: 'teacher-leave',
+    entityId: leave.id,
+    schoolCode,
     priority: isApproved ? 'normal' : 'high',
   });
+}
+
+/**
+ * Evaluates whether active classes/sections have submitted today's daily attendance.
+ * Sends non-duplicate pending reminders to Teachers & Administrators/Principal,
+ * and stops automatically once attendance for all active classes is recorded.
+ */
+export function evaluatePendingAttendanceReminders(
+  records: AttendanceRecord[],
+  students: Student[],
+  schoolCode?: string,
+  options?: { force?: boolean; dateStr?: string }
+): { pendingClasses: string[]; emitted: PushNotificationItem[] } {
+  const today = options?.dateStr || new Date().toISOString().slice(0, 10);
+  const activeStudents = students.filter((s) => s.status === 'Active');
+  if (activeStudents.length === 0) return { pendingClasses: [], emitted: [] };
+
+  const activeClassMap = new Map<string, Set<string>>();
+  for (const s of activeStudents) {
+    const key = `Class ${s.classNumber}-${s.section}`;
+    if (!activeClassMap.has(key)) activeClassMap.set(key, new Set());
+    activeClassMap.get(key)!.add(s.id);
+  }
+
+  const markedToday = new Set(
+    records.filter((r) => r.date === today).map((r) => r.studentId)
+  );
+
+  const pendingClasses: string[] = [];
+  activeClassMap.forEach((studentIds, classLabel) => {
+    let anyMarked = false;
+    studentIds.forEach((sid) => {
+      if (markedToday.has(sid)) anyMarked = true;
+    });
+    if (!anyMarked) {
+      pendingClasses.push(classLabel);
+    }
+  });
+
+  if (pendingClasses.length === 0) {
+    return { pendingClasses: [], emitted: [] };
+  }
+
+  const dedupKey = `sm_pending_att_rem_${schoolCode || 'DEFAULT'}_${today}_${pendingClasses.join(',')}`;
+  if (!options?.force && sessionStorage.getItem(dedupKey)) {
+    return { pendingClasses, emitted: [] };
+  }
+  try {
+    sessionStorage.setItem(dedupKey, '1');
+  } catch {
+    // ignore storage errors
+  }
+
+  const summary =
+    pendingClasses.length <= 4
+      ? pendingClasses.join(', ')
+      : `${pendingClasses.slice(0, 4).join(', ')} +${pendingClasses.length - 4} more`;
+
+  const emitted: PushNotificationItem[] = [
+    emitPushNotification({
+      title: `Daily Attendance Pending (${pendingClasses.length} Class${pendingClasses.length === 1 ? '' : 'es'})`,
+      titleUrdu: `آج کی حاضری باقی ہے (${pendingClasses.length} کلاسز)`,
+      message: `Please submit today's (${today}) attendance for: ${summary}. Reminder stops automatically once submitted.`,
+      messageUrdu: `آج (${today}) کی حاضری درج کرنا باقی ہے: ${summary}۔`,
+      category: 'Attendance',
+      targetRole: 'teacher',
+      actionTab: 'attendance',
+      schoolCode,
+      priority: 'high',
+    }),
+    emitPushNotification({
+      title: `Admin Alert: ${pendingClasses.length} Class Attendance Pending Today`,
+      titleUrdu: `ایڈمن الرٹ: ${pendingClasses.length} کلاسز کی حاضری باقی`,
+      message: `Attendance not yet submitted for ${today}: ${summary}. Click to inspect Attendance Dashboard.`,
+      messageUrdu: `آج (${today}) درج ذیل کلاسز کی حاضری باقی ہے: ${summary}۔`,
+      category: 'Attendance',
+      targetRole: 'admin',
+      actionTab: 'attendance',
+      schoolCode,
+      priority: 'normal',
+    }),
+  ];
+
+  return { pendingClasses, emitted };
 }
 
 export interface LowAttendanceStudentAlert {
@@ -234,6 +454,7 @@ export function monitorAttendanceAndNotifyPrincipal(
     messageUrdu: `${flaggedStudents.length} طلباء کی حاضری مقررہ حد (${limit}%) سے کم ہے۔ فوری توجہ درکار ہے۔`,
     category: 'Attendance',
     targetRole: 'admin',
+    actionTab: 'attendance',
     priority: 'high',
   });
 
@@ -623,11 +844,18 @@ export function dispatchBulkConsecutiveAbsenceNotifications(params: {
 export function startAutomatedNotificationScheduler(
   getExaminations: () => Examination[],
   getAttendanceRecords: () => AttendanceRecord[],
-  getStudents: () => Student[]
+  getStudents: () => Student[],
+  getSchoolCode?: () => string
 ): () => void {
   const tick = () => {
     runScheduledExamReminderCheck(getExaminations(), { force: false });
     monitorAttendanceAndNotifyPrincipal(getAttendanceRecords(), getStudents());
+    evaluatePendingAttendanceReminders(
+      getAttendanceRecords(),
+      getStudents(),
+      getSchoolCode ? getSchoolCode() : undefined,
+      { force: false }
+    );
   };
 
   const initialTimer = setTimeout(tick, 1200);

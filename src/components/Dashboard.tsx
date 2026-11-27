@@ -50,6 +50,7 @@ import {
   Phone,
   UserPlus,
   Bell,
+  RefreshCw,
 } from 'lucide-react';
 import { NooriPrintPreviewModal, extractUrduFromNooriContainer } from './NooriPrintPreviewModal';
 import { NooriLigatureText } from './NooriLigatureText';
@@ -107,6 +108,10 @@ import { UpcomingBirthdaysCard } from './UpcomingBirthdaysCard';
 import { AttendanceInsightsCard } from './AttendanceInsightsCard';
 import { ProactiveInsightsWidget } from './ProactiveInsightsWidget';
 import { MarkVarianceWidget } from './MarkVarianceWidget';
+import { DashboardAiAssistant } from './DashboardAiAssistant';
+import { DashboardLessonPlanGenerator } from './DashboardLessonPlanGenerator';
+import { NoticeBoard } from './NoticeBoard';
+import type { NoticeBoardItem, NoticePriority } from '../types';
 
 interface DashboardProps {
   school: SchoolProfile;
@@ -138,6 +143,38 @@ interface DashboardProps {
   onCloudBackupSync?: () => void;
   onLockSession?: () => void;
   onUpdateSchool?: (updated: SchoolProfile) => void;
+  isOffline?: boolean;
+  pendingAttendanceCount?: number;
+  pendingLeaveCount?: number;
+  pendingSyncQueueCount?: number;
+  isSyncingOffline?: boolean;
+  lastFirebaseSyncSummary?: {
+    message: string;
+    syncedAt: string;
+    firebaseConnected: boolean;
+    totalSynced: number;
+  } | null;
+  onManualFirebaseSync?: () => void;
+  notices?: NoticeBoardItem[];
+  onCreateNotice?: (input: {
+    title: string;
+    body: string;
+    expirationDate: string;
+    priority: NoticePriority;
+    pinned: boolean;
+  }) => void;
+  onUpdateNotice?: (
+    noticeId: string,
+    updates: {
+      title: string;
+      body: string;
+      expirationDate: string;
+      priority: NoticePriority;
+      pinned: boolean;
+    }
+  ) => void;
+  onDeleteNotice?: (noticeId: string) => void;
+  onMarkNoticeRead?: (noticeId: string) => void;
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({
@@ -167,10 +204,106 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onCloudBackupSync,
   onLockSession,
   onUpdateSchool,
+  isOffline = false,
+  pendingAttendanceCount = 0,
+  pendingLeaveCount = 0,
+  pendingSyncQueueCount = 0,
+  isSyncingOffline = false,
+  lastFirebaseSyncSummary = null,
+  onManualFirebaseSync,
+  notices = [],
+  onCreateNotice,
+  onUpdateNotice,
+  onDeleteNotice,
+  onMarkNoticeRead,
 }) => {
+  const [browserOnline, setBrowserOnline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
+  const [locallyDismissedQuickNoteIds, setLocallyDismissedQuickNoteIds] = useState<string[]>([]);
+
+  const activeStudentQuickNotes = useMemo(() => {
+    const nowMs = Date.now();
+    const urgencyRank: Record<string, number> = { Urgent: 0, 'Follow-up': 1, Observation: 2 };
+    const items: Array<{ student: Student; note: NonNullable<Student['quickNotes']>[number] }> = [];
+    students.forEach((st) => {
+      (st.quickNotes || []).forEach((note) => {
+        if (note.dismissed || locallyDismissedQuickNoteIds.includes(note.id)) return;
+        const expMs = new Date(note.expiresAt).getTime();
+        if (!Number.isNaN(expMs) && expMs <= nowMs) return;
+        items.push({ student: st, note });
+      });
+    });
+    return items.sort((a, b) => {
+      const rankDiff = (urgencyRank[a.note.urgency] ?? 3) - (urgencyRank[b.note.urgency] ?? 3);
+      if (rankDiff !== 0) return rankDiff;
+      return new Date(b.note.createdAt).getTime() - new Date(a.note.createdAt).getTime();
+    });
+  }, [students, locallyDismissedQuickNoteIds]);
+
+  const handleDismissQuickNote = (student: Student, noteId: string) => {
+    setLocallyDismissedQuickNoteIds((prev) => (prev.includes(noteId) ? prev : [...prev, noteId]));
+    if (onUpdateStudent) {
+      const updatedStudent: Student = {
+        ...student,
+        quickNotes: (student.quickNotes || []).map((n) =>
+          n.id === noteId ? { ...n, dismissed: true } : n
+        ),
+      };
+      onUpdateStudent(updatedStudent);
+    }
+  };
+
+  const handleClearAllQuickNotes = () => {
+    const allIds = activeStudentQuickNotes.map((item) => item.note.id);
+    setLocallyDismissedQuickNoteIds((prev) => Array.from(new Set([...prev, ...allIds])));
+    if (onUpdateStudent) {
+      const notesByStudent = new Map<string, { student: Student; ids: Set<string> }>();
+      activeStudentQuickNotes.forEach(({ student, note }) => {
+        const existing = notesByStudent.get(student.id);
+        if (existing) {
+          existing.ids.add(note.id);
+        } else {
+          notesByStudent.set(student.id, { student, ids: new Set([note.id]) });
+        }
+      });
+      notesByStudent.forEach(({ student, ids }) => {
+        onUpdateStudent({
+          ...student,
+          quickNotes: (student.quickNotes || []).map((n) =>
+            ids.has(n.id) ? { ...n, dismissed: true } : n
+          ),
+        });
+      });
+    }
+  };
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleOnline = () => setBrowserOnline(true);
+    const handleOffline = () => setBrowserOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  const effectiveOffline = isOffline || !browserOnline;
+  const totalPendingLocalRecords = pendingAttendanceCount + pendingLeaveCount;
   const t = translations[language];
   const isTeacherDashboard = effectiveRole === 'teacher';
   const isAuthorizedAdmin = effectiveRole !== 'teacher';
+  const [aiStudioView, setAiStudioView] = useState<'qa' | 'lesson-plan' | 'both'>('qa');
+  const aiStudioRef = useRef<HTMLDivElement>(null);
+
+  const jumpToAiStudio = (mode: 'qa' | 'lesson-plan') => {
+    setAiStudioView(mode);
+    window.setTimeout(() => {
+      aiStudioRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 50);
+  };
 
   // Manual Headmaster Edit modal state (never auto-overwritten from other modules)
   const [showEditHeadmasterModal, setShowEditHeadmasterModal] = useState<boolean>(false);
@@ -1132,6 +1265,177 @@ export const Dashboard: React.FC<DashboardProps> = ({
         </div>
       )}
 
+      {/* Offline Status & Manual Firebase Sync Control Bar */}
+      <div
+        className={`rounded-2xl border px-4 py-3.5 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-3 no-print ${
+          effectiveOffline
+            ? 'bg-amber-50 border-amber-300 text-amber-950'
+            : 'bg-white border-slate-200 text-slate-900'
+        }`}
+      >
+        <div className="flex items-start sm:items-center gap-3 min-w-0">
+          <div
+            className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+              effectiveOffline
+                ? 'bg-amber-200/80 text-amber-800'
+                : 'bg-emerald-100 text-emerald-700'
+            }`}
+          >
+            <span
+              className={`w-3 h-3 rounded-full ${
+                effectiveOffline ? 'bg-amber-600 animate-pulse' : 'bg-emerald-500'
+              }`}
+            />
+          </div>
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-extrabold tracking-tight">
+                {effectiveOffline
+                  ? 'Offline Mode Active — Local Changes Queued Safely'
+                  : 'Online — Connected to Firebase Cloud Sync'}
+              </span>
+              <span
+                className={`text-[11px] font-mono font-bold px-2 py-0.5 rounded-md border ${
+                  effectiveOffline
+                    ? 'bg-amber-100 border-amber-300 text-amber-900'
+                    : 'bg-slate-100 border-slate-200 text-slate-700'
+                }`}
+              >
+                Pending Attendance: {pendingAttendanceCount} · Pending Leaves: {pendingLeaveCount}
+                {pendingSyncQueueCount > 0 ? ` · Queue: ${pendingSyncQueueCount}` : ''}
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-600 mt-0.5 truncate">
+              {lastFirebaseSyncSummary
+                ? `Last Firebase Sync (${new Date(lastFirebaseSyncSummary.syncedAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}): ${lastFirebaseSyncSummary.message}`
+                : effectiveOffline
+                ? 'Reconnect to the internet to push local attendance & teacher leave records to Firebase.'
+                : 'All local attendance and teacher leave records are ready for manual or automatic Firebase sync.'}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            disabled={effectiveOffline || isSyncingOffline || !onManualFirebaseSync}
+            onClick={() => onManualFirebaseSync?.()}
+            className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-colors whitespace-nowrap shrink-0 ${
+              effectiveOffline
+                ? 'bg-amber-200/70 text-amber-900 cursor-not-allowed'
+                : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs disabled:opacity-60'
+            }`}
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isSyncingOffline ? 'animate-spin' : ''}`} />
+            <span>
+              {isSyncingOffline
+                ? 'Syncing to Firebase...'
+                : effectiveOffline
+                ? 'Waiting for Network'
+                : totalPendingLocalRecords > 0
+                ? `Sync Now to Firebase (${totalPendingLocalRecords})`
+                : 'Sync Now to Firebase'}
+            </span>
+          </button>
+        </div>
+      </div>
+
+      {/* Temporary Teacher Notifications: Urgent Student Quick Notes */}
+      {activeStudentQuickNotes.length > 0 && (
+        <div
+          className="rounded-2xl border border-amber-300 bg-gradient-to-r from-amber-50 via-white to-rose-50/40 p-4 shadow-xs space-y-3 no-print"
+          data-testid="dashboard-quick-notes-banner"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-xl bg-amber-500 text-white flex items-center justify-center shrink-0">
+                <Bell className="w-4 h-4" />
+              </div>
+              <div>
+                <h2 className="text-sm font-extrabold text-slate-900">
+                  Student Quick Notes &amp; Urgent Observations ({activeStudentQuickNotes.length})
+                </h2>
+                <p className="text-[11px] text-slate-600">
+                  Temporary teacher notifications logged from student profiles. Dismiss once addressed.
+                </p>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleClearAllQuickNotes}
+                data-testid="clear-all-quick-notes-btn"
+                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white hover:bg-rose-50 text-rose-700 border border-rose-200 text-xs font-bold transition-colors"
+              >
+                <span>Clear All</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onNavigateTab('students')}
+                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition-colors"
+              >
+                <span>Open Student Directory</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+            {activeStudentQuickNotes.slice(0, 6).map(({ student, note }) => (
+              <div
+                key={note.id}
+                className={`p-3 rounded-xl border flex items-start justify-between gap-3 ${
+                  note.urgency === 'Urgent'
+                    ? 'bg-rose-50/80 border-rose-200'
+                    : note.urgency === 'Follow-up'
+                    ? 'bg-amber-50/80 border-amber-200'
+                    : 'bg-white border-slate-200'
+                }`}
+              >
+                <div className="min-w-0 space-y-1">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span
+                      className={`text-[10px] font-extrabold uppercase px-1.5 py-0.5 rounded ${
+                        note.urgency === 'Urgent'
+                          ? 'bg-rose-600 text-white'
+                          : note.urgency === 'Follow-up'
+                          ? 'bg-amber-600 text-white'
+                          : 'bg-indigo-100 text-indigo-800'
+                      }`}
+                    >
+                      {note.urgency}
+                    </span>
+                    <span className="text-xs font-extrabold text-slate-900 truncate">
+                      {student.fullName}
+                    </span>
+                    <span className="text-[10px] font-mono text-slate-500">
+                      Class {student.classNumber}-{student.section}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-800 leading-relaxed">{note.text}</p>
+                  <p className="text-[10px] text-slate-500">
+                    Logged by {note.authorName} · Expires{' '}
+                    {new Date(note.expiresAt).toLocaleDateString('en-IN', {
+                      day: 'numeric',
+                      month: 'short',
+                    })}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleDismissQuickNote(student, note.id)}
+                  title="Clear notification"
+                  data-testid={`dismiss-quick-note-${note.id}`}
+                  className="px-2.5 py-1 rounded-lg bg-white hover:bg-slate-100 border border-slate-200 text-[11px] font-bold text-slate-600 hover:text-slate-900 shrink-0 transition-colors"
+                >
+                  Clear
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Customized School Master Widget with Centralized Official School Logo */}
       <div className="bg-gradient-to-r from-[#0f294a] via-[#172554] to-[#0f172a] rounded-3xl p-6 sm:p-8 text-white shadow-xl relative overflow-hidden border border-amber-400/25">
         <div className="absolute right-0 top-0 bottom-0 w-1/3 bg-gradient-to-l from-amber-400/10 to-transparent pointer-events-none" />
@@ -1170,7 +1474,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight">
               {language === 'ur'
                 ? (school?.nameUrdu ? `خوش آمدید - ${school.nameUrdu}` : school?.name ? `خوش آمدید - ${school.name}` : 'خوش آمدید - اسکول')
-                : (school?.name && school.name.trim() ? `Welcome to ${school.name.trim()}` : 'Welcome to Government Middle School Pamposh Colony')}
+                : (school?.name && school.name.trim() ? `Welcome to ${school.name.trim()}` : 'Welcome to SchoolMaster Platform')}
             </h1>
             {school.nameUrdu && (
               <div
@@ -1834,7 +2138,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
           <div>
             <h2 className="text-sm font-black text-[#0f294a] flex items-center gap-2">
               <Layers className="w-4 h-4 text-amber-600" />
-              <span>GMS Pamposh Colony — 10 Core Dashboard Sections</span>
+              <span>{school?.name && school.name.trim() ? `${school.name.trim()} — ` : ''}10 Core Dashboard Sections</span>
             </h2>
             <p className="text-[11px] text-slate-500">
               Direct access to School Profile, Principal / Headmaster Records, Staff, Students, Attendance, Reports &amp; Settings
@@ -2107,6 +2411,23 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </button>
         </div>
       </div>
+
+      {/* ========================================================================= */}
+      {/* SCHOOL NOTICE BOARD — VISIBLE TO ALL USERS ON THE MAIN DASHBOARD          */}
+      {/* ========================================================================= */}
+      <NoticeBoard
+        mode="dashboard"
+        school={school}
+        currentUser={currentUser}
+        isAdmin={isAuthorizedAdmin}
+        teachers={teachers}
+        notices={notices}
+        onCreateNotice={(input) => onCreateNotice?.(input)}
+        onUpdateNotice={(id, updates) => onUpdateNotice?.(id, updates)}
+        onDeleteNotice={(id) => onDeleteNotice?.(id)}
+        onMarkNoticeRead={(id) => onMarkNoticeRead?.(id)}
+        onOpenFullNoticeBoard={() => onNavigateTab('notice-board')}
+      />
 
       {/* ========================================================================= */}
       {/* ROLE-SPECIFIC WORKSPACE: TEACHER DASHBOARD vs PRIMARY ADMIN DASHBOARD    */}
@@ -3008,7 +3329,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </div>
           <div className="flex items-center gap-2">
             <span className="text-[10px] font-bold px-2.5 py-1 rounded-full bg-slate-100 text-slate-700 border border-slate-200">
-              {school.name || 'Govt Middle School Pamposh Colony'}
+              {school.name && school.name.trim() ? school.name : 'Primary Institution Not Set'}
             </span>
           </div>
         </div>
@@ -3292,7 +3613,115 @@ export const Dashboard: React.FC<DashboardProps> = ({
             </button>
           )}
 
+          {/* 18. AI Question Answering (English, Urdu, Kashmiri + Image Q&A) */}
+          <button
+            type="button"
+            onClick={() => jumpToAiStudio('qa')}
+            className="p-3.5 rounded-2xl bg-indigo-50/70 hover:bg-indigo-100/80 border border-indigo-200 text-left transition-all group flex flex-col justify-between"
+          >
+            <div className="flex items-center justify-between">
+              <span className="w-5 h-5 rounded-lg bg-indigo-600 text-white text-[10px] font-black flex items-center justify-center">AI</span>
+              <Sparkles className="w-4 h-4 text-indigo-600 group-hover:scale-110 transition-transform" />
+            </div>
+            <div className="mt-2">
+              <h4 className="text-xs font-extrabold text-slate-900">AI Question Answering</h4>
+              <p className="text-[10.5px] text-slate-600 mt-0.5 line-clamp-2">Text &amp; camera/gallery image tutor in English, Urdu &amp; Kashmiri.</p>
+            </div>
+            <span className="mt-2 text-[10px] font-bold text-indigo-700 group-hover:underline">Ask AI Tutor →</span>
+          </button>
+
+          {/* 19. AI Lesson Plan Generator */}
+          <button
+            type="button"
+            onClick={() => jumpToAiStudio('lesson-plan')}
+            className="p-3.5 rounded-2xl bg-emerald-50/70 hover:bg-emerald-100/80 border border-emerald-200 text-left transition-all group flex flex-col justify-between"
+          >
+            <div className="flex items-center justify-between">
+              <span className="w-5 h-5 rounded-lg bg-emerald-600 text-white text-[10px] font-black flex items-center justify-center">LP</span>
+              <BookOpen className="w-4 h-4 text-emerald-600 group-hover:scale-110 transition-transform" />
+            </div>
+            <div className="mt-2">
+              <h4 className="text-xs font-extrabold text-slate-900">AI Lesson Plan Generator</h4>
+              <p className="text-[10.5px] text-slate-600 mt-0.5 line-clamp-2">13-section NEP lesson plans in English, Urdu &amp; Kashmiri (PDF/Word).</p>
+            </div>
+            <span className="mt-2 text-[10px] font-bold text-emerald-700 group-hover:underline">Create Lesson Plan →</span>
+          </button>
+
         </div>
+      </div>
+
+      {/* SchoolMaster Multilingual AI Studio (AI Q&A + AI Lesson Plan Generator) */}
+      <div ref={aiStudioRef} className="space-y-4 scroll-mt-20">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h2 className="text-base font-bold text-slate-900">
+              AI Teaching &amp; Learning Studio
+            </h2>
+            <p className="text-xs text-slate-500">
+              Multimodal Gemini AI powered on the server for English, Urdu, and Kashmiri classrooms.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+            <button
+              type="button"
+              onClick={() => onNavigateTab('ai-smart-edu')}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs transition-colors whitespace-nowrap shrink-0"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>Open Full AI Smart Education Studio</span>
+            </button>
+            <div className="inline-flex items-center p-1 rounded-xl bg-slate-100 border border-slate-200 gap-1">
+              <button
+                type="button"
+                onClick={() => setAiStudioView('qa')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                  aiStudioView === 'qa'
+                    ? 'bg-white text-slate-900 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                AI Question Answering
+              </button>
+              <button
+                type="button"
+                onClick={() => setAiStudioView('lesson-plan')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                  aiStudioView === 'lesson-plan'
+                    ? 'bg-white text-slate-900 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                AI Lesson Plan Generator
+              </button>
+              <button
+                type="button"
+                onClick={() => setAiStudioView('both')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                  aiStudioView === 'both'
+                    ? 'bg-white text-slate-900 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Show Both
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {(aiStudioView === 'qa' || aiStudioView === 'both') && (
+          <DashboardAiAssistant
+            school={school}
+            userName={currentUser.name}
+            defaultLanguage={language}
+          />
+        )}
+
+        {(aiStudioView === 'lesson-plan' || aiStudioView === 'both') && (
+          <DashboardLessonPlanGenerator
+            school={school}
+            teacherName={currentUser.name}
+          />
+        )}
       </div>
 
       {/* Proactive Administrative Insights & Action Recommendations */}

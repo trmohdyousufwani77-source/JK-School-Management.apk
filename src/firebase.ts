@@ -41,6 +41,7 @@ import {
   OcrImportBatchHistory,
   PrincipalRecord,
   SchoolAboutUsInfo,
+  SchoolFaqItem,
   SchoolInfoAuditEntry,
   SchoolProfile,
   Student,
@@ -1084,7 +1085,7 @@ export async function syncSchoolAboutUsToFirestore(
 
   const payload: Record<string, any> = {
     id: safeId,
-    schoolName: (info.schoolName || 'Government Middle School Pamposh Colony').slice(0, 180),
+    schoolName: (info.schoolName || '').slice(0, 180),
     schoolIntroduction: (info.schoolIntroduction || '').slice(0, 2000),
     schoolHistory: (info.schoolHistory || '').slice(0, 2000),
     schoolVision: (info.schoolVision || '').slice(0, 1000),
@@ -1165,18 +1166,18 @@ export async function syncProtectedDeveloperProfileToFirestore(
   const safeId = sanitizeDocId(profile.id || 'dev-admin-1', 'dev-admin');
   const docPath = `protectedDeveloperProfiles/${safeId}`;
   const baseFields: Record<string, any> = {
-    developerName: (profile.name || 'Mohd Yousuf Wani').slice(0, 140),
-    developerProfile: 'Original App Developer & System Architect — SchoolMaster Educational Suite'.slice(0, 1000),
-    designation: (profile.designation || 'App Developer / Administrator').slice(0, 140),
-    institution: (profile.institution || 'Govt Middle School, Pamposh Colony').slice(0, 180),
-    locality: (profile.locality || 'Pamposh Colony').slice(0, 120),
-    district: (profile.district || 'Srinagar').slice(0, 80),
-    unionTerritory: (profile.unionTerritory || 'Jammu & Kashmir, India').slice(0, 100),
-    developerEmail: (profile.email || 'mohdyousufwani1977@gmail.com').slice(0, 140),
-    developerPhone: (profile.phone || '+91 94190 12345').slice(0, 40),
-    administratorName: (profile.name || 'Mohd Yousuf Wani').slice(0, 140),
-    administratorProfile: 'Protected Super Administrator — Original App Ownership & Platform Governance'.slice(0, 1000),
-    ownershipNotice: 'Original App Ownership & Developer Profile is permanently protected against School Admin edits.'.slice(0, 500),
+    developerName: 'Mohd Yousuf Wani',
+    developerProfile: 'App Developer / Administrator',
+    designation: 'App Developer / Administrator',
+    institution: '',
+    locality: '',
+    district: '',
+    unionTerritory: '',
+    developerEmail: '',
+    developerPhone: '',
+    administratorName: 'Mohd Yousuf Wani',
+    administratorProfile: 'App Developer / Administrator',
+    ownershipNotice: 'Original App Developer & Administrator identity is permanently protected.',
     updatedByUid: auth.currentUser.uid,
     updatedAt: serverTimestamp(),
   };
@@ -1195,6 +1196,64 @@ export async function syncProtectedDeveloperProfileToFirestore(
     return true;
   } catch (error) {
     handleFirestoreError(error, isNew ? OperationType.CREATE : OperationType.UPDATE, docPath);
+    return false;
+  }
+}
+
+/**
+ * Syncs a School Admin-managed FAQ item to /schoolFaqs/{faqId}.
+ */
+export async function syncSchoolFaqToFirestore(
+  faq: SchoolFaqItem,
+  isNew: boolean,
+  actorName: string
+): Promise<boolean> {
+  if (!auth.currentUser || !auth.currentUser.emailVerified) return false;
+  const safeId = sanitizeDocId(faq.id || `faq-${Date.now()}`, 'faq');
+  const docPath = `schoolFaqs/${safeId}`;
+  const validCategories = new Set(['Admission', 'Attendance', 'Curriculum', 'Examinations', 'Scholarships', 'General']);
+  const safeCategory = validCategories.has(faq.category) ? faq.category : 'General';
+  const baseFields: Record<string, any> = {
+    question: (faq.question || 'FAQ Question').slice(0, 400),
+    answer: (faq.answer || 'FAQ Answer').slice(0, 3000),
+    category: safeCategory,
+    views: Math.max(0, Math.round(faq.views || 0)),
+    helpfulYes: Math.max(0, Math.round(faq.helpfulYes || 0)),
+    helpfulNo: Math.max(0, Math.round(faq.helpfulNo || 0)),
+    updatedByUid: auth.currentUser.uid,
+    updatedByName: (actorName || auth.currentUser.displayName || 'School Admin').slice(0, 140),
+    updatedAt: serverTimestamp(),
+  };
+
+  try {
+    if (isNew) {
+      await setDoc(doc(db, 'schoolFaqs', safeId), {
+        id: safeId,
+        ...baseFields,
+        createdAt: serverTimestamp(),
+      });
+    } else {
+      await updateDoc(doc(db, 'schoolFaqs', safeId), baseFields);
+    }
+    return true;
+  } catch (error) {
+    handleFirestoreError(error, isNew ? OperationType.CREATE : OperationType.UPDATE, docPath);
+    return false;
+  }
+}
+
+/**
+ * Deletes an FAQ item from /schoolFaqs/{faqId} (School Admin only).
+ */
+export async function deleteSchoolFaqFromFirestore(faqId: string): Promise<boolean> {
+  if (!auth.currentUser || !auth.currentUser.emailVerified) return false;
+  const safeId = sanitizeDocId(faqId, 'faq');
+  const docPath = `schoolFaqs/${safeId}`;
+  try {
+    await deleteDoc(doc(db, 'schoolFaqs', safeId));
+    return true;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, docPath);
     return false;
   }
 }

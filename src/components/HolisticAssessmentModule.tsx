@@ -484,8 +484,24 @@ export const HolisticAssessmentModule: React.FC<HolisticAssessmentModuleProps> =
                 <textarea rows={2} value={currentRecord.areasForImprovement} onChange={(e) => handleFieldChange('areasForImprovement', e.target.value)} className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
               </div>
               <div>
-                <label className="block font-bold text-slate-700 mb-1">Teacher Remarks:</label>
-                <textarea rows={2} value={currentRecord.teacherRemarks} onChange={(e) => handleFieldChange('teacherRemarks', e.target.value)} className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block font-bold text-slate-700">Teacher Remarks (Single-Line HPC):</label>
+                  <span
+                    className={`text-[11px] font-mono font-bold ${
+                      (currentRecord.teacherRemarks || '').length >= 140 ? 'text-amber-600' : 'text-slate-500'
+                    }`}
+                  >
+                    {(currentRecord.teacherRemarks || '').length} / 150
+                  </span>
+                </div>
+                <textarea
+                  rows={2}
+                  maxLength={150}
+                  value={(currentRecord.teacherRemarks || '').slice(0, 150)}
+                  onChange={(e) => handleFieldChange('teacherRemarks', e.target.value.slice(0, 150))}
+                  placeholder="Enter concise single-line teacher remark (max 150 characters)..."
+                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                />
               </div>
               <div>
                 <label className="block font-bold text-slate-700 mb-1">Parent Remarks & Suggestions:</label>

@@ -1,0 +1,54 @@
+{
+  "currentVersion": "1.0.4",
+  "releaseDate": "2026-11-25",
+  "appName": "SchoolMaster (HPC & JKHRMS)",
+  "versions": [
+    {
+      "version": "1.0.4",
+      "releaseDate": "2026-11-25",
+      "channel": "Production Release",
+      "highlights": [
+        "Fixed Android APK production routing ('Page Not Found' resolved with verified APP_URL, native splash screen, HTTP 404/500 recovery, and SPA fallback rules)",
+        "Added About Us FAQ Center with category filters, fuzzy & voice search, Frequently Viewed Top 5, CSV Import/Export, printable FAQ PDF, Copy Link, and 'Was this helpful?' analytics",
+        "Added School Master AI Chatbot powered by Gemini for students, teachers, and parents",
+        "Upgraded QR Attendance Scanner with Batch Mode queueing, Camera-to-Detect & Scan-to-DB latency metrics, Device ID & dBm signal audit, Scanner Analytics, Camera Diagnostics, and Multi-Pin Scan Map Modal",
+        "Enhanced Holistic Progress Card Teacher Remarks with 150-character enforcement, dynamic auto-fit font sizing, and single-line nowrap/ellipsis rendering",
+        "Added real-time Network Health diagnostics, production heartbeat ping, System Health storage/SW monitor, and Offline Activity sync queue manager"
+      ],
+      "bugFixes": [
+        "Resolved broken Cloud Run URL inside release APK wrapper that triggered HTTP 404 after installation",
+        "Configured Workbox Network-First strategy for HTML document navigations to prevent offline 404 responses",
+        "Hardened WebView DOM storage, JavaScript, hardware acceleration, and native mailto:/tel: intent delegation",
+        "Enforced strict usePermissions RBAC on About Us Edit/Save controls while locking Developer Profile read-only"
+      ]
+    },
+    {
+      "version": "1.0.3",
+      "releaseDate": "2026-11-21",
+      "channel": "Stable",
+      "highlights": [
+        "Added Dashboard School-Wide Daily Attendance Calendar Heat Map",
+        "Added 'Print All Active Students' single-PDF bulk export in Smart ID Card Maker",
+        "Added Class, Section, and Status (Active/Transferred/Graduated) advanced search filters in Student Management",
+        "Launched School Admin About Us & App Information editor with separate protected Developer Profile"
+      ],
+      "bugFixes": [
+        "Corrected single-line Teacher Remarks PDF wrapping in batch progress card exports",
+        "Added geolocation warning toast when GPS permissions are denied during QR attendance scans"
+      ]
+    },
+    {
+      "version": "1.0.2",
+      "releaseDate": "2026-11-15",
+      "channel": "Stable",
+      "highlights": [
+        "Introduced Touchless QR Daily Attendance Scanner with 3-second auto-clear, audio ping, and green success border flash",
+        "Launched JKEPM Quarterly Self-Assessment & CPIS Code Migration portal",
+        "Added Teacher Leave Management System with Casual & Medical Leave workflows and monthly analytics"
+      ],
+      "bugFixes": [
+        "Improved offline-first attendance queueing and Firebase reconnect auto-sync reliability"
+      ]
+    }
+  ]
+}

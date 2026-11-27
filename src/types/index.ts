@@ -139,6 +139,9 @@ export interface SchoolProfile {
   motto?: string;
   emergencyContact?: string;
 
+  // Global Biometric Export Protection
+  biometricProtectionEnabled?: boolean;
+
   // Persisted Subject -> Teacher Name links for Teacher-Wise Subject Result Card
   subjectTeacherMappings?: Record<
     string,
@@ -202,7 +205,7 @@ export interface SchoolAboutUsInfo {
 
 export interface SchoolInfoAuditEntry {
   id: string;
-  section: 'About Us' | 'App Information' | 'School Logo';
+  section: 'About Us' | 'App Information' | 'School Logo' | 'FAQ';
   action: 'CREATE' | 'UPDATE';
   changedFields: string[];
   summary: string;
@@ -210,6 +213,21 @@ export interface SchoolInfoAuditEntry {
   actorRole: string;
   timestamp: string;
   syncedToCloud?: boolean;
+}
+
+export type FaqCategory = 'Admission' | 'Attendance' | 'Curriculum' | 'Examinations' | 'Scholarships' | 'General';
+
+export interface SchoolFaqItem {
+  id: string;
+  question: string;
+  answer: string;
+  category: FaqCategory;
+  views: number;
+  helpfulYes: number;
+  helpfulNo: number;
+  createdAt: string;
+  updatedAt: string;
+  updatedByName?: string;
 }
 
 export interface Holiday {
@@ -283,6 +301,22 @@ export interface Student {
   transferReason?: string;
   updatedAt?: string;
   history?: StudentHistoryEvent[];
+  quickNotes?: StudentQuickNote[];
+}
+
+export type StudentQuickNoteUrgency = 'Urgent' | 'Follow-up' | 'Observation';
+
+export interface StudentQuickNote {
+  id: string;
+  studentId: string;
+  studentName: string;
+  classSection: string;
+  text: string;
+  urgency: StudentQuickNoteUrgency;
+  authorName: string;
+  createdAt: string; // ISO string
+  expiresAt: string; // ISO string
+  dismissed?: boolean;
 }
 
 export interface StudentHistoryEvent {
@@ -360,12 +394,16 @@ export interface AttendanceRecord {
   isOfflineSynced?: boolean;
   remarks?: string;
 
-  // GPS Geolocation fields
+  // GPS Geolocation & QR Scanner Telemetry fields
   latitude?: number;
   longitude?: number;
   distanceFromSchoolMeters?: number;
   isLocationVerified?: boolean;
   locationAccuracyMeters?: number;
+  cameraDetectMs?: number;
+  scanToDbMs?: number;
+  deviceId?: string;
+  networkSignalDbm?: number | null;
 }
 
 export interface AttendanceAuditLog {
@@ -1116,3 +1154,31 @@ export interface JkepmQuarterlyAppraisalReport {
   isArchivedDeleted?: boolean;
 }
 
+// =========================================================================
+// SCHOOL NOTICE BOARD & STAFF READ STATUS LOG
+// =========================================================================
+
+export type NoticePriority = 'Normal' | 'Important' | 'Urgent';
+
+export interface NoticeReadReceipt {
+  userId: string;
+  staffName: string;
+  role: string;
+  employeeId?: string;
+  readAt: string; // ISO timestamp
+}
+
+export interface NoticeBoardItem {
+  id: string;
+  title: string;
+  body: string;
+  expirationDate: string; // YYYY-MM-DD
+  priority: NoticePriority;
+  pinned?: boolean;
+  authorId: string;
+  authorName: string;
+  authorRole: string;
+  createdAt: string;
+  updatedAt: string;
+  readReceipts: NoticeReadReceipt[];
+}

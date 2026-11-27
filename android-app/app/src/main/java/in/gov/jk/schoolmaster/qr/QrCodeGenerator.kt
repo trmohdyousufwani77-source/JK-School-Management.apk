@@ -13,6 +13,14 @@ import `in`.gov.jk.schoolmaster.data.local.TeacherEntity
 
 object QrCodeGenerator {
 
+    /**
+     * Builds the compact unique QR payload encoding a student's Admission Number
+     * for instant ZXing Smart ID generation and classroom attendance scanning.
+     */
+    fun buildStudentAdmissionQrPayload(student: StudentEntity): String {
+        return student.admissionNumber.trim().ifEmpty { student.id.trim() }
+    }
+
     fun buildStudentQrPayload(student: StudentEntity): String {
         return listOf(
             "1. Student Name: ${student.fullName}",

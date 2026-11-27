@@ -31,8 +31,23 @@ import {
   Edit3,
   X,
   Lock,
+  Activity,
+  Wifi,
+  WifiOff,
+  HardDrive,
+  RefreshCw,
+  FileText,
+  Clock,
+  CheckCircle2,
+  XCircle,
+  Fingerprint,
 } from 'lucide-react';
 import { AdminRoleType, GradeBoundary, Holiday, SchoolProfile } from '../types';
+import {
+  guardSensitiveExport,
+  isBiometricProtectionEnabled,
+  setBiometricProtectionEnabled,
+} from '../utils/biometricProtection';
 import { Language, translations } from '../utils/translations';
 
 import { translateSchoolNameToUrdu } from '../utils/urduTransliteration';
@@ -43,6 +58,33 @@ import {
   PUSH_PREFS_UPDATED_EVENT,
 } from '../utils/pushNotifications';
 import { SchoolLogoGeneratorPanel } from './SchoolLogoGeneratorPanel';
+import {
+  downloadAppErrorsJson,
+  downloadNavigationLogsTxt,
+  downloadOfflineSyncQueueJson,
+  downloadQrErrorLogsJson,
+  getOrCreateDeviceId,
+  loadAppErrorLogs,
+  loadNavigationLogs,
+  loadOfflineSyncQueue,
+  loadQrErrorLogs,
+  measureNetworkSignalDbm,
+  OfflineSyncQueueItem,
+  HeartbeatPingResult,
+  runProductionHeartbeatPing,
+  saveOfflineSyncQueue,
+} from '../utils/diagnosticsLogger';
+
+export type SchoolSettingsSubTab =
+  | 'profile'
+  | 'administrative'
+  | 'location'
+  | 'grading'
+  | 'holidays'
+  | 'backup'
+  | 'system-health'
+  | 'offline-activity'
+  | 'admin-access';
 
 interface SchoolSettingsProps {
   school: SchoolProfile;
@@ -54,7 +96,8 @@ interface SchoolSettingsProps {
   effectiveRole?: AdminRoleType;
   onOpenMultiPlatformModal?: (platform?: 'android' | 'ios' | 'windows') => void;
   onOpenDownloadHub?: () => void;
-  initialSubTab?: 'profile' | 'administrative' | 'location' | 'grading' | 'holidays' | 'backup' | 'admin-access';
+  onTriggerOfflineSync?: () => void;
+  initialSubTab?: SchoolSettingsSubTab;
 }
 
 export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
@@ -67,12 +110,166 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
   effectiveRole = 'primary_admin',
   onOpenMultiPlatformModal,
   onOpenDownloadHub,
+  onTriggerOfflineSync,
   initialSubTab = 'profile',
 }) => {
   const t = translations[language];
   const isAuthorizedAdmin = effectiveRole !== 'teacher';
 
-  const [activeTab, setActiveTab] = useState<'profile' | 'administrative' | 'location' | 'grading' | 'holidays' | 'backup' | 'admin-access'>(initialSubTab);
+  const [activeTab, setActiveTab] = useState<SchoolSettingsSubTab>(initialSubTab);
+  const [biometricProtection, setBiometricProtection] = useState<boolean>(() =>
+    school.biometricProtectionEnabled ?? isBiometricProtectionEnabled()
+  );
+
+  useEffect(() => {
+    setBiometricProtectionEnabled(biometricProtection);
+  }, [biometricProtection]);
+
+  const handleToggleBiometricProtection = () => {
+    const next = !biometricProtection;
+    setBiometricProtection(next);
+    setBiometricProtectionEnabled(next);
+    onUpdateSchool({ ...school, biometricProtectionEnabled: next });
+  };
+
+  // System Health & Network + Offline Activity State
+  const [isBrowserOnline, setIsBrowserOnline] = useState<boolean>(() =>
+    typeof navigator === 'undefined' ? true : navigator.onLine !== false
+  );
+  const [pingResult, setPingResult] = useState<HeartbeatPingResult | null>(null);
+  const [isPinging, setIsPinging] = useState<boolean>(false);
+  const [swStatus, setSwStatus] = useState<string>('Checking...');
+  const [storageStats, setStorageStats] = useState<{
+    localStorageKb: number;
+    quotaMb: number | null;
+    usageMb: number | null;
+  }>({ localStorageKb: 0, quotaMb: null, usageMb: null });
+  const [offlineQueueItems, setOfflineQueueItems] = useState<OfflineSyncQueueItem[]>(() =>
+    loadOfflineSyncQueue()
+  );
+  const [retryingItemId, setRetryingItemId] = useState<string | null>(null);
+  const [offlineActionNotice, setOfflineActionNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onOnline = () => setIsBrowserOnline(true);
+    const onOffline = () => setIsBrowserOnline(false);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (activeTab !== 'system-health' && activeTab !== 'offline-activity') return;
+    setOfflineQueueItems(loadOfflineSyncQueue());
+
+    // Compute localStorage footprint
+    try {
+      let bytes = 0;
+      for (let i = 0; i < window.localStorage.length; i++) {
+        const key = window.localStorage.key(i);
+        if (key) {
+          const val = window.localStorage.getItem(key) || '';
+          bytes += (key.length + val.length) * 2;
+        }
+      }
+      const localKb = Math.round(bytes / 1024);
+      setStorageStats((prev) => ({ ...prev, localStorageKb: localKb }));
+    } catch {
+      // ignore
+    }
+
+    if (typeof navigator !== 'undefined' && navigator.storage?.estimate) {
+      navigator.storage
+        .estimate()
+        .then((est) => {
+          setStorageStats((prev) => ({
+            ...prev,
+            usageMb: est.usage !== undefined ? Number((est.usage / (1024 * 1024)).toFixed(2)) : null,
+            quotaMb: est.quota !== undefined ? Number((est.quota / (1024 * 1024)).toFixed(1)) : null,
+          }));
+        })
+        .catch(() => {});
+    }
+
+    if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+      navigator.serviceWorker
+        .getRegistrations()
+        .then((regs) => {
+          if (regs.length > 0) {
+            setSwStatus(`Active (${regs.length} registration${regs.length === 1 ? '' : 's'} · Network-First)`);
+          } else {
+            setSwStatus('Registered on production HTTPS build');
+          }
+        })
+        .catch(() => setSwStatus('Unavailable'));
+    } else {
+      setSwStatus('Unsupported in this browser');
+    }
+  }, [activeTab]);
+
+  const handleRunDiagnosticPing = async () => {
+    setIsPinging(true);
+    try {
+      const res = await runProductionHeartbeatPing('/api/health');
+      setPingResult(res);
+    } finally {
+      setIsPinging(false);
+    }
+  };
+
+  const handleRetryOfflineQueueItem = async (item: OfflineSyncQueueItem) => {
+    setRetryingItemId(item.id);
+    setOfflineActionNotice(null);
+    try {
+      const ping = await runProductionHeartbeatPing('/api/health');
+      const current = loadOfflineSyncQueue();
+      if (ping.ok) {
+        onTriggerOfflineSync?.();
+        const updated = current.map((q) =>
+          q.id === item.id
+            ? {
+                ...q,
+                status: 'completed' as const,
+                retries: q.retries + 1,
+                lastAttemptAt: new Date().toISOString(),
+                errorMessage: undefined,
+              }
+            : q
+        );
+        saveOfflineSyncQueue(updated);
+        setOfflineQueueItems(updated);
+        setOfflineActionNotice(`Synced "${item.summary}" successfully (${ping.latencyMs}ms).`);
+      } else {
+        const updated = current.map((q) =>
+          q.id === item.id
+            ? {
+                ...q,
+                status: 'failed' as const,
+                retries: q.retries + 1,
+                lastAttemptAt: new Date().toISOString(),
+                errorMessage: ping.errorMessage || `HTTP ${ping.status}`,
+              }
+            : q
+        );
+        saveOfflineSyncQueue(updated);
+        setOfflineQueueItems(updated);
+        setOfflineActionNotice(`Retry failed: ${ping.errorMessage || `HTTP ${ping.status}`}`);
+      }
+    } finally {
+      setRetryingItemId(null);
+    }
+  };
+
+  const handleClearCompletedOfflineItems = () => {
+    const remaining = loadOfflineSyncQueue().filter((q) => q.status !== 'completed');
+    saveOfflineSyncQueue(remaining);
+    setOfflineQueueItems(remaining);
+    setOfflineActionNotice('Cleared all completed items from offlineSyncQueue.');
+  };
 
   // Form states (always fallback to '' to guarantee controlled inputs)
   const [name, setName] = useState(school.name || '');
@@ -86,8 +283,9 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
   const [pinCode, setPinCode] = useState(school.pinCode || '');
   const [academicSession, setAcademicSession] = useState(school.academicSession || '2026-2027');
   const [headTeacherName, setHeadTeacherName] = useState(school.headTeacherName || '');
-  const [adminName, setAdminName] = useState(school.adminName || school.headmasterName || school.headTeacherName || 'Mohd Yousuf Wani');
-  const [headmasterName, setHeadmasterName] = useState(school.headmasterName || school.headTeacherName || 'Mohd Yousuf Wani');
+  const FIXED_ADMIN_NAME = 'Mohd Yousuf Wani';
+  const FIXED_ADMIN_DESIGNATION = 'App Developer / Administrator';
+  const [headmasterName, setHeadmasterName] = useState(school.headmasterName || school.headTeacherName || '');
   const [headmasterQualification, setHeadmasterQualification] = useState(school.headmasterQualification || 'M.Sc., M.Ed.');
   const [headmasterContact, setHeadmasterContact] = useState(school.headmasterContact || school.contactNumber || '');
   const [headmasterEmail, setHeadmasterEmail] = useState(school.headmasterEmail || school.email || '');
@@ -124,7 +322,7 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
   const [longitude, setLongitude] = useState<number>(school.longitude ?? 79.4304);
   const [geofenceRadiusMeters, setGeofenceRadiusMeters] = useState<number>(school.geofenceRadiusMeters ?? 250);
   const [locationAddress, setLocationAddress] = useState<string>(
-    school.locationAddress || 'Campus Main Gate, Pamposh Colony, Palapora Zone, Iddgah'
+    school.locationAddress || ''
   );
   const [requireLocationForAttendance, setRequireLocationForAttendance] = useState<boolean>(
     school.requireLocationForAttendance ?? true
@@ -164,13 +362,12 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
   }, [initialSubTab]);
 
   useEffect(() => {
-    if (school.name) setName(school.name);
+    setName(school.name || '');
     if (school.address !== undefined) setAddress(school.address || '');
     if (school.villageTown !== undefined) setVillageTown(school.villageTown || '');
     if (school.district !== undefined) setDistrict(school.district || '');
-    if (school.adminName) setAdminName(school.adminName);
     setLogoDataUrl(school.logoDataUrl || '');
-  }, [school.name, school.address, school.villageTown, school.district, school.adminName, school.logoDataUrl]);
+  }, [school.name, school.address, school.villageTown, school.district, school.logoDataUrl]);
 
   const handleToggleClass = (classNum: string) => {
     setClassesOffered((prev) => {
@@ -276,12 +473,11 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
   const handleSaveProfile = (e: React.FormEvent) => {
     e.preventDefault();
     const resolvedHeadmaster = headmasterName.trim() || headTeacherName.trim();
-    const resolvedAdmin = adminName.trim() || resolvedHeadmaster;
     const updated: SchoolProfile = {
       ...school,
-      name,
-      nameUrdu,
-      nameHi,
+      name: name.trim(),
+      nameUrdu: nameUrdu.trim(),
+      nameHi: nameHi.trim(),
       code,
       address,
       villageTown,
@@ -297,7 +493,7 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
       headmasterJoiningDate: headmasterJoiningDate || school.headmasterJoiningDate,
       headmasterManuallyEdited: true,
       headmasterUpdatedAt: new Date().toISOString(),
-      adminName: resolvedAdmin,
+      adminName: FIXED_ADMIN_NAME,
       officialStampDataUrl: officialStampDataUrl || undefined,
       headmasterSignatureDataUrl: headmasterSignatureDataUrl || undefined,
       logoDataUrl: logoDataUrl || undefined,
@@ -328,9 +524,8 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
   };
 
   const handleCancelHeadmasterEdit = () => {
-    setHeadmasterName(school.headmasterName || school.headTeacherName || 'Mohd Yousuf Wani');
-    setHeadTeacherName(school.headTeacherName || school.headmasterName || 'Mohd Yousuf Wani');
-    setAdminName(school.adminName || school.headmasterName || school.headTeacherName || 'Mohd Yousuf Wani');
+    setHeadmasterName(school.headmasterName || school.headTeacherName || '');
+    setHeadTeacherName(school.headTeacherName || school.headmasterName || '');
     setPrincipalDesignation((school.principalDesignation as any) || 'Headmaster');
     setHeadmasterQualification(school.headmasterQualification || 'M.Sc., M.Ed.');
     setHeadmasterContact(school.headmasterContact || school.contactNumber || '');
@@ -345,7 +540,6 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
     e.preventDefault();
     if (!isAuthorizedAdmin) return;
     const resolvedHeadmaster = headmasterName.trim() || headTeacherName.trim();
-    const resolvedAdmin = adminName.trim() || resolvedHeadmaster;
     setHeadTeacherName(resolvedHeadmaster);
     const updated: SchoolProfile = {
       ...school,
@@ -357,7 +551,7 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
       headmasterJoiningDate: headmasterJoiningDate || undefined,
       headmasterManuallyEdited: true,
       headmasterUpdatedAt: new Date().toISOString(),
-      adminName: resolvedAdmin,
+      adminName: FIXED_ADMIN_NAME,
       principalDesignation,
       officialStampDataUrl: officialStampDataUrl || undefined,
       headmasterSignatureDataUrl: headmasterSignatureDataUrl || undefined,
@@ -446,6 +640,47 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
         </div>
       </div>
 
+      {/* Global Biometric Protection Toggle */}
+      <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4 no-print">
+        <div className="flex items-start gap-3">
+          <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border ${
+            biometricProtection
+              ? 'bg-indigo-600 text-white border-indigo-600'
+              : 'bg-slate-100 text-slate-600 border-slate-200'
+          }`}>
+            <Fingerprint className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-sm font-extrabold text-slate-900">Biometric Protection</h2>
+              <span className={`text-[11px] font-bold ${biometricProtection ? 'text-emerald-700' : 'text-slate-500'}`}>
+                · {biometricProtection ? 'Enabled' : 'Disabled'}
+              </span>
+            </div>
+            <p className="text-xs text-slate-500 mt-0.5">
+              When enabled, teachers and administrators must complete device biometric authentication (AndroidX BiometricPrompt via androidx.biometric, Face ID, Windows Hello, or authorized PIN) before exporting any PDF or Excel reports and sensitive student data files.
+            </p>
+          </div>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={biometricProtection}
+          data-testid="global-biometric-protection-toggle"
+          onClick={handleToggleBiometricProtection}
+          className={`relative inline-flex h-7 w-13 items-center rounded-full transition-colors shrink-0 ${
+            biometricProtection ? 'bg-indigo-600' : 'bg-slate-300'
+          }`}
+        >
+          <span className="sr-only">Toggle Global Biometric Protection</span>
+          <span
+            className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+              biometricProtection ? 'translate-x-7' : 'translate-x-1'
+            }`}
+          />
+        </button>
+      </div>
+
       {/* Tabs */}
       <div className="flex flex-wrap rounded-2xl bg-white p-1.5 border border-slate-200/80 shadow-sm text-xs font-semibold gap-1 no-print">
         <button
@@ -497,6 +732,29 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
           }`}
         >
           {t.systemBackup}
+        </button>
+        <button
+          onClick={() => setActiveTab('system-health')}
+          className={`flex-1 py-2 rounded-xl transition-all flex items-center justify-center gap-1.5 ${
+            activeTab === 'system-health' ? 'bg-indigo-600 text-white shadow-sm font-bold' : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          <Activity className="w-3.5 h-3.5" />
+          <span>System Health &amp; Network</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('offline-activity')}
+          className={`flex-1 py-2 rounded-xl transition-all flex items-center justify-center gap-1.5 ${
+            activeTab === 'offline-activity' ? 'bg-indigo-600 text-white shadow-sm font-bold' : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          <Clock className="w-3.5 h-3.5" />
+          <span>Offline Activity</span>
+          {offlineQueueItems.filter((i) => i.status !== 'completed').length > 0 && (
+            <span className="px-1.5 py-0.5 rounded-full text-[10px] font-mono bg-amber-400 text-slate-950 font-black">
+              {offlineQueueItems.filter((i) => i.status !== 'completed').length}
+            </span>
+          )}
         </button>
         <button
           onClick={() => setActiveTab('admin-access')}
@@ -1108,11 +1366,13 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div>
-              <label className="block font-semibold text-slate-700 mb-1">{t.schoolName} (English) *</label>
+              <label className="block font-semibold text-slate-700 mb-1">
+                Primary Institution / {t.schoolName} (English)
+              </label>
               <input
                 type="text"
-                required
                 value={name}
+                placeholder="Enter Primary Institution Name"
                 onChange={(e) => {
                   const val = e.target.value;
                   setName(val);
@@ -1123,7 +1383,7 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
             <div>
               <div className="flex items-center justify-between mb-1">
                 <label className="block font-semibold text-slate-700">
-                  {t.schoolName} (اردو - Noori Nastaleeq) *
+                  {t.schoolName} (اردو - Noori Nastaleeq)
                 </label>
                 <button
                   type="button"
@@ -1141,7 +1401,7 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
               <input
                 type="text"
                 dir="rtl"
-                required
+                placeholder="ادارے کا نام درج کریں"
                 value={nameUrdu}
                 onChange={(e) => setNameUrdu(e.target.value)}
                 className="w-full px-3 py-2 border rounded-xl font-noori text-base font-bold text-slate-900 bg-slate-50 focus:ring-2 focus:ring-indigo-500"
@@ -1149,10 +1409,10 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
               />
             </div>
             <div>
-              <label className="block font-semibold text-slate-700 mb-1">{t.schoolName} (हिन्दी) *</label>
+              <label className="block font-semibold text-slate-700 mb-1">{t.schoolName} (हिन्दी)</label>
               <input
                 type="text"
-                required
+                placeholder="संस्थान का नाम दर्ज करें"
                 value={nameHi}
                 onChange={(e) => setNameHi(e.target.value)}
                 className="w-full px-3 py-2 border rounded-xl font-medium"
@@ -1558,16 +1818,23 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
             </div>
 
             <div>
-              <label className="block font-semibold text-slate-700 mb-1">Admin Name *</label>
-              <input
-                type="text"
-                required
-                disabled={!isEditingHeadmaster}
-                value={adminName}
-                onChange={(e) => setAdminName(e.target.value)}
-                placeholder="Enter Admin Name"
-                className="w-full px-3 py-2 border border-slate-300 rounded-xl font-bold text-slate-900 focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100 disabled:text-slate-600"
-              />
+              <label className="block font-semibold text-slate-700 mb-1 flex items-center gap-1.5">
+                <span>App Developer &amp; Administrator (Locked)</span>
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-bold">
+                  <Lock className="w-3 h-3" />
+                  <span>Read-Only</span>
+                </span>
+              </label>
+              <div
+                data-testid="settings-locked-administrator-identity"
+                className="w-full px-3 py-2 border border-amber-200 rounded-xl bg-amber-50/70 text-slate-900 select-none"
+              >
+                <div className="font-black text-slate-900">{FIXED_ADMIN_NAME}</div>
+                <div className="text-[11px] font-semibold text-slate-600">{FIXED_ADMIN_DESIGNATION}</div>
+              </div>
+              <span className="text-[10px] text-amber-800 mt-1 block">
+                Protected across Android, iOS, Windows &amp; Web. Cannot be renamed, edited, or deleted.
+              </span>
             </div>
 
             <div>
@@ -1754,7 +2021,7 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
                     {headmasterName || 'Headmaster'} ({principalDesignation})
                   </span>
                   <span className="text-[10px] text-slate-500 block">
-                    Admin: {adminName || headmasterName || 'Admin'}
+                    App Developer / Administrator: {FIXED_ADMIN_NAME}
                   </span>
                 </div>
               </div>
@@ -1882,7 +2149,11 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
                 Generates a timestamped JSON snapshot containing all student profiles, attendance audit logs, marks records, and leave applications.
               </p>
               <button
-                onClick={onExportBackup}
+                type="button"
+                onClick={async () => {
+                  const ok = await guardSensitiveExport('Complete School Database Backup (.json)');
+                  if (ok) onExportBackup();
+                }}
                 className="w-full py-2 rounded-xl bg-indigo-600 text-white font-bold text-xs hover:bg-indigo-700 transition-colors shadow-sm"
               >
                 Download Snapshot (.json)
@@ -2034,6 +2305,336 @@ export const SchoolSettings: React.FC<SchoolSettingsProps> = ({
               </button>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Tab: System Health & Network Diagnostics */}
+      {activeTab === 'system-health' && (
+        <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 space-y-6 text-xs">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-slate-100 pb-4">
+            <div>
+              <h2 className="text-sm font-extrabold text-slate-900 flex items-center gap-2">
+                <Activity className="w-4 h-4 text-indigo-600" />
+                <span>System Health &amp; Network Diagnostics</span>
+              </h2>
+              <p className="text-slate-500 mt-0.5">
+                Real-time production heartbeat ping, offline storage usage, Service Worker health, and diagnostic log exports.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleRunDiagnosticPing}
+              disabled={isPinging}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white font-bold shadow-xs transition-colors"
+            >
+              <RefreshCw className={`w-4 h-4 ${isPinging ? 'animate-spin' : ''}`} />
+              <span>{isPinging ? 'Running Diagnostic Ping...' : 'Run Diagnostic Ping'}</span>
+            </button>
+          </div>
+
+          {/* Live Health KPI Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-1">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
+                {isBrowserOnline ? (
+                  <Wifi className="w-3.5 h-3.5 text-emerald-600" />
+                ) : (
+                  <WifiOff className="w-3.5 h-3.5 text-rose-600" />
+                )}
+                <span>Live Connectivity</span>
+              </span>
+              <p className={`text-base font-black ${isBrowserOnline ? 'text-emerald-700' : 'text-rose-700'}`}>
+                {isBrowserOnline ? 'Connected' : 'Offline'}
+              </p>
+              <p className="text-[11px] font-mono text-slate-500">
+                Signal: {measureNetworkSignalDbm(!isBrowserOnline) ?? '—'} dBm · {getOrCreateDeviceId()}
+              </p>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-1">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                Production API Heartbeat
+              </span>
+              {pingResult ? (
+                <>
+                  <p className={`text-base font-black font-mono ${pingResult.ok ? 'text-emerald-700' : 'text-rose-700'}`}>
+                    {pingResult.ok ? `OK · ${pingResult.latencyMs} ms` : `Failed · HTTP ${pingResult.status}`}
+                  </p>
+                  <p className="text-[11px] font-mono text-slate-500 truncate">
+                    HTTP {pingResult.status} · {new Date(pingResult.timestamp).toLocaleTimeString()}
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="text-base font-black text-slate-700">Not Tested</p>
+                  <p className="text-[11px] text-slate-500">Click Run Diagnostic Ping above</p>
+                </>
+              )}
+            </div>
+
+            <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-1">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
+                <HardDrive className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Local &amp; Cache Storage</span>
+              </span>
+              <p className="text-base font-black text-slate-900 font-mono">
+                {storageStats.localStorageKb} KB local
+              </p>
+              <p className="text-[11px] font-mono text-slate-500">
+                {storageStats.usageMb !== null && storageStats.quotaMb !== null
+                  ? `Browser: ${storageStats.usageMb} MB / ${storageStats.quotaMb} MB`
+                  : 'IndexedDB & localStorage active'}
+              </p>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-1">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                Service Worker &amp; Routing
+              </span>
+              <p className="text-xs font-extrabold text-indigo-800 mt-1">{swStatus}</p>
+              <p className="text-[11px] text-slate-500">
+                SPA Fallback: <code className="font-mono">/index.html</code>
+              </p>
+            </div>
+          </div>
+
+          {pingResult && (
+            <div
+              className={`p-4 rounded-2xl border flex flex-wrap items-center justify-between gap-3 ${
+                pingResult.ok
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                  : 'bg-rose-50 border-rose-200 text-rose-900'
+              }`}
+            >
+              <div className="flex items-center gap-2.5">
+                {pingResult.ok ? (
+                  <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                ) : (
+                  <XCircle className="w-5 h-5 text-rose-600 shrink-0" />
+                )}
+                <div>
+                  <p className="font-extrabold">
+                    {pingResult.ok
+                      ? `Production Endpoint Reachable (HTTP ${pingResult.status} in ${pingResult.latencyMs}ms)`
+                      : `Production Heartbeat Failed (HTTP ${pingResult.status})`}
+                  </p>
+                  <p className="text-[11px] font-mono opacity-85">
+                    Endpoint: {pingResult.url} {pingResult.errorMessage ? `· ${pingResult.errorMessage}` : ''}
+                  </p>
+                </div>
+              </div>
+              {!pingResult.ok && (
+                <button
+                  type="button"
+                  onClick={() => downloadAppErrorsJson()}
+                  className="px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-[11px]"
+                >
+                  Download app_errors.json
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Diagnostic File Exports */}
+          <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
+            <h3 className="font-extrabold text-slate-900 flex items-center gap-2">
+              <FileText className="w-4 h-4 text-indigo-600" />
+              <span>Diagnostic Log Exports (404, QR Scanner, Navigation &amp; Offline Sync)</span>
+            </h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+              <button
+                type="button"
+                onClick={() => downloadQrErrorLogsJson()}
+                className="px-3.5 py-2.5 rounded-xl bg-white hover:bg-amber-50 border border-amber-200 text-amber-900 font-bold flex items-center justify-center gap-2 transition-colors"
+              >
+                <Download className="w-3.5 h-3.5 text-amber-600" />
+                <span>Download Error Logs ({loadQrErrorLogs().length})</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => downloadNavigationLogsTxt()}
+                className="px-3.5 py-2.5 rounded-xl bg-white hover:bg-indigo-50 border border-indigo-200 text-indigo-900 font-bold flex items-center justify-center gap-2 transition-colors"
+              >
+                <Download className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Export Logs ({loadNavigationLogs().length})</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => downloadOfflineSyncQueueJson()}
+                className="px-3.5 py-2.5 rounded-xl bg-white hover:bg-emerald-50 border border-emerald-200 text-emerald-900 font-bold flex items-center justify-center gap-2 transition-colors"
+              >
+                <Download className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Export offlineSyncQueue ({offlineQueueItems.length})</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => downloadAppErrorsJson()}
+                className="px-3.5 py-2.5 rounded-xl bg-white hover:bg-rose-50 border border-rose-200 text-rose-900 font-bold flex items-center justify-center gap-2 transition-colors"
+              >
+                <Download className="w-3.5 h-3.5 text-rose-600" />
+                <span>app_errors.json ({loadAppErrorLogs().length})</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Recent Navigation Events Preview */}
+          <div className="space-y-2">
+            <h3 className="font-bold text-slate-700">Recent Navigation Observer Events</h3>
+            <div className="rounded-xl border border-slate-200 overflow-hidden">
+              <table className="w-full text-left border-collapse text-[11px]">
+                <thead>
+                  <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase">
+                    <th className="py-2 px-3">Time</th>
+                    <th className="py-2 px-3">Active Tab</th>
+                    <th className="py-2 px-3">Route Transition</th>
+                    <th className="py-2 px-3">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 font-mono">
+                  {loadNavigationLogs()
+                    .slice(0, 8)
+                    .map((ev) => (
+                      <tr key={ev.id}>
+                        <td className="py-2 px-3 text-slate-500">
+                          {new Date(ev.timestamp).toLocaleTimeString()}
+                        </td>
+                        <td className="py-2 px-3 font-bold text-slate-800">{ev.activeTab}</td>
+                        <td className="py-2 px-3 text-slate-600">
+                          {ev.fromPath} → {ev.toPath}
+                        </td>
+                        <td className="py-2 px-3">
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                              ev.status === 'RECOVERED_404'
+                                ? 'bg-amber-100 text-amber-800'
+                                : 'bg-emerald-100 text-emerald-800'
+                            }`}
+                          >
+                            {ev.status === 'RECOVERED_404' ? '404 Recovered' : ev.status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Tab: Offline Activity & Sync Queue Management */}
+      {activeTab === 'offline-activity' && (
+        <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 space-y-5 text-xs">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-slate-100 pb-4">
+            <div>
+              <h2 className="text-sm font-extrabold text-slate-900 flex items-center gap-2">
+                <Clock className="w-4 h-4 text-amber-600" />
+                <span>Offline Activity &amp; Sync Queue</span>
+              </h2>
+              <p className="text-slate-500 mt-0.5">
+                Inspect queued offline updates in <code className="font-mono">offlineSyncQueue</code>, retry failed items, export JSON diagnostics, or clear completed entries.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => downloadOfflineSyncQueueJson()}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold border border-slate-300"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Export Queue JSON</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleClearCompletedOfflineItems}
+                disabled={!offlineQueueItems.some((i) => i.status === 'completed')}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold transition-colors"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Clear Completed</span>
+              </button>
+            </div>
+          </div>
+
+          {offlineActionNotice && (
+            <div className="p-3 rounded-xl bg-indigo-50 border border-indigo-200 text-indigo-900 font-semibold flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-indigo-600 shrink-0" />
+              <span>{offlineActionNotice}</span>
+            </div>
+          )}
+
+          {offlineQueueItems.length === 0 ? (
+            <div className="py-10 text-center space-y-2 text-slate-500">
+              <CheckCircle2 className="w-9 h-9 text-emerald-500 mx-auto" />
+              <p className="font-bold text-slate-800 text-sm">Offline Sync Queue is Empty</p>
+              <p>All school records and QR attendance scans are fully synchronized.</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto rounded-xl border border-slate-200">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-bold uppercase text-slate-500">
+                    <th className="py-2.5 px-3">Module</th>
+                    <th className="py-2.5 px-3">Details</th>
+                    <th className="py-2.5 px-3">Created At</th>
+                    <th className="py-2.5 px-3">Status</th>
+                    <th className="py-2.5 px-3 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {offlineQueueItems.map((item) => (
+                    <tr key={item.id} className="hover:bg-slate-50/80">
+                      <td className="py-2.5 px-3">
+                        <span className="font-extrabold text-slate-900">{item.module}</span>
+                        <span className="block font-mono text-[10px] text-slate-500">{item.id}</span>
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <div className="font-semibold text-slate-800">{item.summary}</div>
+                        {item.errorMessage && (
+                          <div className="text-[11px] text-rose-600 font-mono mt-0.5">{item.errorMessage}</div>
+                        )}
+                      </td>
+                      <td className="py-2.5 px-3 font-mono text-[11px] text-slate-500">
+                        {new Date(item.createdAt).toLocaleString()}
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold border ${
+                            item.status === 'completed'
+                              ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                              : item.status === 'failed'
+                              ? 'bg-rose-100 text-rose-800 border-rose-200'
+                              : 'bg-amber-100 text-amber-800 border-amber-200'
+                          }`}
+                        >
+                          {item.status === 'completed'
+                            ? 'Completed'
+                            : item.status === 'failed'
+                            ? `Failed (${item.retries})`
+                            : 'Pending'}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3 text-right">
+                        {item.status !== 'completed' ? (
+                          <button
+                            type="button"
+                            disabled={retryingItemId === item.id}
+                            onClick={() => void handleRetryOfflineQueueItem(item)}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white font-bold text-[11px]"
+                          >
+                            <RefreshCw className={`w-3 h-3 ${retryingItemId === item.id ? 'animate-spin' : ''}`} />
+                            <span>Retry</span>
+                          </button>
+                        ) : (
+                          <span className="text-[11px] font-bold text-emerald-600">Synced</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 

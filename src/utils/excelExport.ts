@@ -1,4 +1,5 @@
 import * as XLSX from 'xlsx';
+import { guardSensitiveExport } from './biometricProtection';
 import {
   AttendanceRecord,
   Examination,
@@ -13,7 +14,11 @@ import {
 } from '../types';
 
 function triggerDownload(wb: XLSX.WorkBook, fileName: string) {
-  XLSX.writeFile(wb, fileName);
+  void guardSensitiveExport(`Excel Report: ${fileName}`).then((allowed) => {
+    if (allowed) {
+      XLSX.writeFile(wb, fileName);
+    }
+  });
 }
 
 /**

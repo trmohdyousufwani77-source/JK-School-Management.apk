@@ -19,12 +19,15 @@ import {
   Check,
   X,
   Trash2,
+  Phone,
+  Copy,
 } from 'lucide-react';
 import { SchoolProfile, Student, StudentMarkEntry, Examination, HolisticRatingLevel } from '../types';
 import { Language, translations } from '../utils/translations';
 import { sampleHolisticRecords, sampleSubjectConfigs } from '../utils/sampleData';
 import { exportStudentRegisterToExcel } from '../utils/excelExport';
 import { deduplicateStudentsByAdmissionNumber } from '../utils/calculations';
+import { DirectCallModal, DirectCallTarget, validateAndFormatPhoneNumber } from './DirectCallModal';
 
 interface ClassManagementProps {
   school: SchoolProfile;
@@ -79,6 +82,10 @@ export const ClassManagement: React.FC<ClassManagementProps> = ({
   // Delete Class State
   const [showDeleteClassModal, setShowDeleteClassModal] = useState<boolean>(false);
   const [classToDelete, setClassToDelete] = useState<string | null>(null);
+
+  // Direct Mobile Calling State
+  const [callTarget, setCallTarget] = useState<DirectCallTarget | null>(null);
+  const [copiedPhoneId, setCopiedPhoneId] = useState<string | null>(null);
 
   const openEditClassModal = (cls: string) => {
     setClassBeingEdited(cls);
@@ -614,15 +621,15 @@ export const ClassManagement: React.FC<ClassManagementProps> = ({
         </div>
       </div>
 
-      {/* Student Roster Table for this Class */}
+      {/* Student Roster & Class-Wide Parent Contact Directory */}
       <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
             <h3 className="text-base font-bold text-slate-900">
-              Students Roster — Class {selectedClass}-{selectedSection}
+              Students Roster &amp; Parent Contact Directory — Class {selectedClass}-{selectedSection}
             </h3>
             <p className="text-xs text-slate-500">
-              {filteredStudents.length} Students enrolled in this section
+              {filteredStudents.length} Students enrolled in this section · One-tap validated parent calling &amp; quick copy
             </p>
           </div>
 
@@ -649,9 +656,9 @@ export const ClassManagement: React.FC<ClassManagementProps> = ({
                 <tr>
                   <th className="py-2.5 px-3">Roll #</th>
                   <th className="py-2.5 px-3">Student Name</th>
-                  <th className="py-2.5 px-3">Father's Name</th>
+                  <th className="py-2.5 px-3">Parent / Guardian</th>
+                  <th className="py-2.5 px-3">Parent Mobile &amp; Direct Call</th>
                   <th className="py-2.5 px-3">Admission No</th>
-                  <th className="py-2.5 px-3 text-center">Gender</th>
                   <th className="py-2.5 px-3 text-center">Academic %</th>
                   <th className="py-2.5 px-3 text-center">Status</th>
                   <th className="py-2.5 px-3 text-right">Actions</th>
@@ -665,22 +672,60 @@ export const ClassManagement: React.FC<ClassManagementProps> = ({
                   const marksTotal = studentMarks.reduce((a, b) => a + (b.marksObtained || 0), 0);
                   const maxTotal = studentMarks.reduce((a, b) => a + b.maxMarks, 0);
                   const pct = maxTotal > 0 ? Math.round((marksTotal / maxTotal) * 1000) / 10 : 82.5;
-
                   const isSupport = pct < 50 || st.rollNumber === 5;
+                  const phoneCheck = validateAndFormatPhoneNumber(st.mobileNumber);
 
                   return (
                     <tr key={st.id} className="hover:bg-slate-50/80 transition-colors">
                       <td className="py-2.5 px-3 font-mono font-bold text-slate-900">#{st.rollNumber}</td>
                       <td className="py-2.5 px-3 font-bold text-slate-900">{st.fullName}</td>
-                      <td className="py-2.5 px-3 text-slate-600">{st.fatherName}</td>
-                      <td className="py-2.5 px-3 font-mono text-slate-500">{st.admissionNumber}</td>
-                      <td className="py-2.5 px-3 text-center">
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                          st.gender === 'Female' ? 'bg-pink-50 text-pink-700' : 'bg-blue-50 text-blue-700'
-                        }`}>
-                          {st.gender}
-                        </span>
+                      <td className="py-2.5 px-3 text-slate-600">{st.fatherName || st.guardianName || '—'}</td>
+                      <td className="py-2.5 px-3">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-mono tabular-nums text-slate-800 font-semibold whitespace-nowrap">
+                            {phoneCheck.display}
+                          </span>
+                          <button
+                            type="button"
+                            data-testid={`class-call-btn-${st.id}`}
+                            onClick={() =>
+                              setCallTarget({
+                                studentName: st.fullName,
+                                admissionNumber: st.admissionNumber,
+                                classSection: `Class ${st.classNumber}-${st.section}`,
+                                parentName: st.fatherName || st.guardianName || 'Parent / Guardian',
+                                phoneNumber: st.mobileNumber,
+                              })
+                            }
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold transition-colors whitespace-nowrap shrink-0"
+                            title={`Call ${st.fatherName || 'Parent'}`}
+                          >
+                            <Phone className="w-3 h-3" />
+                            <span>Call</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                await navigator.clipboard.writeText(st.mobileNumber || '');
+                                setCopiedPhoneId(st.id);
+                                window.setTimeout(() => setCopiedPhoneId(null), 1500);
+                              } catch {
+                                // ignore
+                              }
+                            }}
+                            className="p-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600"
+                            title="Copy mobile number"
+                          >
+                            {copiedPhoneId === st.id ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-600" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                        </div>
                       </td>
+                      <td className="py-2.5 px-3 font-mono text-slate-500">{st.admissionNumber}</td>
                       <td className="py-2.5 px-3 text-center font-mono font-black text-indigo-900">
                         {pct}%
                       </td>
@@ -699,7 +744,7 @@ export const ClassManagement: React.FC<ClassManagementProps> = ({
                         {onNavigateToProgressCard && (
                           <button
                             onClick={() => onNavigateToProgressCard(st.id)}
-                            className="px-2.5 py-1 rounded bg-indigo-600 text-white font-bold text-[11px] hover:bg-indigo-700 transition-colors shadow-sm"
+                            className="px-2.5 py-1 rounded bg-indigo-600 text-white font-bold text-[11px] hover:bg-indigo-700 transition-colors shadow-sm whitespace-nowrap"
                           >
                             View HPC Card
                           </button>
@@ -713,6 +758,9 @@ export const ClassManagement: React.FC<ClassManagementProps> = ({
           </div>
         )}
       </div>
+
+      {/* Direct Mobile Calling Confirmation Modal */}
+      <DirectCallModal target={callTarget} onClose={() => setCallTarget(null)} />
 
       {/* Edit Class Modal */}
       {showEditClassModal && (

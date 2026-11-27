@@ -25,6 +25,7 @@ import {
 import { SchoolProfile, Student, User } from '../types';
 import { Language } from '../utils/translations';
 import * as XLSX from 'xlsx';
+import { guardSensitiveExport } from '../utils/biometricProtection';
 
 export interface UdiseValidationError {
   id: string;
@@ -391,7 +392,9 @@ export const UdiseSyncWidget: React.FC<UdiseSyncWidgetProps> = ({
   };
 
   // Handler: Export Discrepancy Sheet to Excel
-  const handleExportDiscrepancies = () => {
+  const handleExportDiscrepancies = async () => {
+    const allowed = await guardSensitiveExport('UDISE+ Validation Discrepancy Excel Report');
+    if (!allowed) return;
     const rows = validationErrors.map((err, idx) => ({
       'S.No': idx + 1,
       'UDISE+ Error Code': err.errorCode,

@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import java.text.SimpleDateFormat
@@ -20,9 +22,10 @@ import java.util.Locale
         TeacherAttendanceEntity::class,
         ScannerHistoryEntity::class,
         HpcCardEntity::class,
-        LeaveAuditLogEntity::class
+        LeaveAuditLogEntity::class,
+        LessonPlanEntity::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = false
 )
 abstract class SchoolMasterDatabase : RoomDatabase() {
@@ -32,10 +35,49 @@ abstract class SchoolMasterDatabase : RoomDatabase() {
     abstract fun teacherAttendanceDao(): TeacherAttendanceDao
     abstract fun scannerHistoryDao(): ScannerHistoryDao
     abstract fun hpcCardDao(): HpcCardDao
+    abstract fun lessonPlanDao(): LessonPlanDao
 
     companion object {
         @Volatile
         private var INSTANCE: SchoolMasterDatabase? = null
+
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `lesson_plans` (
+                        `id` TEXT NOT NULL,
+                        `title` TEXT NOT NULL,
+                        `subject` TEXT NOT NULL,
+                        `classLevel` TEXT NOT NULL,
+                        `chapter` TEXT NOT NULL DEFAULT '',
+                        `topic` TEXT NOT NULL DEFAULT '',
+                        `duration` TEXT NOT NULL DEFAULT '40 minutes',
+                        `language` TEXT NOT NULL DEFAULT 'English',
+                        `isRtl` INTEGER NOT NULL DEFAULT 0,
+                        `generalObjectives` TEXT NOT NULL DEFAULT '',
+                        `specificLearningOutcomes` TEXT NOT NULL DEFAULT '',
+                        `previousKnowledge` TEXT NOT NULL DEFAULT '',
+                        `teachingLearningMaterials` TEXT NOT NULL DEFAULT '',
+                        `introduction` TEXT NOT NULL DEFAULT '',
+                        `presentationOfTopic` TEXT NOT NULL DEFAULT '',
+                        `teacherActivities` TEXT NOT NULL DEFAULT '',
+                        `studentActivities` TEXT NOT NULL DEFAULT '',
+                        `teachingMethodology` TEXT NOT NULL DEFAULT '',
+                        `blackboardWork` TEXT NOT NULL DEFAULT '',
+                        `assessmentQuestions` TEXT NOT NULL DEFAULT '',
+                        `homework` TEXT NOT NULL DEFAULT '',
+                        `conclusion` TEXT NOT NULL DEFAULT '',
+                        `teacherName` TEXT NOT NULL DEFAULT '',
+                        `schoolName` TEXT NOT NULL DEFAULT 'Govt Middle School Pamposh Colony',
+                        `savedAtIso` TEXT NOT NULL DEFAULT '',
+                        `updatedAtMillis` INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
 
         fun getInstance(context: Context): SchoolMasterDatabase {
             return INSTANCE ?: synchronized(this) {
@@ -44,6 +86,7 @@ abstract class SchoolMasterDatabase : RoomDatabase() {
                     SchoolMasterDatabase::class.java,
                     "school_master_offline.db"
                 )
+                    .addMigrations(MIGRATION_6_7)
                     .fallbackToDestructiveMigration()
                     .build()
                 INSTANCE = instance
@@ -236,6 +279,26 @@ class SchoolMasterRepository(private val db: SchoolMasterDatabase) {
 
     suspend fun deleteHpcCard(cardId: Long) {
         db.hpcCardDao().deleteById(cardId)
+    }
+
+    fun observeLessonPlans(query: String = ""): Flow<List<LessonPlanEntity>> {
+        val trimmed = query.trim()
+        return if (trimmed.isEmpty()) {
+            db.lessonPlanDao().observeAllLessonPlans()
+        } else {
+            db.lessonPlanDao().searchLessonPlans(trimmed)
+        }
+    }
+
+    suspend fun getAllLessonPlansOnce(): List<LessonPlanEntity> =
+        db.lessonPlanDao().getAllLessonPlansOnce()
+
+    suspend fun saveLessonPlan(plan: LessonPlanEntity) {
+        db.lessonPlanDao().upsert(plan.copy(updatedAtMillis = System.currentTimeMillis()))
+    }
+
+    suspend fun deleteLessonPlan(planId: String) {
+        db.lessonPlanDao().deleteById(planId)
     }
 
     suspend fun saveStudent(student: StudentEntity) {

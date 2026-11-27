@@ -70,6 +70,7 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
     currentUser,
     adminUsers,
     effectiveRole,
+    isSuperAdmin,
     simulatedRole,
     setSimulatedRole,
     securitySettings,
@@ -81,7 +82,12 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
     purgeSyncedData,
   } = usePermissions();
 
+  const isProtectedMasterAdmin = (user: AdminUser) =>
+    user.id === 'user-admin-wani' ||
+    user.email.toLowerCase() === 'mohdyousufwani1977@gmail.com';
+
   const [activeTab, setActiveTab] = useState<'users' | 'matrix' | 'audit' | 'security' | 'hygiene'>('users');
+  const [confirmPurgeOpen, setConfirmPurgeOpen] = useState<boolean>(false);
 
   // Quick Search state
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -154,8 +160,16 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
     });
   }, [adminUsers, searchQuery, roleFilter]);
 
-  // Start inline editing
+  // Start inline editing (Super Administrator only; fixed Mohd Yousuf Wani identity is immutable)
   const handleStartInlineEdit = (user: AdminUser) => {
+    if (!isSuperAdmin) {
+      showNotification('Access restricted: Only a Super Administrator can edit administrative accounts.', 'error');
+      return;
+    }
+    if (isProtectedMasterAdmin(user)) {
+      showNotification('Protected App Developer / Administrator identity cannot be edited or renamed.', 'error');
+      return;
+    }
     setInlineEditingUserId(user.id);
     setInlineName(user.name);
     setInlineRole(user.role);
@@ -167,6 +181,10 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
   };
 
   const handleSaveInlineEdit = (originalUser: AdminUser) => {
+    if (!isSuperAdmin || isProtectedMasterAdmin(originalUser)) {
+      setInlineEditingUserId(null);
+      return;
+    }
     if (!inlineName.trim()) {
       showNotification('Administrator name cannot be empty', 'error');
       return;
@@ -175,7 +193,7 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
     const updated: AdminUser = {
       ...originalUser,
       name: inlineName.trim(),
-      role: inlineRole,
+      role: inlineRole === 'primary_admin' ? originalUser.role : inlineRole,
       phone: inlinePhone.trim() || originalUser.phone,
       inheritsFrom: inlineRole === 'senior_admin' ? 'junior_admin' : 'none',
     };
@@ -185,9 +203,12 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
     showNotification(`Updated ${updated.name}'s administrative details and role inheritance!`);
   };
 
-  // Handle User Deletion
+  // Handle User Deletion (Super Administrator only)
   const handleConfirmDelete = () => {
-    if (!userToDelete) return;
+    if (!isSuperAdmin || !userToDelete || isProtectedMasterAdmin(userToDelete)) {
+      setUserToDelete(null);
+      return;
+    }
     const result = deleteAdminUser(userToDelete.id);
     if (result.success) {
       showNotification(result.message);
@@ -198,9 +219,13 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
     }
   };
 
-  // Handle Add New User
+  // Handle Add New User (Super Administrator only)
   const handleCreateUser = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isSuperAdmin) {
+      setIsAddUserModalOpen(false);
+      return;
+    }
     if (!newUserName.trim() || !newUserEmail.trim()) {
       showNotification('Please enter both name and official email address', 'error');
       return;
@@ -222,15 +247,17 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
     showNotification(`New ${newUserRole.replace('_', ' ')} account created successfully!`);
   };
 
-  // Temporary Emergency Login Code Generator
+  // Temporary Emergency Login Code Generator (Super Administrator only)
   const handleGenerateTempCode = (user: AdminUser) => {
+    if (!isSuperAdmin) return;
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     setTempCodeGenerated({ userId: user.id, code });
     showNotification(`Temporary emergency code generated for ${user.name}`);
   };
 
-  // Apply Role Template Preset
+  // Apply Role Template Preset (Super Administrator only)
   const handleApplyRoleTemplate = (templateName: string) => {
+    if (!isSuperAdmin) return;
     if (templateName === 'Data Entry Clerk') {
       showNotification('Template "Data Entry Clerk" applied to Junior Admin permissions');
     } else if (templateName === 'Attendance Auditor') {
@@ -251,6 +278,7 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
 
   const handleSaveSecurityPolicy = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isSuperAdmin) return;
     updateSecuritySettings({
       minPasswordLength: secMinPass,
       requireSpecialChar: secSpecial,
@@ -263,21 +291,23 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
     showNotification('Security Settings updated and active across all administrative sessions!');
   };
 
-  // Purge Synced Data
-  const handlePurge = () => {
-    if (window.confirm('Are you sure you want to purge synced offline records older than 30 days? A local recovery snapshot will be downloaded.')) {
-      const result = purgeSyncedData();
-      // download archive
-      const blob = new Blob([result.archivedData], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `Offline_Purge_Archive_30Days_${Date.now()}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      showNotification(`Successfully purged ${result.count} synced records older than 30 days. Backup downloaded!`);
+  // Purge Synced Data (Super Administrator only — inline confirmation, no window.confirm)
+  const handleExecutePurge = () => {
+    if (!isSuperAdmin) {
+      setConfirmPurgeOpen(false);
+      return;
     }
+    const result = purgeSyncedData();
+    const blob = new Blob([result.archivedData], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Offline_Purge_Archive_30Days_${Date.now()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setConfirmPurgeOpen(false);
+    showNotification(`Successfully purged ${result.count} synced records older than 30 days. Backup downloaded!`);
   };
 
   return (
@@ -324,6 +354,26 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
         </div>
       )}
 
+      {/* Locked Status Visual Banner for Non-Super Administrators */}
+      {!isSuperAdmin && (
+        <div
+          data-testid="admin-access-locked-banner"
+          className="bg-amber-50 border border-amber-300 text-amber-950 px-4 py-3.5 rounded-2xl flex items-start gap-3 shadow-xs"
+        >
+          <div className="w-9 h-9 rounded-xl bg-amber-100 border border-amber-300 text-amber-700 flex items-center justify-center shrink-0">
+            <Lock className="w-4 h-4" />
+          </div>
+          <div className="space-y-0.5 text-xs">
+            <p className="font-black text-amber-950">
+              Read-Only Locked Mode — Super Administrator Privileges Required
+            </p>
+            <p className="text-amber-900/90 leading-relaxed">
+              Your active role ({effectiveRole.replace('_', ' ')}) does not have Super Administrator privileges. All input fields are programmatically disabled and all Edit, Delete, Create, Security Policy, and Purge actions have been removed.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Main Header Card */}
       <div className="bg-white p-5 rounded-3xl border border-slate-200/80 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
@@ -347,32 +397,45 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
 
         {/* Global Action Buttons */}
         <div className="flex flex-wrap items-center gap-2">
-          {/* Simulation Dropdown */}
-          <div className="flex items-center gap-1.5 bg-slate-50 p-1 rounded-2xl border border-slate-200 text-xs">
-            <Eye className="w-3.5 h-3.5 text-slate-500 ml-1.5" />
-            <span className="text-[11px] font-bold text-slate-600">Simulate:</span>
-            <select
-              value={simulatedRole || currentUser.role}
-              onChange={(e) => {
-                const val = e.target.value as AdminRoleType;
-                setSimulatedRole(val === currentUser.role ? null : val);
-              }}
-              className="bg-white text-xs font-bold text-slate-800 rounded-xl px-2 py-1 border border-slate-200 focus:outline-hidden"
-            >
-              <option value="primary_admin">Primary Admin (Principal)</option>
-              <option value="senior_admin">Senior Admin (Inherited)</option>
-              <option value="junior_admin">Junior Admin (Base)</option>
-              <option value="teacher">Teacher (Restricted)</option>
-            </select>
-          </div>
+          {/* Simulation Dropdown (Available only for underlying primary_admin account) */}
+          {currentUser.role === 'primary_admin' && (
+            <div className="flex items-center gap-1.5 bg-slate-50 p-1 rounded-2xl border border-slate-200 text-xs">
+              <Eye className="w-3.5 h-3.5 text-slate-500 ml-1.5" />
+              <span className="text-[11px] font-bold text-slate-600">Simulate:</span>
+              <select
+                value={simulatedRole || currentUser.role}
+                onChange={(e) => {
+                  const val = e.target.value as AdminRoleType;
+                  setSimulatedRole(val === currentUser.role ? null : val);
+                  setInlineEditingUserId(null);
+                  setIsAddUserModalOpen(false);
+                  setUserToDelete(null);
+                  setConfirmPurgeOpen(false);
+                }}
+                className="bg-white text-xs font-bold text-slate-800 rounded-xl px-2 py-1 border border-slate-200 focus:outline-hidden"
+              >
+                <option value="primary_admin">Primary Admin (Super Admin)</option>
+                <option value="senior_admin">Senior Admin (Inherited)</option>
+                <option value="junior_admin">Junior Admin (Base)</option>
+                <option value="teacher">Teacher (Restricted)</option>
+              </select>
+            </div>
+          )}
 
-          <button
-            onClick={() => setIsAddUserModalOpen(true)}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-sm active:scale-95 transition-all"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Add Admin</span>
-          </button>
+          {isSuperAdmin ? (
+            <button
+              onClick={() => setIsAddUserModalOpen(true)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-sm active:scale-95 transition-all"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Add Admin</span>
+            </button>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 px-3 py-2 rounded-2xl bg-amber-50 text-amber-900 border border-amber-200 font-bold text-xs">
+              <Lock className="w-3.5 h-3.5 text-amber-600" />
+              <span>Locked (Read-Only)</span>
+            </span>
+          )}
 
           {/* Universal Download Button */}
           <button
@@ -450,12 +513,17 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
               <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
-                placeholder="Quick Search (highlight matching name, email, role)..."
+                disabled={!isSuperAdmin}
+                placeholder={
+                  isSuperAdmin
+                    ? 'Quick Search (highlight matching name, email, role)...'
+                    : 'Search locked (Super Administrator only)'
+                }
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-9.5 pr-4 py-2 rounded-2xl bg-slate-50 border border-slate-200 focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500 text-xs font-medium"
+                className="w-full pl-9.5 pr-4 py-2 rounded-2xl bg-slate-50 border border-slate-200 focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500 text-xs font-medium disabled:opacity-60 disabled:cursor-not-allowed"
               />
-              {searchQuery && (
+              {searchQuery && isSuperAdmin && (
                 <button
                   onClick={() => setSearchQuery('')}
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
@@ -468,9 +536,10 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
             <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
               <span className="text-[11px] font-bold text-slate-500">Filter Role:</span>
               <select
+                disabled={!isSuperAdmin}
                 value={roleFilter}
                 onChange={(e) => setRoleFilter(e.target.value as any)}
-                className="px-3 py-1.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-800"
+                className="px-3 py-1.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-800 disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 <option value="all">All Roles ({adminUsers.length})</option>
                 <option value="primary_admin">Primary Admin</option>
@@ -505,7 +574,7 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
                       : 'border-slate-200/80 hover:border-slate-300'
                   }`}
                 >
-                  {isInlineEditing ? (
+                  {isInlineEditing && isSuperAdmin && !isProtectedMasterAdmin(user) ? (
                     /* INLINE EDIT MODE */
                     <div className="space-y-4 animate-in fade-in">
                       <div className="flex items-center justify-between pb-3 border-b border-slate-100">
@@ -540,9 +609,10 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
                           </label>
                           <input
                             type="text"
+                            disabled={!isSuperAdmin}
                             value={inlineName}
                             onChange={(e) => setInlineName(e.target.value)}
-                            className="w-full px-3 py-2 rounded-xl border border-slate-300 font-bold text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-indigo-500 text-xs"
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 font-bold text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-indigo-500 text-xs disabled:bg-slate-100"
                           />
                         </div>
 
@@ -551,11 +621,11 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
                             Access Role (Triggers Inheritance)
                           </label>
                           <select
+                            disabled={!isSuperAdmin}
                             value={inlineRole}
                             onChange={(e) => setInlineRole(e.target.value as AdminRoleType)}
-                            className="w-full px-3 py-2 rounded-xl border border-slate-300 font-bold text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-indigo-500 text-xs bg-white"
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 font-bold text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-indigo-500 text-xs bg-white disabled:bg-slate-100"
                           >
-                            <option value="primary_admin">Primary Admin (Principal / Headmaster)</option>
                             <option value="senior_admin">Senior Admin (Inherits Junior Admin)</option>
                             <option value="junior_admin">Junior Admin (Base Matrix)</option>
                             <option value="teacher">Teacher (Class Level Only)</option>
@@ -568,9 +638,10 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
                           </label>
                           <input
                             type="text"
+                            disabled={!isSuperAdmin}
                             value={inlinePhone}
                             onChange={(e) => setInlinePhone(e.target.value)}
-                            className="w-full px-3 py-2 rounded-xl border border-slate-300 font-bold text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-indigo-500 text-xs"
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 font-bold text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-indigo-500 text-xs disabled:bg-slate-100"
                           />
                         </div>
                       </div>
@@ -643,57 +714,66 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
                           </div>
                         </div>
 
-                        {/* Action Buttons: Inline Edit, Detail/Heatmap, Emergency Code, Delete/Deactivate */}
+                        {/* Action Buttons: Strictly restricted to Super Administrator; Fixed App Developer / Admin is permanently locked */}
                         <div className="flex flex-wrap items-center gap-2 shrink-0">
-                          {/* 1. Inline Edit Button */}
-                          <button
-                            type="button"
-                            onClick={() => handleStartInlineEdit(user)}
-                            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-indigo-50 hover:text-indigo-700 text-slate-700 font-bold text-xs border border-slate-200 transition-all active:scale-95"
-                            title="Edit name, role, and phone inline"
-                          >
-                            <Edit className="w-3.5 h-3.5" />
-                            <span>Edit</span>
-                          </button>
+                          {isProtectedMasterAdmin(user) ? (
+                            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-50 text-amber-900 font-bold text-xs border border-amber-200">
+                              <Lock className="w-3.5 h-3.5 text-amber-600" />
+                              <span>Protected Identity (Locked)</span>
+                            </span>
+                          ) : (
+                            <>
+                              {isSuperAdmin && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleStartInlineEdit(user)}
+                                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-indigo-50 hover:text-indigo-700 text-slate-700 font-bold text-xs border border-slate-200 transition-all active:scale-95"
+                                  title="Edit name, role, and phone inline"
+                                >
+                                  <Edit className="w-3.5 h-3.5" />
+                                  <span>Edit</span>
+                                </button>
+                              )}
 
-                          {/* 2. Detail & Heatmap Modal */}
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedUserForDetail(user);
-                              setIsDetailModalOpen(true);
-                            }}
-                            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs border border-slate-200 transition-all active:scale-95"
-                          >
-                            <Sliders className="w-3.5 h-3.5 text-slate-500" />
-                            <span>Activity & Heatmap</span>
-                          </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelectedUserForDetail(user);
+                                  setIsDetailModalOpen(true);
+                                }}
+                                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs border border-slate-200 transition-all active:scale-95"
+                              >
+                                <Sliders className="w-3.5 h-3.5 text-slate-500" />
+                                <span>Activity & Heatmap</span>
+                              </button>
 
-                          {/* 3. Emergency Temp Code */}
-                          <button
-                            type="button"
-                            onClick={() => handleGenerateTempCode(user)}
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-800 font-bold text-xs border border-amber-200 transition-all active:scale-95"
-                            title="Generate one-time emergency login code"
-                          >
-                            <KeyRound className="w-3.5 h-3.5 text-amber-600" />
-                            <span>Reset Code</span>
-                          </button>
+                              {isSuperAdmin && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleGenerateTempCode(user)}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-800 font-bold text-xs border border-amber-200 transition-all active:scale-95"
+                                  title="Generate one-time emergency login code"
+                                >
+                                  <KeyRound className="w-3.5 h-3.5 text-amber-600" />
+                                  <span>Reset Code</span>
+                                </button>
+                              )}
 
-                          {/* 4. Delete / Deactivate Option */}
-                          {user.role !== 'primary_admin' && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setUserToDelete(user);
-                                setDeleteErrorMessage(null);
-                              }}
-                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs border border-rose-200 transition-all active:scale-95"
-                              title="Delete or deactivate administrative account"
-                            >
-                              <Trash2 className="w-3.5 h-3.5 text-rose-600" />
-                              <span>Delete</span>
-                            </button>
+                              {isSuperAdmin && user.role !== 'primary_admin' && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setUserToDelete(user);
+                                    setDeleteErrorMessage(null);
+                                  }}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs border border-rose-200 transition-all active:scale-95"
+                                  title="Delete or deactivate administrative account"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+                                  <span>Delete</span>
+                                </button>
+                              )}
+                            </>
                           )}
                         </div>
                       </div>
@@ -789,30 +869,32 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
                 </p>
               </div>
 
-              {/* Role Templates Gallery */}
-              <div className="flex flex-wrap items-center gap-1.5">
-                <span className="text-[10px] uppercase tracking-wider font-extrabold text-slate-400 mr-1">
-                  Role Templates:
-                </span>
-                <button
-                  onClick={() => handleApplyRoleTemplate('Data Entry Clerk')}
-                  className="px-2.5 py-1 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-bold transition-all text-slate-200"
-                >
-                  Data Entry Clerk
-                </button>
-                <button
-                  onClick={() => handleApplyRoleTemplate('Attendance Auditor')}
-                  className="px-2.5 py-1 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-bold transition-all text-slate-200"
-                >
-                  Attendance Auditor
-                </button>
-                <button
-                  onClick={() => handleApplyRoleTemplate('Examinations Manager')}
-                  className="px-2.5 py-1 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-bold transition-all text-slate-200"
-                >
-                  Examinations Manager
-                </button>
-              </div>
+              {/* Role Templates Gallery (Super Administrator only) */}
+              {isSuperAdmin && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[10px] uppercase tracking-wider font-extrabold text-slate-400 mr-1">
+                    Role Templates:
+                  </span>
+                  <button
+                    onClick={() => handleApplyRoleTemplate('Data Entry Clerk')}
+                    className="px-2.5 py-1 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-bold transition-all text-slate-200"
+                  >
+                    Data Entry Clerk
+                  </button>
+                  <button
+                    onClick={() => handleApplyRoleTemplate('Attendance Auditor')}
+                    className="px-2.5 py-1 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-bold transition-all text-slate-200"
+                  >
+                    Attendance Auditor
+                  </button>
+                  <button
+                    onClick={() => handleApplyRoleTemplate('Examinations Manager')}
+                    className="px-2.5 py-1 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-bold transition-all text-slate-200"
+                  >
+                    Examinations Manager
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Tree Flow Diagram */}
@@ -1117,9 +1199,10 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
                   min="8"
                   max="16"
                   step="2"
+                  disabled={!isSuperAdmin}
                   value={secMinPass}
                   onChange={(e) => setSecMinPass(parseInt(e.target.value, 10))}
-                  className="w-full accent-indigo-600 cursor-pointer"
+                  className="w-full accent-indigo-600 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 />
                 <div className="flex justify-between text-[10px] text-slate-400 mt-1 font-semibold">
                   <span>8 chars (Standard)</span>
@@ -1130,12 +1213,13 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
               </div>
 
               <div className="space-y-2.5 pt-2">
-                <label className="flex items-center gap-2.5 cursor-pointer">
+                <label className={`flex items-center gap-2.5 ${isSuperAdmin ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'}`}>
                   <input
                     type="checkbox"
+                    disabled={!isSuperAdmin}
                     checked={secSpecial}
                     onChange={(e) => setSecSpecial(e.target.checked)}
-                    className="w-4 h-4 rounded text-indigo-600 accent-indigo-600"
+                    className="w-4 h-4 rounded text-indigo-600 accent-indigo-600 disabled:cursor-not-allowed"
                   />
                   <div>
                     <span className="font-bold text-slate-800 block">Require Special Characters (@, #, $, %, etc.)</span>
@@ -1143,12 +1227,13 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
                   </div>
                 </label>
 
-                <label className="flex items-center gap-2.5 cursor-pointer">
+                <label className={`flex items-center gap-2.5 ${isSuperAdmin ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'}`}>
                   <input
                     type="checkbox"
+                    disabled={!isSuperAdmin}
                     checked={secNumbers}
                     onChange={(e) => setSecNumbers(e.target.checked)}
-                    className="w-4 h-4 rounded text-indigo-600 accent-indigo-600"
+                    className="w-4 h-4 rounded text-indigo-600 accent-indigo-600 disabled:cursor-not-allowed"
                   />
                   <div>
                     <span className="font-bold text-slate-800 block">Require Numerical Digits (0-9)</span>
@@ -1156,12 +1241,13 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
                   </div>
                 </label>
 
-                <label className="flex items-center gap-2.5 cursor-pointer">
+                <label className={`flex items-center gap-2.5 ${isSuperAdmin ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'}`}>
                   <input
                     type="checkbox"
+                    disabled={!isSuperAdmin}
                     checked={secUppercase}
                     onChange={(e) => setSecUppercase(e.target.checked)}
-                    className="w-4 h-4 rounded text-indigo-600 accent-indigo-600"
+                    className="w-4 h-4 rounded text-indigo-600 accent-indigo-600 disabled:cursor-not-allowed"
                   />
                   <div>
                     <span className="font-bold text-slate-800 block">Require Uppercase Letters (A-Z)</span>
@@ -1183,9 +1269,10 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
                   Inactivity Session Timeout Duration
                 </label>
                 <select
+                  disabled={!isSuperAdmin}
                   value={secTimeout}
                   onChange={(e) => setSecTimeout(parseInt(e.target.value, 10))}
-                  className="w-full px-3 py-2 rounded-xl bg-white border border-slate-300 font-bold text-slate-800"
+                  className="w-full px-3 py-2 rounded-xl bg-white border border-slate-300 font-bold text-slate-800 disabled:bg-slate-100 disabled:opacity-70 disabled:cursor-not-allowed"
                 >
                   <option value={15}>15 Minutes (High Security)</option>
                   <option value={30}>30 Minutes (Recommended)</option>
@@ -1202,9 +1289,10 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
                   Maximum Failed Logins Before Account Suspension
                 </label>
                 <select
+                  disabled={!isSuperAdmin}
                   value={secMaxFailed}
                   onChange={(e) => setSecMaxFailed(parseInt(e.target.value, 10))}
-                  className="w-full px-3 py-2 rounded-xl bg-white border border-slate-300 font-bold text-slate-800"
+                  className="w-full px-3 py-2 rounded-xl bg-white border border-slate-300 font-bold text-slate-800 disabled:bg-slate-100 disabled:opacity-70 disabled:cursor-not-allowed"
                 >
                   <option value={3}>3 Attempts (Strict)</option>
                   <option value={5}>5 Attempts (Standard)</option>
@@ -1213,12 +1301,13 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
               </div>
 
               <div className="pt-2">
-                <label className="flex items-center gap-2.5 cursor-pointer">
+                <label className={`flex items-center gap-2.5 ${isSuperAdmin ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'}`}>
                   <input
                     type="checkbox"
+                    disabled={!isSuperAdmin}
                     checked={sec2Fa}
                     onChange={(e) => setSec2Fa(e.target.checked)}
-                    className="w-4 h-4 rounded text-indigo-600 accent-indigo-600"
+                    className="w-4 h-4 rounded text-indigo-600 accent-indigo-600 disabled:cursor-not-allowed"
                   />
                   <div>
                     <span className="font-bold text-slate-800 block">Enforce Two-Factor Authentication (OTP / SMS)</span>
@@ -1229,15 +1318,17 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
             </div>
           </div>
 
-          <div className="flex justify-end pt-3">
-            <button
-              type="submit"
-              className="px-5 py-2.5 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-xs shadow-md active:scale-95 transition-all flex items-center gap-2"
-            >
-              <Save className="w-4 h-4" />
-              <span>Save & Enforce Security Policy</span>
-            </button>
-          </div>
+          {isSuperAdmin && (
+            <div className="flex justify-end pt-3">
+              <button
+                type="submit"
+                className="px-5 py-2.5 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-xs shadow-md active:scale-95 transition-all flex items-center gap-2"
+              >
+                <Save className="w-4 h-4" />
+                <span>Save & Enforce Security Policy</span>
+              </button>
+            </div>
+          )}
         </form>
       )}
 
@@ -1264,16 +1355,45 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
             <p className="text-[11px] leading-relaxed">
               Records queued for purge: <strong>42 offline items</strong> (September/early October attendance sync items). Only records marked <code>synced</code> and older than 30 days are purged. Active unsynced records are never touched.
             </p>
-            <div className="flex flex-wrap items-center gap-3 pt-2">
-              <button
-                type="button"
-                onClick={handlePurge}
-                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs shadow-xs active:scale-95 transition-all flex items-center gap-1.5"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                <span>Execute 30-Day Cache Purge</span>
-              </button>
-            </div>
+            {isSuperAdmin ? (
+              <div className="flex flex-wrap items-center gap-3 pt-2">
+                {!confirmPurgeOpen ? (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmPurgeOpen(true)}
+                    className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs shadow-xs active:scale-95 transition-all flex items-center gap-1.5"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Execute 30-Day Cache Purge</span>
+                  </button>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-2 p-2.5 rounded-xl bg-white border border-rose-200">
+                    <span className="font-bold text-rose-800">
+                      Confirm 30-day cache purge and recovery archive download?
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleExecutePurge}
+                      className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs"
+                    >
+                      Confirm Purge
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmPurgeOpen(false)}
+                      className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border border-amber-300 text-amber-900 font-bold text-xs">
+                <Lock className="w-3.5 h-3.5 text-amber-600" />
+                <span>Restricted to Super Administrator</span>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1281,7 +1401,7 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
       {/* ========================================================
           MODAL: ADD NEW ADMIN USER
       ======================================================== */}
-      {isAddUserModalOpen && (
+      {isAddUserModalOpen && isSuperAdmin && (
         <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
           <form
             onSubmit={handleCreateUser}
@@ -1307,10 +1427,11 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
                 <input
                   type="text"
                   required
+                  disabled={!isSuperAdmin}
                   placeholder="e.g. Ramesh Chandra"
                   value={newUserName}
                   onChange={(e) => setNewUserName(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl border border-slate-300 font-medium"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 font-medium disabled:bg-slate-100"
                 />
               </div>
 
@@ -1319,19 +1440,21 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
                 <input
                   type="email"
                   required
-                  placeholder="ramesh@gmms.upgov.in"
+                  disabled={!isSuperAdmin}
+                  placeholder="ramesh@school.edu.in"
                   value={newUserEmail}
                   onChange={(e) => setNewUserEmail(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl border border-slate-300 font-medium"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 font-medium disabled:bg-slate-100"
                 />
               </div>
 
               <div>
                 <label className="block font-bold text-slate-700 mb-1">Assign Role & Inheritance Model</label>
                 <select
+                  disabled={!isSuperAdmin}
                   value={newUserRole}
                   onChange={(e) => setNewUserRole(e.target.value as AdminRoleType)}
-                  className="w-full px-3 py-2 rounded-xl border border-slate-300 font-bold bg-white"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 font-bold bg-white disabled:bg-slate-100"
                 >
                   <option value="junior_admin">Junior Admin (Base Matrix)</option>
                   <option value="senior_admin">Senior Admin (Inherits Junior Admin)</option>
@@ -1343,10 +1466,11 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
                 <label className="block font-bold text-slate-700 mb-1">Official Contact Phone</label>
                 <input
                   type="text"
+                  disabled={!isSuperAdmin}
                   placeholder="+91 98000 00000"
                   value={newUserPhone}
                   onChange={(e) => setNewUserPhone(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl border border-slate-300 font-medium"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 font-medium disabled:bg-slate-100"
                 />
               </div>
 
@@ -1354,10 +1478,11 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
                 <label className="block font-bold text-slate-700 mb-1">Designation</label>
                 <input
                   type="text"
+                  disabled={!isSuperAdmin}
                   placeholder="e.g. Examination Registrar"
                   value={newUserDesignation}
                   onChange={(e) => setNewUserDesignation(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl border border-slate-300 font-medium"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 font-medium disabled:bg-slate-100"
                 />
               </div>
             </div>
@@ -1384,7 +1509,7 @@ export const AdminAccessControl: React.FC<AdminAccessControlProps> = ({
       {/* ========================================================
           MODAL: DELETE / DEACTIVATE CONFIRMATION
       ======================================================== */}
-      {userToDelete && (
+      {userToDelete && isSuperAdmin && !isProtectedMasterAdmin(userToDelete) && (
         <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl max-w-sm w-full p-6 space-y-4 shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 text-xs">
             <div className="w-10 h-10 rounded-2xl bg-rose-100 text-rose-700 flex items-center justify-center">

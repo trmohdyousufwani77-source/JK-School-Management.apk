@@ -435,7 +435,7 @@
       "type": "object",
       "properties": {
         "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
-        "section": { "type": "string", "enum": ["About Us", "App Information", "School Logo"] },
+        "section": { "type": "string", "enum": ["About Us", "App Information", "School Logo", "FAQ"] },
         "action": { "type": "string", "enum": ["CREATE", "UPDATE"] },
         "changedFields": { "type": "string", "maxLength": 600 },
         "summary": { "type": "string", "minLength": 2, "maxLength": 600 },
@@ -470,6 +470,28 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "developerName", "designation", "isProtected", "updatedByUid", "createdAt", "updatedAt"]
+    },
+    "SchoolFaqItem": {
+      "title": "SchoolFaqItem",
+      "description": "School Admin-managed Frequently Asked Question entry with category, view counter, and helpfulness feedback stats.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "question": { "type": "string", "minLength": 3, "maxLength": 400 },
+        "answer": { "type": "string", "minLength": 2, "maxLength": 3000 },
+        "category": {
+          "type": "string",
+          "enum": ["Admission", "Attendance", "Curriculum", "Examinations", "Scholarships", "General"]
+        },
+        "views": { "type": "integer" },
+        "helpfulYes": { "type": "integer" },
+        "helpfulNo": { "type": "integer" },
+        "updatedByUid": { "type": "string", "maxLength": 128 },
+        "updatedByName": { "type": "string", "maxLength": 140 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "question", "answer", "category", "views", "helpfulYes", "helpfulNo", "updatedByUid", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -540,6 +562,10 @@
     "/protectedDeveloperProfiles/{profileId}": {
       "schema": { "$ref": "#/entities/ProtectedDeveloperProfile" },
       "description": "Strictly protected separate collection storing original App Developer and Super Administrator profile details, read-only for School Admins."
+    },
+    "/schoolFaqs/{faqId}": {
+      "schema": { "$ref": "#/entities/SchoolFaqItem" },
+      "description": "School Admin-managed FAQ catalog with category filtering, view analytics, and user helpfulness ratings."
     }
   }
 }

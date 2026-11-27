@@ -142,3 +142,34 @@ data class HpcCardEntity(
     val headmasterName: String = "Mohd Yousuf Wani",
     val updatedAtMillis: Long = System.currentTimeMillis()
 )
+
+@Entity(tableName = "lesson_plans")
+data class LessonPlanEntity(
+    @PrimaryKey val id: String,
+    val title: String,
+    val subject: String,
+    val classLevel: String,
+    val chapter: String = "",
+    val topic: String = "",
+    val duration: String = "40 minutes",
+    val language: String = "English",
+    val isRtl: Boolean = false,
+    val generalObjectives: String = "",
+    val specificLearningOutcomes: String = "",
+    val previousKnowledge: String = "",
+    val teachingLearningMaterials: String = "",
+    val introduction: String = "",
+    val presentationOfTopic: String = "",
+    val teacherActivities: String = "",
+    val studentActivities: String = "",
+    val teachingMethodology: String = "",
+    val blackboardWork: String = "",
+    val assessmentQuestions: String = "",
+    val homework: String = "",
+    val conclusion: String = "",
+    val teacherName: String = "",
+    val schoolName: String = "Govt Middle School Pamposh Colony",
+    val savedAtIso: String = "",
+    val updatedAtMillis: Long = System.currentTimeMillis()
+)
+

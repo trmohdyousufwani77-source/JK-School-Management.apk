@@ -48,6 +48,7 @@ object SecurityPreferences {
     private const val PREFS_NAME = "school_master_security_prefs"
     private const val KEY_MANDATORY_BIOMETRIC = "mandatory_biometric_auth"
     private const val KEY_LAUNCHER_ALIAS = "launcher_icon_alias"
+    private const val KEY_ATTENDANCE_AUTO_SYNC = "attendance_auto_sync_enabled"
 
     fun isMandatoryBiometricEnabled(context: Context): Boolean {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -57,6 +58,16 @@ object SecurityPreferences {
     fun setMandatoryBiometricEnabled(context: Context, enabled: Boolean) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putBoolean(KEY_MANDATORY_BIOMETRIC, enabled).apply()
+    }
+
+    fun isAttendanceAutoSyncEnabled(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_ATTENDANCE_AUTO_SYNC, true)
+    }
+
+    fun setAttendanceAutoSyncEnabled(context: Context, enabled: Boolean) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean(KEY_ATTENDANCE_AUTO_SYNC, enabled).apply()
     }
 
     fun getActiveLauncherIconAlias(context: Context): LauncherIconAlias {
@@ -239,6 +250,217 @@ object ScannerHistoryCsvExporter {
             true
         } catch (_: Exception) {
             false
+        }
+    }
+
+    /**
+     * Filters all 'PENDING' local scan records and writes them to a temporary CSV file
+     * inside cacheDir/shared_csv, then opens a FileProvider share/save chooser.
+     */
+    fun exportPendingScansToTempCsvFile(
+        context: Context,
+        entries: List<ScannerHistoryEntity>
+    ): File? {
+        val pending = entries.filter { it.syncStatus.equals("PENDING", ignoreCase = true) }
+        if (pending.isEmpty()) return null
+        return try {
+            val dir = File(context.cacheDir, "shared_csv").apply { mkdirs() }
+            val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            val tempFile = File(dir, "Pending_Local_Scans_Temp_$stamp.csv")
+            tempFile.writeText("\uFEFF" + formatScannerHistoryToCsv(pending), Charsets.UTF_8)
+
+            val uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                tempFile
+            )
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/csv"
+                putExtra(Intent.EXTRA_SUBJECT, "School Master — Pending Local Attendance Scans CSV")
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(Intent.createChooser(intent, "Export Pending Local Scans CSV"))
+            tempFile
+        } catch (_: Exception) {
+            null
+        }
+    }
+}
+
+/**
+ * Exports the current QR attendance scan history log, daily total count,
+ * and per-class breakdown into a structured A4 PDF document via Android PdfDocument.
+ */
+object ScannerHistoryPdfExporter {
+
+    fun exportScanHistoryToPdf(
+        context: Context,
+        dateLabel: String,
+        totalScannedToday: Int,
+        classBreakdown: Map<String, Int>,
+        entries: List<ScannerHistoryEntity>,
+        classFilterLabel: String = "All Classes",
+        schoolName: String = "GOVT MIDDLE SCHOOL PAMPOSH COLONY"
+    ): File? {
+        return try {
+            val pdfDoc = android.graphics.pdf.PdfDocument()
+            val pageWidth = 595
+            val pageHeight = 842
+            val margin = 36f
+            val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.US)
+
+            val headerBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = AndroidColor.parseColor("#1E1B4B")
+            }
+            val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = AndroidColor.WHITE
+                textSize = 15f
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            }
+            val subTitlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = AndroidColor.parseColor("#E0E7FF")
+                textSize = 10f
+            }
+            val sectionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = AndroidColor.parseColor("#0F172A")
+                textSize = 12f
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            }
+            val bodyPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = AndroidColor.parseColor("#1E293B")
+                textSize = 10f
+            }
+            val mutedPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = AndroidColor.parseColor("#64748B")
+                textSize = 9.5f
+            }
+            val accentPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = AndroidColor.parseColor("#047857")
+                textSize = 11f
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            }
+            val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = AndroidColor.parseColor("#CBD5E1")
+                strokeWidth = 1f
+            }
+
+            var pageNumber = 1
+            var page = pdfDoc.startPage(
+                android.graphics.pdf.PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNumber).create()
+            )
+            var canvas = page.canvas
+
+            // Header Band
+            canvas.drawRect(0f, 0f, pageWidth.toFloat(), 76f, headerBgPaint)
+            canvas.drawText(schoolName.uppercase(), margin, 32f, titlePaint)
+            canvas.drawText(
+                "Daily QR Attendance Scan History Log  |  Date: $dateLabel  |  Filter: $classFilterLabel",
+                margin,
+                54f,
+                subTitlePaint
+            )
+
+            var y = 104f
+            // Daily Total Summary
+            canvas.drawText("Daily Scan Summary", margin, y, sectionPaint)
+            y += 18f
+            canvas.drawText(
+                "Daily Total Present (QR): $totalScannedToday   |   Classes With Scans: ${classBreakdown.size}   |   Entries Shown: ${entries.size}",
+                margin,
+                y,
+                accentPaint
+            )
+            y += 14f
+            canvas.drawLine(margin, y, pageWidth - margin, y, linePaint)
+            y += 18f
+
+            // Per-Class Breakdown
+            canvas.drawText("Per-Class Breakdown", margin, y, sectionPaint)
+            y += 16f
+            if (classBreakdown.isEmpty()) {
+                canvas.drawText("No class-level QR attendance scans recorded yet for $dateLabel.", margin, y, mutedPaint)
+                y += 16f
+            } else {
+                classBreakdown.entries.sortedBy { it.key }.forEach { (clsLabel, count) ->
+                    if (y > pageHeight - 80f) {
+                        pdfDoc.finishPage(page)
+                        pageNumber += 1
+                        page = pdfDoc.startPage(
+                            android.graphics.pdf.PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNumber).create()
+                        )
+                        canvas = page.canvas
+                        y = 48f
+                    }
+                    canvas.drawText(clsLabel, margin + 8f, y, bodyPaint)
+                    canvas.drawText("$count Present", pageWidth - margin - 72f, y, accentPaint)
+                    y += 15f
+                }
+            }
+
+            y += 8f
+            canvas.drawLine(margin, y, pageWidth - margin, y, linePaint)
+            y += 20f
+
+            // Timestamped Scan History Log
+            canvas.drawText("Scan History Log", margin, y, sectionPaint)
+            y += 16f
+            if (entries.isEmpty()) {
+                canvas.drawText("No student scan records in current history view.", margin, y, mutedPaint)
+            } else {
+                entries.forEachIndexed { index, entry ->
+                    if (y > pageHeight - 54f) {
+                        pdfDoc.finishPage(page)
+                        pageNumber += 1
+                        page = pdfDoc.startPage(
+                            android.graphics.pdf.PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNumber).create()
+                        )
+                        canvas = page.canvas
+                        y = 48f
+                    }
+                    val ts = timeFmt.format(Date(entry.scannedAtMillis))
+                    canvas.drawText(
+                        "${index + 1}. ${entry.studentName} (${entry.admissionNumber})",
+                        margin,
+                        y,
+                        bodyPaint
+                    )
+                    canvas.drawText(
+                        "${entry.classSection}  |  $ts  |  ${entry.syncStatus}",
+                        pageWidth - margin - 185f,
+                        y,
+                        mutedPaint
+                    )
+                    y += 16f
+                }
+            }
+
+            pdfDoc.finishPage(page)
+
+            val dir = File(context.cacheDir, "shared_pdf").apply { mkdirs() }
+            val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            val pdfFile = File(dir, "Scan_History_Log_${dateLabel}_$stamp.pdf")
+            FileOutputStream(pdfFile).use { out ->
+                pdfDoc.writeTo(out)
+                out.flush()
+            }
+            pdfDoc.close()
+
+            val uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                pdfFile
+            )
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "application/pdf"
+                putExtra(Intent.EXTRA_SUBJECT, "School Master — Daily QR Scan History ($dateLabel)")
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(Intent.createChooser(intent, "Export Scan History PDF"))
+            pdfFile
+        } catch (_: Exception) {
+            null
         }
     }
 }

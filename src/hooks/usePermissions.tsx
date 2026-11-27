@@ -21,6 +21,7 @@ interface PermissionsContextType {
   adminUsers: AdminUser[];
   currentRole: AdminRoleType;
   effectiveRole: AdminRoleType;
+  isSuperAdmin: boolean;
   simulatedRole: AdminRoleType | null;
   setSimulatedRole: (role: AdminRoleType | null) => void;
   hasPermission: (key: PermissionKey) => boolean;
@@ -39,17 +40,40 @@ interface PermissionsContextType {
 const PermissionsContext = createContext<PermissionsContextType | undefined>(undefined);
 
 export const PermissionsProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
+  const normalizeProtectedAdminList = (list: AdminUser[]): AdminUser[] => {
+    return list.map((u) => {
+      if (u.id === 'user-admin-wani' || u.email.toLowerCase() === 'mohdyousufwani1977@gmail.com') {
+        return {
+          ...u,
+          name: 'Mohd Yousuf Wani',
+          role: 'primary_admin' as AdminRoleType,
+          designation: 'App Developer / Administrator',
+        };
+      }
+      if (u.id === 'user-teacher-nazir' && (u.designation || '').includes('Administrator')) {
+        return {
+          ...u,
+          designation: 'Senior Academic In-Charge',
+        };
+      }
+      return u;
+    });
+  };
+
   // 1. Admin Users list
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>(() => {
     const saved = localStorage.getItem(`${STORAGE_PREFIX}users`);
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return normalizeProtectedAdminList(parsed);
+        }
       } catch (e) {
         /* fallback */
       }
     }
-    return sampleAdminUsers;
+    return normalizeProtectedAdminList(sampleAdminUsers);
   });
 
   useEffect(() => {
@@ -74,6 +98,7 @@ export const PermissionsProvider: React.FC<{ children: ReactNode }> = ({ childre
   const [simulatedRole, setSimulatedRole] = useState<AdminRoleType | null>(null);
 
   const effectiveRole: AdminRoleType = simulatedRole || currentUser.role;
+  const isSuperAdmin = effectiveRole === 'primary_admin';
 
   // 4. Security Settings
   const [securitySettings, setSecuritySettings] = useState<SecuritySettings>(() => {
@@ -89,6 +114,7 @@ export const PermissionsProvider: React.FC<{ children: ReactNode }> = ({ childre
   });
 
   const updateSecuritySettings = (settings: SecuritySettings) => {
+    if (!isSuperAdmin) return;
     setSecuritySettings(settings);
     localStorage.setItem(`${STORAGE_PREFIX}security_settings`, JSON.stringify(settings));
 
@@ -153,8 +179,15 @@ export const PermissionsProvider: React.FC<{ children: ReactNode }> = ({ childre
     return true;
   };
 
-  // 8. Update Admin User (inline or modal edit)
+  // 8. Update Admin User (Super Administrator only; protected Administrator identity is immutable)
   const updateAdminUser = (updatedUser: AdminUser, oldUser?: AdminUser) => {
+    if (!isSuperAdmin) return;
+    if (
+      updatedUser.id === 'user-admin-wani' ||
+      updatedUser.email.toLowerCase() === 'mohdyousufwani1977@gmail.com'
+    ) {
+      return;
+    }
     const previous = oldUser || adminUsers.find((u) => u.id === updatedUser.id);
     setAdminUsers((prev) => prev.map((u) => (u.id === updatedUser.id ? updatedUser : u)));
 
@@ -196,18 +229,28 @@ export const PermissionsProvider: React.FC<{ children: ReactNode }> = ({ childre
     }
   };
 
-  // 9. Delete / Deactivate Admin User
+  // 9. Delete / Deactivate Admin User (Super Administrator only; protected Administrator identity cannot be deleted)
   const deleteAdminUser = (userId: string): { success: boolean; message: string } => {
+    if (!isSuperAdmin) {
+      return {
+        success: false,
+        message: 'Forbidden: Only a Super Administrator can delete administrative accounts.',
+      };
+    }
     const target = adminUsers.find((u) => u.id === userId);
     if (!target) {
       return { success: false, message: 'User not found.' };
     }
 
-    // Safety rule: Cannot delete primary admin (headmaster)
-    if (target.role === 'primary_admin') {
+    // Safety rule: Cannot delete fixed Super Administrator / App Developer
+    if (
+      target.role === 'primary_admin' ||
+      target.id === 'user-admin-wani' ||
+      target.email.toLowerCase() === 'mohdyousufwani1977@gmail.com'
+    ) {
       return {
         success: false,
-        message: 'Cannot delete the Primary Administrator / Headmaster account. Transfer primary role first.',
+        message: 'Protected Administrator identity cannot be deleted or modified.',
       };
     }
 
@@ -240,8 +283,9 @@ export const PermissionsProvider: React.FC<{ children: ReactNode }> = ({ childre
     };
   };
 
-  // 10. Add New Admin User
+  // 10. Add New Admin User (Super Administrator only)
   const addAdminUser = (newUser: Partial<AdminUser> & { name: string; email: string; role: AdminRoleType }) => {
+    if (!isSuperAdmin) return;
     const id = `user-admin-${Date.now()}`;
     const userToAdd: AdminUser = {
       id,
@@ -280,8 +324,11 @@ export const PermissionsProvider: React.FC<{ children: ReactNode }> = ({ childre
     setCurrentUserId(userId);
   };
 
-  // 11. Purge Synced Data Utility
+  // 11. Purge Synced Data Utility (Super Administrator only)
   const purgeSyncedData = (): { count: number; archivedData: string } => {
+    if (!isSuperAdmin) {
+      return { count: 0, archivedData: '{}' };
+    }
     const purgedCount = 42;
     const timestamp = new Date().toISOString();
     const archiveSnapshot = JSON.stringify({
@@ -316,6 +363,7 @@ export const PermissionsProvider: React.FC<{ children: ReactNode }> = ({ childre
         adminUsers,
         currentRole: currentUser.role,
         effectiveRole,
+        isSuperAdmin,
         simulatedRole,
         setSimulatedRole,
         hasPermission,

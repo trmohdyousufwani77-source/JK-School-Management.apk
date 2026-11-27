@@ -482,38 +482,37 @@ export function generateBatchClassProgressCardsPdf(options: BatchClassProgressCa
     doc.setTextColor(51, 65, 85);
     doc.text(doc.splitTextToSize(hol.areasForImprovement, boxW - 5), margin + boxW + 6.5, obsY + 7);
 
-    // Box 3: Teacher's General Remarks (single-line auto-fit layout)
+    // Box 3: Teacher's General Remarks (strict 150-char single-line auto-fit with ellipsis fallback)
     doc.setFillColor(248, 250, 252);
     doc.rect(margin, obsY + 16, boxW, 14, 'FD');
     const teacherRemarkBody = (
       hol.teacherRemarks ||
       'Diligent learner demonstrating steady holistic growth across academic and Co-Scholastic activities.'
     )
+      .replace(/^teacher remarks:\s*/i, '')
       .replace(/\s+/g, ' ')
-      .trim();
-    const remarkPrefix = /^teacher remarks:/i.test(teacherRemarkBody) ? '' : 'Teacher Remarks: ';
-    const fullRemarkSingleLine = `${remarkPrefix}${teacherRemarkBody}`;
+      .trim()
+      .slice(0, 150);
+    const remarkPrefix = 'Teacher Remarks: ';
     const maxRemarkWidth = boxW - 5;
     let remarkFontSize = 7.2;
+    let fittedRemarkBody = teacherRemarkBody;
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(remarkFontSize);
-    while (remarkFontSize > 4.2 && doc.getTextWidth(fullRemarkSingleLine) > maxRemarkWidth) {
+    while (remarkFontSize > 4.6 && doc.getTextWidth(`${remarkPrefix}${fittedRemarkBody}`) > maxRemarkWidth) {
       remarkFontSize = Number((remarkFontSize - 0.15).toFixed(2));
       doc.setFontSize(remarkFontSize);
     }
-    if (remarkPrefix) {
-      doc.setFont('helvetica', 'bold');
-      doc.setTextColor(30, 41, 59);
-      doc.text(remarkPrefix, margin + 2.5, obsY + 23.8);
-      const prefixWidth = doc.getTextWidth(remarkPrefix);
-      doc.setFont('helvetica', 'normal');
-      doc.setTextColor(51, 65, 85);
-      doc.text(teacherRemarkBody, margin + 2.5 + prefixWidth, obsY + 23.8);
-    } else {
-      doc.setFont('helvetica', 'normal');
-      doc.setTextColor(51, 65, 85);
-      doc.text(fullRemarkSingleLine, margin + 2.5, obsY + 23.8);
+    while (fittedRemarkBody.length > 6 && doc.getTextWidth(`${remarkPrefix}${fittedRemarkBody}`) > maxRemarkWidth) {
+      fittedRemarkBody = `${fittedRemarkBody.slice(0, -4).trimEnd()}...`;
     }
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(30, 41, 59);
+    doc.text(remarkPrefix, margin + 2.5, obsY + 23.8);
+    const prefixWidth = doc.getTextWidth(remarkPrefix);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(51, 65, 85);
+    doc.text(fittedRemarkBody, margin + 2.5 + prefixWidth, obsY + 23.8);
     doc.setFontSize(6.5);
 
     // Box 4: Suggestions for Parents & Next Term Goals
@@ -901,30 +900,29 @@ export async function generateHpcCardsJpegBatch(
       hol?.teacherRemarks ||
       'Diligent learner demonstrating steady holistic growth across academic and Co-Scholastic activities.'
     )
+      .replace(/^teacher remarks:\s*/i, '')
       .replace(/\s+/g, ' ')
-      .trim();
-    const remarkPrefixCanvas = /^teacher remarks:/i.test(remarkBodyCanvas) ? '' : 'Teacher Remarks: ';
-    const remarksText = `${remarkPrefixCanvas}${remarkBodyCanvas}`;
+      .trim()
+      .slice(0, 150);
+    const remarkPrefixCanvas = 'Teacher Remarks: ';
     const maxCanvasRemarksWidth = canvas.width - 184;
     let canvasRemarkSize = 18;
+    let fittedCanvasBody = remarkBodyCanvas;
     ctx.font = `${canvasRemarkSize}px sans-serif`;
-    while (canvasRemarkSize > 10 && ctx.measureText(remarksText).width > maxCanvasRemarksWidth) {
+    while (canvasRemarkSize > 10.5 && ctx.measureText(`${remarkPrefixCanvas}${fittedCanvasBody}`).width > maxCanvasRemarksWidth) {
       canvasRemarkSize -= 0.5;
       ctx.font = `${canvasRemarkSize}px sans-serif`;
     }
-    if (remarkPrefixCanvas) {
-      ctx.fillStyle = '#1e293b';
-      ctx.font = `bold ${canvasRemarkSize}px sans-serif`;
-      ctx.fillText(remarkPrefixCanvas, 92, cursorY + 196);
-      const prefixW = ctx.measureText(remarkPrefixCanvas).width;
-      ctx.fillStyle = '#334155';
-      ctx.font = `${canvasRemarkSize}px sans-serif`;
-      ctx.fillText(remarkBodyCanvas, 92 + prefixW, cursorY + 196);
-    } else {
-      ctx.fillStyle = '#334155';
-      ctx.font = `${canvasRemarkSize}px sans-serif`;
-      ctx.fillText(remarksText, 92, cursorY + 196);
+    while (fittedCanvasBody.length > 6 && ctx.measureText(`${remarkPrefixCanvas}${fittedCanvasBody}`).width > maxCanvasRemarksWidth) {
+      fittedCanvasBody = `${fittedCanvasBody.slice(0, -4).trimEnd()}...`;
     }
+    ctx.fillStyle = '#1e293b';
+    ctx.font = `bold ${canvasRemarkSize}px sans-serif`;
+    ctx.fillText(remarkPrefixCanvas, 92, cursorY + 196);
+    const prefixW = ctx.measureText(remarkPrefixCanvas).width;
+    ctx.fillStyle = '#334155';
+    ctx.font = `${canvasRemarkSize}px sans-serif`;
+    ctx.fillText(fittedCanvasBody, 92 + prefixW, cursorY + 196);
 
     // Signatures Footer (ONLY Headmaster's Name — NO developer name)
     const sigBaseY = canvas.height - 170;

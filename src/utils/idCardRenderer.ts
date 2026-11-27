@@ -282,6 +282,18 @@ export function buildIdCardQrPayload(
   return JSON.stringify(payload);
 }
 
+/**
+ * Encodes a student's unique Admission Number into a clean, ZXing-compatible QR payload
+ * used by the Smart ID Card Maker's dedicated Student QR generator and Attendance Scanner.
+ */
+export function buildStudentAdmissionQrPayload(
+  card: Pick<SchoolIdCardRecord, 'admissionNumber' | 'uniqueIdNumber' | 'linkedStudentId'>
+): string {
+  const adm = (card.admissionNumber || '').trim();
+  if (adm) return adm;
+  return (card.uniqueIdNumber || card.linkedStudentId || '').trim();
+}
+
 export interface QrVerificationResult {
   matchedRecord: SchoolIdCardRecord | null;
   parsedPayload: Partial<IdCardQrPayload> | null;
@@ -491,7 +503,8 @@ function drawWrappedText(
 export async function renderIdCardToCanvas(
   card: SchoolIdCardRecord,
   design: IdCardDesignConfig,
-  privacy: IdCardQrPrivacySettings
+  privacy: IdCardQrPrivacySettings,
+  qrPayloadOverride?: string
 ): Promise<HTMLCanvasElement> {
   const templateMeta = ID_CARD_TEMPLATES.find((t) => t.id === (card.templateId || design.templateId)) || ID_CARD_TEMPLATES[0];
   const isVertical = templateMeta.orientation === 'vertical';
@@ -512,7 +525,10 @@ export async function renderIdCardToCanvas(
   const fontFamily = getCanvasFontFamily(design.fontStyle);
   const sizeBump = design.fontSize === 'large' ? 2 : design.fontSize === 'compact' ? -2 : 0;
 
-  const qrPayload = buildIdCardQrPayload(card, privacy);
+  const qrPayload =
+    qrPayloadOverride && qrPayloadOverride.trim().length > 0
+      ? qrPayloadOverride.trim()
+      : buildIdCardQrPayload(card, privacy);
   const qrDataUrl = await QRCode.toDataURL(qrPayload, {
     width: 240,
     margin: 1,
@@ -906,9 +922,10 @@ export async function downloadIdCardAsImage(
   card: SchoolIdCardRecord,
   design: IdCardDesignConfig,
   privacy: IdCardQrPrivacySettings,
-  format: 'png' | 'jpeg'
+  format: 'png' | 'jpeg',
+  qrPayloadOverride?: string
 ) {
-  const canvas = await renderIdCardToCanvas(card, design, privacy);
+  const canvas = await renderIdCardToCanvas(card, design, privacy, qrPayloadOverride);
   const mime = format === 'png' ? 'image/png' : 'image/jpeg';
   const ext = format === 'png' ? 'png' : 'jpg';
   const dataUrl = canvas.toDataURL(mime, 0.96);
@@ -922,7 +939,8 @@ export async function exportIdCardsToPdf(
   cards: SchoolIdCardRecord[],
   design: IdCardDesignConfig,
   privacy: IdCardQrPrivacySettings,
-  filename = 'School_Identity_Cards.pdf'
+  filename = 'School_Identity_Cards.pdf',
+  qrPayloadOverride?: string
 ) {
   if (cards.length === 0) return;
 
@@ -964,7 +982,7 @@ export async function exportIdCardsToPdf(
       rowMaxH = 0;
     }
 
-    const canvas = await renderIdCardToCanvas(card, design, privacy);
+    const canvas = await renderIdCardToCanvas(card, design, privacy, qrPayloadOverride);
     const imgData = canvas.toDataURL('image/png', 1.0);
     pdf.addImage(imgData, 'PNG', curX, curY, cardW, cardH);
 

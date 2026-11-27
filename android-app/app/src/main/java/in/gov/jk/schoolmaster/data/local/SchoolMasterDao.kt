@@ -273,3 +273,37 @@ interface HpcCardDao {
     @Query("SELECT COUNT(*) FROM hpc_cards")
     suspend fun count(): Int
 }
+
+@Dao
+interface LessonPlanDao {
+    @Query("SELECT * FROM lesson_plans ORDER BY updatedAtMillis DESC")
+    fun observeAllLessonPlans(): Flow<List<LessonPlanEntity>>
+
+    @Query("SELECT * FROM lesson_plans ORDER BY updatedAtMillis DESC")
+    suspend fun getAllLessonPlansOnce(): List<LessonPlanEntity>
+
+    @Query(
+        """
+        SELECT * FROM lesson_plans
+        WHERE title LIKE '%' || :query || '%'
+           OR subject LIKE '%' || :query || '%'
+           OR classLevel LIKE '%' || :query || '%'
+           OR topic LIKE '%' || :query || '%'
+        ORDER BY updatedAtMillis DESC
+        """
+    )
+    fun searchLessonPlans(query: String): Flow<List<LessonPlanEntity>>
+
+    @Query("SELECT * FROM lesson_plans WHERE id = :id LIMIT 1")
+    suspend fun getById(id: String): LessonPlanEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(plan: LessonPlanEntity)
+
+    @Query("DELETE FROM lesson_plans WHERE id = :id")
+    suspend fun deleteById(id: String)
+
+    @Query("SELECT COUNT(*) FROM lesson_plans")
+    suspend fun count(): Int
+}
+

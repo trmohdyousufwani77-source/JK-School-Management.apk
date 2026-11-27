@@ -212,4 +212,29 @@ class QrAndEntityUnitTest {
         )
         assertEquals("6.00 MB", GitHubBuildReleaseClient.formatFileSize(artifact.sizeBytes))
     }
+
+    @Test
+    fun lessonPlanEntityPreservesAllStructuredFieldsForOfflineRoomStorage() {
+        val plan = `in`.gov.jk.schoolmaster.data.local.LessonPlanEntity(
+            id = "lp-2026-001",
+            title = "Photosynthesis in Green Plants",
+            subject = "Science",
+            classLevel = "Class 8",
+            chapter = "Nutrition in Plants",
+            topic = "Photosynthesis",
+            duration = "40 minutes",
+            language = "English",
+            generalObjectives = "Understand autotrophic nutrition in green plants.",
+            specificLearningOutcomes = "Students explain role of chlorophyll, sunlight, CO2, and water.",
+            homework = "Draw and label a leaf cross-section diagram."
+        )
+
+        assertEquals("lp-2026-001", plan.id)
+        assertEquals("Science", plan.subject)
+        assertEquals("Class 8", plan.classLevel)
+        assertTrue(plan.generalObjectives.contains("autotrophic"))
+        assertTrue(plan.specificLearningOutcomes.contains("chlorophyll"))
+        assertTrue(plan.homework.contains("leaf"))
+    }
 }
+

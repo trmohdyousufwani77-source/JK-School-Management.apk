@@ -16,6 +16,7 @@ import {
   X,
   Sparkles,
 } from 'lucide-react';
+import { guardSensitiveExport } from '../utils/biometricProtection';
 import {
   SchoolProfile,
   Student,
@@ -82,7 +83,9 @@ export const TextbookDistribution: React.FC<TextbookDistributionProps> = ({
   const pendingCount = classRecords.filter((r) => r.status === 'Pending_Distribution').length;
 
   // Export to Excel
-  const handleExportExcel = () => {
+  const handleExportExcel = async () => {
+    const allowed = await guardSensitiveExport(`Textbook Distribution Register (Class ${selectedClass})`);
+    if (!allowed) return;
     const headers = [
       'Record ID',
       'Student ID',

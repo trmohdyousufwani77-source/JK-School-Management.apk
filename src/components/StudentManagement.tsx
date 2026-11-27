@@ -37,6 +37,8 @@ import {
   Smartphone,
   CheckCircle2,
   Zap,
+  Copy,
+  StickyNote,
 } from 'lucide-react';
 import {
   AadhaarStatus,
@@ -44,6 +46,8 @@ import {
   SchoolProfile,
   Student,
   StudentHistoryEvent,
+  StudentQuickNote,
+  StudentQuickNoteUrgency,
   StudentStatus,
   User,
 } from '../types';
@@ -53,6 +57,9 @@ import { AadhaarVerificationModal } from './AadhaarVerificationModal';
 import { UpcomingBirthdaysCard } from './UpcomingBirthdaysCard';
 import { StudentQrPassModal } from './StudentQrPassModal';
 import { BulkPhotoImportModal } from './BulkPhotoImportModal';
+import { StudentAdmissionImportModal } from './StudentAdmissionImportModal';
+import { DirectCallModal, DirectCallTarget, validateAndFormatPhoneNumber } from './DirectCallModal';
+import { guardSensitiveExport } from '../utils/biometricProtection';
 import { STANDARDIZED_ADDRESS } from '../utils/sampleData';
 import {
   buildStudentQrPayload,
@@ -153,6 +160,7 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({
   const [verifyingStudent, setVerifyingStudent] = useState<Student | null>(null);
   const [selectedStudentForQr, setSelectedStudentForQr] = useState<Student | null>(null);
   const [isBulkPhotoModalOpen, setIsBulkPhotoModalOpen] = useState<boolean>(false);
+  const [isAdmissionImportOpen, setIsAdmissionImportOpen] = useState<boolean>(false);
 
   // Delete Confirmation Modal State
   const [studentToDelete, setStudentToDelete] = useState<Student | null>(null);
@@ -176,6 +184,13 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({
   // Toast notifications
   const [toastNotice, setToastNotice] = useState<string | null>(null);
 
+  // Direct Mobile Calling & Student Quick Notes state
+  const [callTarget, setCallTarget] = useState<DirectCallTarget | null>(null);
+  const [copiedPhoneId, setCopiedPhoneId] = useState<string | null>(null);
+  const [quickNoteText, setQuickNoteText] = useState<string>('');
+  const [quickNoteUrgency, setQuickNoteUrgency] = useState<StudentQuickNoteUrgency>('Urgent');
+  const [quickNoteExpiryDays, setQuickNoteExpiryDays] = useState<number>(3);
+
   // Automated 3+ Consecutive Absent Days Bulk SMS/Push Notification Trigger State
   const [autoAbsenceTriggerEnabled, setAutoAbsenceTriggerEnabled] = useState<boolean>(
     () => loadPushPreferences().consecutiveAbsenceAutoAlert !== false
@@ -197,6 +212,62 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({
   const showNotification = (msg: string) => {
     setToastNotice(msg);
     setTimeout(() => setToastNotice(null), 4000);
+  };
+
+  const handleCopyParentPhone = async (studentId: string, rawPhone: string) => {
+    const info = validateAndFormatPhoneNumber(rawPhone);
+    const valueToCopy = info.valid ? info.display : rawPhone;
+    if (!valueToCopy) return;
+    try {
+      await navigator.clipboard.writeText(valueToCopy);
+      setCopiedPhoneId(studentId);
+      showNotification(`Copied parent mobile number: ${valueToCopy}`);
+      setTimeout(() => setCopiedPhoneId(null), 1800);
+    } catch {
+      showNotification('Unable to access clipboard on this browser.');
+    }
+  };
+
+  const handleAddStudentQuickNote = (student: Student) => {
+    const trimmed = quickNoteText.trim();
+    if (!trimmed) {
+      showNotification('Please write an observation or remark before saving the Quick Note.');
+      return;
+    }
+    const now = new Date();
+    const expires = new Date(now.getTime() + quickNoteExpiryDays * 24 * 60 * 60 * 1000);
+    const newNote: StudentQuickNote = {
+      id: `qnote-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      studentId: student.id,
+      studentName: student.fullName,
+      classSection: `Class ${student.classNumber}-${student.section}`,
+      text: trimmed,
+      urgency: quickNoteUrgency,
+      authorName: currentUser.name,
+      createdAt: now.toISOString(),
+      expiresAt: expires.toISOString(),
+      dismissed: false,
+    };
+    const updatedStudent: Student = {
+      ...student,
+      quickNotes: [newNote, ...(student.quickNotes || [])],
+    };
+    onUpdateStudent(updatedStudent);
+    setViewingProfile(updatedStudent);
+    setQuickNoteText('');
+    showNotification(
+      `Saved ${quickNoteUrgency} Quick Note for ${student.fullName}. It will appear as a temporary notification on the Teacher Dashboard.`
+    );
+  };
+
+  const handleDeleteStudentQuickNote = (student: Student, noteId: string) => {
+    const updatedStudent: Student = {
+      ...student,
+      quickNotes: (student.quickNotes || []).filter((n) => n.id !== noteId),
+    };
+    onUpdateStudent(updatedStudent);
+    setViewingProfile(updatedStudent);
+    showNotification('Removed Quick Note from student profile.');
   };
 
   // Promote Students derived list & handlers
@@ -589,8 +660,10 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({
     );
   };
 
-  const handleExportProfileQrAsImage = (studentToExport: Student) => {
+  const handleExportProfileQrAsImage = async (studentToExport: Student) => {
     if (!profileQrDataUrl) return;
+    const allowed = await guardSensitiveExport(`Student Profile QR Export (${studentToExport.fullName})`);
+    if (!allowed) return;
     const canvas = document.createElement('canvas');
     canvas.width = 760;
     canvas.height = 960;
@@ -834,11 +907,26 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({
         <div className="flex flex-wrap items-center gap-2">
           {/* Export to Excel */}
           <button
-            onClick={() => exportStudentRegisterToExcel(students, school, selectedClass)}
+            onClick={async () => {
+              const allowed = await guardSensitiveExport('Student Register Excel Export');
+              if (!allowed) return;
+              exportStudentRegisterToExcel(students, school, selectedClass);
+            }}
             className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-300 hover:bg-emerald-100 transition-colors shadow-sm"
           >
             <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
             <span>{t.exportExcel}</span>
+          </button>
+
+          {/* Multi-Format Student Admission Register Import (Excel, CSV, PDF, Word, Image OCR) */}
+          <button
+            type="button"
+            data-testid="import-student-data-btn"
+            onClick={() => setIsAdmissionImportOpen(true)}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-extrabold bg-indigo-600 text-white hover:bg-indigo-700 transition-colors shadow-sm whitespace-nowrap"
+          >
+            <Upload className="w-4 h-4" />
+            <span>Import Student Data</span>
           </button>
 
           {/* Import from Excel */}
@@ -1707,13 +1795,57 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({
                       <div className="text-[10px] text-slate-400">{s.motherName}</div>
                     </td>
                     <td className="py-3 px-3 text-slate-600 font-mono">
-                      <div>{s.mobileNumber}</div>
-                      {s.parentWhatsAppNumber && (
-                        <div className="text-[10px] text-emerald-600 font-sans flex items-center gap-1 mt-0.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block"></span>
-                          <span>WA: {s.parentWhatsAppNumber}</span>
-                        </div>
-                      )}
+                      {(() => {
+                        const phoneInfo = validateAndFormatPhoneNumber(s.mobileNumber);
+                        return (
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-[11px] font-mono text-slate-700">
+                                {phoneInfo.valid ? phoneInfo.display : s.mobileNumber || 'Not registered'}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1 font-sans">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setCallTarget({
+                                    studentName: s.fullName,
+                                    admissionNumber: s.admissionNumber,
+                                    classSection: `Class ${s.classNumber}-${s.section}`,
+                                    parentName: s.fatherName || s.motherName || 'Parent / Guardian',
+                                    phoneNumber: s.mobileNumber,
+                                  })
+                                }
+                                data-testid={`student-table-call-btn-${s.id}`}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold transition-colors shadow-2xs"
+                                title={`Call parent of ${s.fullName}`}
+                              >
+                                <Phone className="w-3 h-3" />
+                                <span>Call</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleCopyParentPhone(s.id, s.mobileNumber)}
+                                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 text-[10px] font-semibold transition-colors"
+                                title="Copy parent mobile number"
+                              >
+                                {copiedPhoneId === s.id ? (
+                                  <Check className="w-3 h-3 text-emerald-600" />
+                                ) : (
+                                  <Copy className="w-3 h-3" />
+                                )}
+                                <span>{copiedPhoneId === s.id ? 'Copied' : 'Copy'}</span>
+                              </button>
+                            </div>
+                            {s.parentWhatsAppNumber && (
+                              <div className="text-[10px] text-emerald-600 font-sans flex items-center gap-1">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block"></span>
+                                <span>WA: {s.parentWhatsAppNumber}</span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </td>
                     <td className="py-3 px-3">
                       <button
@@ -1872,7 +2004,43 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({
                 <div className="space-y-2">
                   <p><span className="text-slate-500">Class & Section:</span> <strong>Class {viewingProfile.classNumber} - {viewingProfile.section} (Roll #{viewingProfile.rollNumber})</strong></p>
                   <p><span className="text-slate-500">Date of Birth:</span> <strong>{viewingProfile.dob}</strong></p>
-                  <p><span className="text-slate-500">Parent Mobile:</span> <strong className="font-mono">{viewingProfile.mobileNumber}</strong></p>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span>
+                      <span className="text-slate-500">Parent Mobile:</span>{' '}
+                      <strong className="font-mono">
+                        {validateAndFormatPhoneNumber(viewingProfile.mobileNumber).display}
+                      </strong>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setCallTarget({
+                          studentName: viewingProfile.fullName,
+                          admissionNumber: viewingProfile.admissionNumber,
+                          classSection: `Class ${viewingProfile.classNumber}-${viewingProfile.section}`,
+                          parentName: viewingProfile.fatherName || viewingProfile.motherName || 'Parent / Guardian',
+                          phoneNumber: viewingProfile.mobileNumber,
+                        })
+                      }
+                      data-testid="student-profile-call-btn"
+                      className="no-print inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold transition-colors"
+                    >
+                      <Phone className="w-3 h-3" />
+                      <span>Call</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleCopyParentPhone(viewingProfile.id, viewingProfile.mobileNumber)}
+                      className="no-print inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 text-[10px] font-semibold transition-colors"
+                    >
+                      {copiedPhoneId === viewingProfile.id ? (
+                        <Check className="w-3 h-3 text-emerald-600" />
+                      ) : (
+                        <Copy className="w-3 h-3" />
+                      )}
+                      <span>{copiedPhoneId === viewingProfile.id ? 'Copied' : 'Copy'}</span>
+                    </button>
+                  </div>
                   <p><span className="text-slate-500">WhatsApp No:</span> <strong className="font-mono text-emerald-700">{viewingProfile.parentWhatsAppNumber || viewingProfile.mobileNumber}</strong></p>
                   <p><span className="text-slate-500">Admission Date:</span> <strong>{viewingProfile.admissionDate}</strong></p>
                   <p><span className="text-slate-500">Status:</span> <span className="font-bold text-emerald-600">{viewingProfile.status}</span></p>
@@ -1940,6 +2108,134 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({
                   <span>•</span>
                   <span>PIN: <strong className="text-slate-700">{viewingProfile.pinCode}</strong></span>
                 </div>
+              </div>
+
+              {/* Teacher Quick Notes Section (Temporary Dashboard Notifications) */}
+              <div
+                className="p-4 bg-amber-50/70 rounded-2xl text-xs space-y-3 border border-amber-200 no-print"
+                data-testid="student-quick-notes-section"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 font-extrabold text-amber-950">
+                    <StickyNote className="w-4 h-4 text-amber-600" />
+                    <span>Quick Notes &amp; Teacher Observations</span>
+                  </div>
+                  <span className="text-[10px] font-semibold text-amber-800 bg-amber-100 px-2 py-0.5 rounded-md border border-amber-200">
+                    Synced to Teacher Dashboard Notifications
+                  </span>
+                </div>
+
+                <div className="space-y-2 bg-white p-3 rounded-xl border border-amber-200/80">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-600 uppercase mb-1">
+                        Urgency Level
+                      </label>
+                      <select
+                        value={quickNoteUrgency}
+                        onChange={(e) => setQuickNoteUrgency(e.target.value as StudentQuickNoteUrgency)}
+                        className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs font-semibold text-slate-800 bg-white focus:ring-2 focus:ring-amber-500"
+                      >
+                        <option value="Urgent">Urgent (High Priority Alert)</option>
+                        <option value="Follow-up">Follow-up Required</option>
+                        <option value="Observation">Classroom Observation</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-600 uppercase mb-1">
+                        Show on Dashboard For
+                      </label>
+                      <select
+                        value={quickNoteExpiryDays}
+                        onChange={(e) => setQuickNoteExpiryDays(Number(e.target.value))}
+                        className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs font-semibold text-slate-800 bg-white focus:ring-2 focus:ring-amber-500"
+                      >
+                        <option value={1}>24 Hours</option>
+                        <option value={3}>3 Days</option>
+                        <option value={7}>7 Days</option>
+                      </select>
+                    </div>
+                  </div>
+                  <textarea
+                    rows={2}
+                    value={quickNoteText}
+                    onChange={(e) => setQuickNoteText(e.target.value)}
+                    placeholder="Log an urgent observation, parent callback remark, health note, or homework follow-up..."
+                    data-testid="student-quick-note-input"
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 text-xs text-slate-800 focus:ring-2 focus:ring-amber-500 outline-none resize-none"
+                  />
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => handleAddStudentQuickNote(viewingProfile)}
+                      data-testid="student-quick-note-save-btn"
+                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-xs transition-colors"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Save Quick Note</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Saved Quick Notes List */}
+                {(viewingProfile.quickNotes || []).length === 0 ? (
+                  <p className="text-[11px] text-amber-900/70 italic">
+                    No quick notes logged for {viewingProfile.fullName} yet. Notes added here appear as temporary dismissible notifications on the Teacher Dashboard.
+                  </p>
+                ) : (
+                  <div className="space-y-2 max-h-44 overflow-y-auto pr-1">
+                    {(viewingProfile.quickNotes || []).map((note) => {
+                      const isExpired = new Date(note.expiresAt).getTime() <= Date.now();
+                      return (
+                        <div
+                          key={note.id}
+                          className={`p-2.5 rounded-xl border flex items-start justify-between gap-2 ${
+                            note.urgency === 'Urgent'
+                              ? 'bg-rose-50 border-rose-200'
+                              : note.urgency === 'Follow-up'
+                              ? 'bg-amber-50 border-amber-200'
+                              : 'bg-white border-slate-200'
+                          }`}
+                        >
+                          <div className="space-y-1 min-w-0">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span
+                                className={`text-[10px] font-extrabold uppercase px-1.5 py-0.5 rounded ${
+                                  note.urgency === 'Urgent'
+                                    ? 'bg-rose-600 text-white'
+                                    : note.urgency === 'Follow-up'
+                                    ? 'bg-amber-600 text-white'
+                                    : 'bg-indigo-100 text-indigo-800'
+                                }`}
+                              >
+                                {note.urgency}
+                              </span>
+                              <span className="text-[10px] font-semibold text-slate-500">
+                                {note.authorName} · {new Date(note.createdAt).toLocaleDateString('en-IN')}
+                              </span>
+                              {note.dismissed ? (
+                                <span className="text-[10px] font-semibold text-slate-400">Dismissed</span>
+                              ) : isExpired ? (
+                                <span className="text-[10px] font-semibold text-slate-400">Expired</span>
+                              ) : (
+                                <span className="text-[10px] font-bold text-emerald-700">Active on Dashboard</span>
+                              )}
+                            </div>
+                            <p className="text-xs text-slate-800 leading-relaxed">{note.text}</p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteStudentQuickNote(viewingProfile, note.id)}
+                            title="Delete Quick Note"
+                            className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 shrink-0 transition-colors"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
               {/* Signatures */}
@@ -2046,6 +2342,26 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({
             `Updated photographs for ${updates.length} student${updates.length === 1 ? '' : 's'} matched by Admission Number / ID.`
           );
         }}
+      />
+
+      {/* Multi-Format Student Admission Register Import Modal */}
+      <StudentAdmissionImportModal
+        isOpen={isAdmissionImportOpen}
+        onClose={() => setIsAdmissionImportOpen(false)}
+        existingStudents={uniqueStudents}
+        school={school}
+        actorName={currentUser.name}
+        onCommitImportedStudents={(newStudents) => {
+          newStudents.forEach((st) => onAddStudent(st));
+        }}
+        onRollbackImportedStudentIds={(ids) => {
+          if (onBulkDeleteStudents) {
+            onBulkDeleteStudents(ids);
+          } else if (onDeleteStudent) {
+            ids.forEach((id) => onDeleteStudent(id));
+          }
+        }}
+        onNotify={showNotification}
       />
 
       {/* Bulk SMS / Push Notification Modal for 3+ Consecutive Absent Students */}
@@ -2837,6 +3153,8 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({
         </div>
       )}
 
+      {/* Direct Mobile Calling Confirmation Modal */}
+      <DirectCallModal target={callTarget} onClose={() => setCallTarget(null)} />
     </div>
   );
 };

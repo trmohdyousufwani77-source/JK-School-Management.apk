@@ -35,6 +35,7 @@ import { DeveloperAdminProfile, SchoolProfile, Student, User } from '../types';
 import { deduplicateStudentsByAdmissionNumber, formatSchoolAddressOnce } from '../utils/calculations';
 import { SchoolEmblem } from './SchoolEmblem';
 import {
+  isNotificationVisibleForUser,
   loadPushPreferences,
   PUSH_NOTIFICATION_EVENT,
   PushNotificationPreferences,
@@ -65,6 +66,7 @@ interface HeaderProps {
   onRunNotificationChecks?: () => void;
   students?: Student[];
   onNavigateToStudent?: (student: Student) => void;
+  onNavigateTab?: (tab: string) => void;
 }
 
 export interface NotificationItem {
@@ -74,7 +76,11 @@ export interface NotificationItem {
   message: string;
   messageUrdu?: string;
   category: 'System' | 'Academic' | 'Attendance' | 'Inspection' | 'Leave' | 'Exam';
-  targetRole?: 'teacher' | 'admin' | 'all';
+  targetRole?: 'teacher' | 'admin' | 'principal' | 'student' | 'all';
+  targetUserId?: string;
+  actionTab?: string;
+  entityId?: string;
+  schoolCode?: string;
   time: string;
   createdAt?: string;
   read: boolean;
@@ -150,8 +156,28 @@ export const Header: React.FC<HeaderProps> = ({
   onRunNotificationChecks,
   students = [],
   onNavigateToStudent,
+  onNavigateTab,
 }) => {
   const t = translations[language];
+
+  // Real-time Browser Network Connectivity Indicator (navigator.onLine + online/offline events)
+  const [isBrowserOnline, setIsBrowserOnline] = useState<boolean>(() =>
+    typeof navigator === 'undefined' ? true : navigator.onLine !== false
+  );
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleOnline = () => setIsBrowserOnline(true);
+    const handleOffline = () => setIsBrowserOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  const effectiveConnected = isBrowserOnline && !isOffline;
 
   // Global Persistent Student Search Bar State
   const [globalSearchQuery, setGlobalSearchQuery] = useState<string>('');
@@ -290,6 +316,7 @@ export const Header: React.FC<HeaderProps> = ({
     return INITIAL_NOTIFICATIONS;
   });
   const [isNotifOpen, setIsNotifOpen] = useState<boolean>(false);
+  const [notifCategoryFilter, setNotifCategoryFilter] = useState<string>('All');
   const [showNotifPrefs, setShowNotifPrefs] = useState<boolean>(false);
   const [pushPrefs, setPushPrefs] = useState<PushNotificationPreferences>(() => loadPushPreferences());
   const [activePushToast, setActivePushToast] = useState<NotificationItem | null>(null);
@@ -302,19 +329,68 @@ export const Header: React.FC<HeaderProps> = ({
     localStorage.setItem('school_master_notifications', JSON.stringify(notifications));
   }, [notifications]);
 
+  // Sync role-isolated notifications from backend /api/notifications
+  useEffect(() => {
+    let active = true;
+    const roleParam = currentUser.role === 'teacher' ? 'teacher' : currentUser.role === 'head_teacher' ? 'principal' : 'admin';
+    const params = new URLSearchParams({
+      schoolCode: school.code || 'DEFAULT',
+      role: roleParam,
+      userId: currentUser.id || '',
+    });
+    fetch(`/api/notifications?${params.toString()}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!active || !data?.ok || !Array.isArray(data.notifications) || data.notifications.length === 0) return;
+        setNotifications((prev) => {
+          const map = new Map<string, NotificationItem>();
+          prev.forEach((n) => map.set(n.id, n));
+          data.notifications.forEach((srv: any) => {
+            if (srv?.id && !map.has(srv.id)) {
+              map.set(srv.id, {
+                id: srv.id,
+                title: srv.title,
+                titleUrdu: srv.titleUrdu,
+                message: srv.message,
+                messageUrdu: srv.messageUrdu,
+                category: srv.category || 'System',
+                targetRole: srv.targetRole || 'all',
+                targetUserId: srv.targetUserId,
+                actionTab: srv.actionTab,
+                entityId: srv.entityId,
+                schoolCode: srv.schoolCode,
+                time: srv.createdAt ? new Date(srv.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Recent',
+                createdAt: srv.createdAt,
+                read: Boolean(srv.read),
+                priority: srv.priority || 'normal',
+              });
+            }
+          });
+          return Array.from(map.values()).slice(0, 50);
+        });
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [school.code, currentUser.id, currentUser.role]);
+
   useEffect(() => {
     const handlePushEvent = (evt: Event) => {
       const custom = evt as CustomEvent<NotificationItem>;
       if (custom.detail) {
-        setNotifications((prev) => [custom.detail, ...prev.filter((n) => n.id !== custom.detail.id)].slice(0, 40));
-        if (custom.detail.priority === 'high' || custom.detail.category === 'Attendance') {
+        setNotifications((prev) => [custom.detail, ...prev.filter((n) => n.id !== custom.detail.id)].slice(0, 50));
+        if (
+          isNotificationVisibleForUser(custom.detail, currentUser.role, currentUser.id) &&
+          (custom.detail.priority === 'high' || custom.detail.category === 'Attendance' || custom.detail.category === 'Leave')
+        ) {
           setActivePushToast(custom.detail);
         }
       }
     };
     window.addEventListener(PUSH_NOTIFICATION_EVENT, handlePushEvent);
     return () => window.removeEventListener(PUSH_NOTIFICATION_EVENT, handlePushEvent);
-  }, []);
+  }, [currentUser.role, currentUser.id]);
 
   useEffect(() => {
     if (!activePushToast) return;
@@ -369,19 +445,80 @@ export const Header: React.FC<HeaderProps> = ({
     };
   }, [isNotifOpen]);
 
-  const unreadCount = notifications.filter((n) => !n.read).length;
+  const roleFilteredNotifications = useMemo(
+    () =>
+      notifications.filter((n) =>
+        isNotificationVisibleForUser(n, currentUser.role, currentUser.id)
+      ),
+    [notifications, currentUser.role, currentUser.id]
+  );
+
+  const visibleNotifications = useMemo(() => {
+    if (notifCategoryFilter === 'All') return roleFilteredNotifications;
+    return roleFilteredNotifications.filter((n) => n.category === notifCategoryFilter);
+  }, [roleFilteredNotifications, notifCategoryFilter]);
+
+  const unreadCount = roleFilteredNotifications.filter((n) => !n.read).length;
+
+  const resolveActionTabForNotif = (item: NotificationItem): string | null => {
+    if (item.actionTab) return item.actionTab;
+    if (item.category === 'Leave') return 'teacher-leave';
+    if (item.category === 'Attendance') return 'attendance';
+    if (item.category === 'Exam') return 'examination';
+    if (item.category === 'Academic') return 'ai-education';
+    if (item.category === 'Inspection') return 'reports';
+    return null;
+  };
+
+  const handleOpenNotificationTarget = (item: NotificationItem) => {
+    setNotifications((prev) =>
+      prev.map((n) => (n.id === item.id ? { ...n, read: true } : n))
+    );
+    fetch(`/api/notifications/${encodeURIComponent(item.id)}/read`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ read: true }),
+    }).catch(() => {});
+
+    const targetTab = resolveActionTabForNotif(item);
+    if (targetTab && onNavigateTab) {
+      onNavigateTab(targetTab);
+      setIsNotifOpen(false);
+    }
+  };
 
   const handleMarkAllRead = () => {
-    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+    const visibleIds = new Set(roleFilteredNotifications.map((n) => n.id));
+    setNotifications((prev) =>
+      prev.map((n) => (visibleIds.has(n.id) ? { ...n, read: true } : n))
+    );
+    fetch('/api/notifications/mark-all-read', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        schoolCode: school.code || 'DEFAULT',
+        role: currentUser.role === 'teacher' ? 'teacher' : 'admin',
+      }),
+    }).catch(() => {});
   };
 
   const handleClearAllNotifs = () => {
-    setNotifications([]);
+    const visibleIds = new Set(roleFilteredNotifications.map((n) => n.id));
+    setNotifications((prev) => prev.filter((n) => !visibleIds.has(n.id)));
   };
 
   const handleToggleRead = (id: string) => {
     setNotifications((prev) =>
-      prev.map((n) => (n.id === id ? { ...n, read: !n.read } : n))
+      prev.map((n) => {
+        if (n.id !== id) return n;
+        const nextRead = !n.read;
+        fetch(`/api/notifications/${encodeURIComponent(id)}/read`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ read: nextRead }),
+        }).catch(() => {});
+        return { ...n, read: nextRead };
+      })
     );
   };
 
@@ -430,8 +567,31 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Right: Controls & User Switcher */}
           <div className="flex items-center space-x-1.5 sm:space-x-2.5">
             
-            {/* Offline Simulator & Sync */}
-            <div className="flex items-center">
+            {/* Real-Time Network Connectivity Indicator & Offline Simulator */}
+            <div className="flex items-center gap-1.5">
+              <div
+                data-testid="header-network-status"
+                title={
+                  effectiveConnected
+                    ? 'Live browser network status: Connected to internet'
+                    : !isBrowserOnline
+                    ? 'Browser detected no internet connection (Offline)'
+                    : 'Offline simulation active'
+                }
+                className={`hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-bold border ${
+                  effectiveConnected
+                    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/35'
+                    : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                }`}
+              >
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    effectiveConnected ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'
+                  }`}
+                />
+                <span>{effectiveConnected ? 'Connected' : 'Offline'}</span>
+              </div>
+
               <button
                 onClick={onToggleOffline}
                 title={isOffline ? "Currently working offline. Click to go online" : "Click to simulate offline network"}
@@ -629,87 +789,124 @@ export const Header: React.FC<HeaderProps> = ({
                     </div>
                   )}
 
+                  {/* Role-Aware Category Filters */}
+                  <div className="px-3 py-2 bg-slate-950/70 border-b border-slate-800 flex items-center gap-1 overflow-x-auto">
+                    {['All', 'Leave', 'Attendance', 'Academic', 'Exam', 'System'].map((cat) => (
+                      <button
+                        key={cat}
+                        type="button"
+                        onClick={() => setNotifCategoryFilter(cat)}
+                        className={`px-2 py-1 rounded-md text-[10px] font-bold whitespace-nowrap transition-colors ${
+                          notifCategoryFilter === cat
+                            ? 'bg-indigo-600 text-white'
+                            : 'bg-slate-800/80 text-slate-300 hover:bg-slate-700'
+                        }`}
+                      >
+                        {cat}
+                      </button>
+                    ))}
+                  </div>
+
                   {/* Notification List */}
                   <div className="max-h-80 overflow-y-auto divide-y divide-slate-800/80 text-xs">
-                    {notifications.length === 0 ? (
+                    {visibleNotifications.length === 0 ? (
                       <div className="p-8 text-center text-slate-400 space-y-2">
                         <CheckCircle2 className="w-8 h-8 text-emerald-400 mx-auto opacity-70" />
                         <p className="font-semibold text-slate-300">{t.noNotifications}</p>
                       </div>
                     ) : (
-                      notifications.map((item) => (
-                        <div
-                          key={item.id}
-                          className={`p-3.5 hover:bg-slate-800/60 transition-colors flex items-start gap-3 ${
-                            !item.read ? 'bg-indigo-950/25' : ''
-                          }`}
-                        >
-                          <div className="mt-0.5 shrink-0">
-                            {item.category === 'Attendance' && (
-                              <div className="w-7 h-7 rounded-lg bg-rose-500/20 text-rose-400 flex items-center justify-center border border-rose-500/30">
-                                <AlertTriangle className="w-4 h-4" />
-                              </div>
-                            )}
-                            {item.category === 'Academic' && (
-                              <div className="w-7 h-7 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center border border-emerald-500/30">
-                                <GraduationCap className="w-4 h-4" />
-                              </div>
-                            )}
-                            {item.category === 'System' && (
-                              <div className="w-7 h-7 rounded-lg bg-indigo-500/20 text-indigo-400 flex items-center justify-center border border-indigo-500/30">
-                                <Info className="w-4 h-4" />
-                              </div>
-                            )}
-                            {item.category === 'Inspection' && (
-                              <div className="w-7 h-7 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center border border-amber-500/30">
-                                <ShieldCheck className="w-4 h-4" />
-                              </div>
-                            )}
-                            {item.category === 'Leave' && (
-                              <div className="w-7 h-7 rounded-lg bg-sky-500/20 text-sky-400 flex items-center justify-center border border-sky-500/30">
-                                <UserCheck className="w-4 h-4" />
-                              </div>
-                            )}
-                            {item.category === 'Exam' && (
-                              <div className="w-7 h-7 rounded-lg bg-purple-500/20 text-purple-400 flex items-center justify-center border border-purple-500/30">
-                                <Calendar className="w-4 h-4" />
-                              </div>
-                            )}
-                          </div>
+                      visibleNotifications.map((item) => {
+                        const actionTab = resolveActionTabForNotif(item);
+                        return (
+                          <div
+                            key={item.id}
+                            className={`p-3.5 hover:bg-slate-800/60 transition-colors flex items-start gap-3 ${
+                              !item.read ? 'bg-indigo-950/25' : ''
+                            }`}
+                          >
+                            <div className="mt-0.5 shrink-0">
+                              {item.category === 'Attendance' && (
+                                <div className="w-7 h-7 rounded-lg bg-rose-500/20 text-rose-400 flex items-center justify-center border border-rose-500/30">
+                                  <AlertTriangle className="w-4 h-4" />
+                                </div>
+                              )}
+                              {item.category === 'Academic' && (
+                                <div className="w-7 h-7 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center border border-emerald-500/30">
+                                  <GraduationCap className="w-4 h-4" />
+                                </div>
+                              )}
+                              {item.category === 'System' && (
+                                <div className="w-7 h-7 rounded-lg bg-indigo-500/20 text-indigo-400 flex items-center justify-center border border-indigo-500/30">
+                                  <Info className="w-4 h-4" />
+                                </div>
+                              )}
+                              {item.category === 'Inspection' && (
+                                <div className="w-7 h-7 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center border border-amber-500/30">
+                                  <ShieldCheck className="w-4 h-4" />
+                                </div>
+                              )}
+                              {item.category === 'Leave' && (
+                                <div className="w-7 h-7 rounded-lg bg-sky-500/20 text-sky-400 flex items-center justify-center border border-sky-500/30">
+                                  <UserCheck className="w-4 h-4" />
+                                </div>
+                              )}
+                              {item.category === 'Exam' && (
+                                <div className="w-7 h-7 rounded-lg bg-purple-500/20 text-purple-400 flex items-center justify-center border border-purple-500/30">
+                                  <Calendar className="w-4 h-4" />
+                                </div>
+                              )}
+                            </div>
 
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center justify-between gap-1">
-                              <h4 className="font-bold text-slate-200 truncate">
-                                {language === 'ur' && item.titleUrdu ? item.titleUrdu : item.title}
-                              </h4>
-                              <span className="text-[10px] text-slate-400 whitespace-nowrap">{item.time}</span>
-                            </div>
-                            <p className="mt-1 text-[11px] text-slate-300 leading-relaxed">
-                              {language === 'ur' && item.messageUrdu ? item.messageUrdu : item.message}
-                            </p>
-                            <div className="mt-2 flex items-center justify-between">
-                              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
-                                {item.category}
-                              </span>
-                              <div className="flex items-center gap-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center justify-between gap-1">
                                 <button
-                                  onClick={() => handleToggleRead(item.id)}
-                                  className="text-[10px] font-medium text-slate-400 hover:text-indigo-300 transition-colors"
+                                  type="button"
+                                  onClick={() => handleOpenNotificationTarget(item)}
+                                  className="font-bold text-slate-200 hover:text-amber-300 truncate text-left"
                                 >
-                                  {item.read ? 'Mark unread' : 'Mark read'}
+                                  {language === 'ur' && item.titleUrdu ? item.titleUrdu : item.title}
                                 </button>
-                                <button
-                                  onClick={() => handleDeleteNotif(item.id)}
-                                  className="text-slate-500 hover:text-rose-400 transition-colors"
-                                  title="Dismiss"
-                                >
-                                  <X className="w-3 h-3" />
-                                </button>
+                                <span className="text-[10px] text-slate-400 whitespace-nowrap">{item.time}</span>
+                              </div>
+                              <p className="mt-1 text-[11px] text-slate-300 leading-relaxed">
+                                {language === 'ur' && item.messageUrdu ? item.messageUrdu : item.message}
+                              </p>
+                              <div className="mt-2 flex items-center justify-between gap-2">
+                                <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                                  {item.category}
+                                </span>
+                                <div className="flex items-center gap-2">
+                                  {actionTab && onNavigateTab && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenNotificationTarget(item)}
+                                      className="inline-flex items-center gap-0.5 text-[10px] font-bold text-amber-300 hover:text-amber-200"
+                                    >
+                                      <span>Open</span>
+                                      <ArrowRight className="w-2.5 h-2.5" />
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleRead(item.id)}
+                                    className="text-[10px] font-medium text-slate-400 hover:text-indigo-300 transition-colors"
+                                  >
+                                    {item.read ? 'Mark unread' : 'Mark read'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteNotif(item.id)}
+                                    className="text-slate-500 hover:text-rose-400 transition-colors"
+                                    title="Dismiss"
+                                  >
+                                    <X className="w-3 h-3" />
+                                  </button>
+                                </div>
                               </div>
                             </div>
                           </div>
-                        </div>
-                      ))
+                        );
+                      })
                     )}
                   </div>
                 </div>

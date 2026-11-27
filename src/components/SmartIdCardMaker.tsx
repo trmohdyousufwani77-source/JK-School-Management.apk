@@ -41,7 +41,9 @@ import {
   Student,
   TeacherProfile,
 } from '../types';
+import QRCode from 'qrcode';
 import {
+  buildStudentAdmissionQrPayload,
   downloadIdCardAsImage,
   evaluateCardStatus,
   exportIdCardsToPdf,
@@ -146,6 +148,41 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
   const [editingExportBusy, setEditingExportBusy] = useState<'pdf' | 'jpeg' | null>(null);
   const [isPrintingAllActive, setIsPrintingAllActive] = useState<boolean>(false);
 
+  // Dedicated Student Admission-Number QR Code state (ZXing-compatible QR encoding Admission Number)
+  const [generatedStudentQrMap, setGeneratedStudentQrMap] = useState<
+    Record<string, { payload: string; dataUrl: string; generatedAt: string }>
+  >({});
+
+  const handleGenerateStudentAdmissionQr = async (card: SchoolIdCardRecord) => {
+    const admissionPayload = buildStudentAdmissionQrPayload(card);
+    if (!admissionPayload) {
+      showToast('Please enter a valid Admission Number before generating the Student QR code.');
+      return;
+    }
+    try {
+      const dataUrl = await QRCode.toDataURL(admissionPayload, {
+        width: 320,
+        margin: 2,
+        color: { dark: '#0f172a', light: '#ffffff' },
+        errorCorrectionLevel: 'M',
+      });
+      const timestamp = new Date().toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+      setGeneratedStudentQrMap((prev) => ({
+        ...prev,
+        [card.id]: { payload: admissionPayload, dataUrl, generatedAt: timestamp },
+      }));
+      showToast(
+        `Generated unique Student QR code for ${card.fullName || 'Student'} (Admission No: ${admissionPayload}) and displayed on ID card.`
+      );
+    } catch {
+      showToast('Unable to generate student QR code. Check admission number and retry.');
+    }
+  };
+
   // Always keep ID card design synced with the centralized Official School Logo & signatures in SchoolProfile
   const effectiveDesignConfig = useMemo<IdCardDesignConfig>(
     () => ({
@@ -194,16 +231,19 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
         .replace(/^_|_$/g, '');
       const idTag = brandedCard.admissionNumber || brandedCard.uniqueIdNumber || 'ID';
 
+      const qrOverride = generatedStudentQrMap[brandedCard.id]?.payload;
+
       if (format === 'pdf') {
         await exportIdCardsToPdf(
           [brandedCard],
           effectiveDesignConfig,
           qrPrivacy,
-          `Smart_ID_${safeName}_${idTag}.pdf`
+          `Smart_ID_${safeName}_${idTag}.pdf`,
+          qrOverride
         );
         showToast(`Downloaded printable PDF Smart ID for ${brandedCard.fullName || 'Student'}.`);
       } else {
-        await downloadIdCardAsImage(brandedCard, effectiveDesignConfig, qrPrivacy, 'jpeg');
+        await downloadIdCardAsImage(brandedCard, effectiveDesignConfig, qrPrivacy, 'jpeg', qrOverride);
         showToast(`Downloaded high-resolution JPEG Smart ID for ${brandedCard.fullName || 'Student'}.`);
       }
     } finally {
@@ -316,16 +356,24 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
         schoolLogoDataUrl: school.logoDataUrl || designConfig.schoolLogoDataUrl,
       };
       const safeName = selectedIndividualStudent.fullName.replace(/[^a-zA-Z0-9]+/g, '_');
+      const qrOverride = generatedStudentQrMap[individualStudentCard.id]?.payload;
       if (format === 'pdf') {
         await exportIdCardsToPdf(
           [individualStudentCard],
           syncedDesign,
           qrPrivacy,
-          `Smart_ID_${safeName}_${selectedIndividualStudent.admissionNumber}.pdf`
+          `Smart_ID_${safeName}_${selectedIndividualStudent.admissionNumber}.pdf`,
+          qrOverride
         );
         showToast(`Downloaded printable PDF Smart ID for ${selectedIndividualStudent.fullName}.`);
       } else {
-        await downloadIdCardAsImage(individualStudentCard, syncedDesign, qrPrivacy, 'jpeg');
+        await downloadIdCardAsImage(
+          individualStudentCard,
+          syncedDesign,
+          qrPrivacy,
+          'jpeg',
+          qrOverride
+        );
         showToast(`Downloaded high-resolution JPEG Smart ID for ${selectedIndividualStudent.fullName}.`);
       }
     } catch {
@@ -1205,25 +1253,54 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2 pt-2">
+                  {records[0].category === 'student' && (
+                    <button
+                      type="button"
+                      data-testid="dashboard-generate-student-qr-btn"
+                      onClick={() => void handleGenerateStudentAdmissionQr(records[0])}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold whitespace-nowrap shrink-0"
+                    >
+                      <QrCode className="w-3.5 h-3.5" />
+                      <span>Generate Student QR Code</span>
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => setActiveView('templates')}
-                    className="px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-bold text-slate-700"
+                    className="px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-bold text-slate-700 whitespace-nowrap shrink-0"
                   >
                     Customize Templates
                   </button>
                   <button
                     type="button"
                     onClick={() => setActiveView('pdf-print')}
-                    className="px-3 py-1.5 rounded-lg bg-slate-900 text-white text-xs font-bold"
+                    className="px-3 py-1.5 rounded-lg bg-slate-900 text-white text-xs font-bold whitespace-nowrap shrink-0"
                   >
                     Open Print &amp; PDF Center
                   </button>
                 </div>
               </div>
 
-              <div className="lg:col-span-7 flex justify-center bg-slate-50 rounded-xl p-4 border border-slate-200/80">
-                <IdCardPreview card={records[0]} design={designConfig} privacy={qrPrivacy} />
+              <div className="lg:col-span-7 flex flex-col items-center gap-2 bg-slate-50 rounded-xl p-4 border border-slate-200/80">
+                <IdCardPreview
+                  card={records[0]}
+                  design={designConfig}
+                  privacy={qrPrivacy}
+                  qrPayloadOverride={
+                    records[0].category === 'student'
+                      ? generatedStudentQrMap[records[0].id]?.payload
+                      : undefined
+                  }
+                  qrHighlighted={
+                    records[0].category === 'student' &&
+                    Boolean(generatedStudentQrMap[records[0].id])
+                  }
+                />
+                {records[0].category === 'student' && generatedStudentQrMap[records[0].id] && (
+                  <p className="text-[11px] font-mono font-semibold text-emerald-700">
+                    Admission QR Active · Encoded: {generatedStudentQrMap[records[0].id].payload}
+                  </p>
+                )}
               </div>
             </div>
           )}
@@ -1353,9 +1430,17 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
                   <div className="flex flex-wrap items-center gap-2 shrink-0">
                     <button
                       type="button"
+                      onClick={() => void handleGenerateStudentAdmissionQr(individualStudentCard)}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold shadow-xs transition-colors whitespace-nowrap shrink-0"
+                    >
+                      <QrCode className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>Generate Student QR Code</span>
+                    </button>
+                    <button
+                      type="button"
                       disabled={individualExportBusy !== null}
                       onClick={() => handleDownloadIndividualStudentId('pdf')}
-                      className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-bold shadow-sm transition-colors"
+                      className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-bold shadow-sm transition-colors whitespace-nowrap shrink-0"
                     >
                       <Download className="w-3.5 h-3.5" />
                       <span>{individualExportBusy === 'pdf' ? 'Generating PDF...' : 'Download PDF'}</span>
@@ -1364,13 +1449,41 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
                       type="button"
                       disabled={individualExportBusy !== null}
                       onClick={() => handleDownloadIndividualStudentId('jpeg')}
-                      className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-bold shadow-sm transition-colors"
+                      className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-bold shadow-sm transition-colors whitespace-nowrap shrink-0"
                     >
                       <Download className="w-3.5 h-3.5" />
                       <span>{individualExportBusy === 'jpeg' ? 'Generating JPEG...' : 'Download JPEG'}</span>
                     </button>
                   </div>
                 </div>
+
+                {generatedStudentQrMap[individualStudentCard.id] && (
+                  <div className="rounded-xl bg-emerald-50 border border-emerald-200 px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <img
+                        src={generatedStudentQrMap[individualStudentCard.id].dataUrl}
+                        alt={`Student Admission QR ${generatedStudentQrMap[individualStudentCard.id].payload}`}
+                        className="w-10 h-10 rounded-lg bg-white p-0.5 border border-emerald-300 shrink-0"
+                      />
+                      <div className="min-w-0">
+                        <p className="font-bold text-emerald-900">
+                          Unique Student Admission QR Code Active on ID Card
+                        </p>
+                        <p className="text-[11px] text-emerald-800 font-mono tabular-nums truncate">
+                          Encoded Admission No: {generatedStudentQrMap[individualStudentCard.id].payload} · ZXing Compatible · Generated {generatedStudentQrMap[individualStudentCard.id].generatedAt}
+                        </p>
+                      </div>
+                    </div>
+                    <a
+                      href={generatedStudentQrMap[individualStudentCard.id].dataUrl}
+                      download={`QR_${generatedStudentQrMap[individualStudentCard.id].payload}.png`}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white border border-emerald-300 hover:bg-emerald-100 text-emerald-800 text-[11px] font-bold whitespace-nowrap shrink-0"
+                    >
+                      <Download className="w-3 h-3" />
+                      <span>Save QR PNG</span>
+                    </a>
+                  </div>
+                )}
 
                 <div className="flex justify-center bg-slate-50 rounded-2xl p-5 border border-slate-200/80">
                   <IdCardPreview
@@ -1380,6 +1493,8 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
                       schoolLogoDataUrl: school.logoDataUrl || designConfig.schoolLogoDataUrl,
                     }}
                     privacy={qrPrivacy}
+                    qrPayloadOverride={generatedStudentQrMap[individualStudentCard.id]?.payload}
+                    qrHighlighted={Boolean(generatedStudentQrMap[individualStudentCard.id])}
                   />
                 </div>
 
@@ -1992,8 +2107,49 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
                 card={syncedEditingCard}
                 design={effectiveDesignConfig}
                 privacy={qrPrivacy}
+                qrPayloadOverride={
+                  syncedEditingCard.category === 'student'
+                    ? generatedStudentQrMap[syncedEditingCard.id]?.payload
+                    : undefined
+                }
+                qrHighlighted={
+                  syncedEditingCard.category === 'student' &&
+                  Boolean(generatedStudentQrMap[syncedEditingCard.id])
+                }
               />
             </div>
+
+            {syncedEditingCard.category === 'student' && (
+              <div className="space-y-2">
+                <button
+                  type="button"
+                  onClick={() => void handleGenerateStudentAdmissionQr(syncedEditingCard)}
+                  className="w-full py-2.5 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold flex items-center justify-center gap-2 shadow-xs transition-colors"
+                >
+                  <QrCode className="w-4 h-4 text-emerald-400" />
+                  <span>
+                    Generate Student QR Code
+                    {syncedEditingCard.admissionNumber
+                      ? ` (Adm: ${syncedEditingCard.admissionNumber})`
+                      : ''}
+                  </span>
+                </button>
+                {generatedStudentQrMap[syncedEditingCard.id] && (
+                  <div className="rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 flex items-center justify-between gap-2 text-[11px]">
+                    <span className="font-mono font-semibold text-emerald-900 truncate">
+                      QR Active · Adm: {generatedStudentQrMap[syncedEditingCard.id].payload}
+                    </span>
+                    <a
+                      href={generatedStudentQrMap[syncedEditingCard.id].dataUrl}
+                      download={`QR_${generatedStudentQrMap[syncedEditingCard.id].payload}.png`}
+                      className="font-bold text-emerald-700 hover:underline whitespace-nowrap shrink-0"
+                    >
+                      Save QR PNG
+                    </a>
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="space-y-2">
               <div className="grid grid-cols-2 gap-2">
@@ -2020,7 +2176,13 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
                 type="button"
                 disabled={editingExportBusy !== null}
                 onClick={() =>
-                  downloadIdCardAsImage(syncedEditingCard, effectiveDesignConfig, qrPrivacy, 'png')
+                  downloadIdCardAsImage(
+                    syncedEditingCard,
+                    effectiveDesignConfig,
+                    qrPrivacy,
+                    'png',
+                    generatedStudentQrMap[syncedEditingCard.id]?.payload
+                  )
                 }
                 className="w-full py-2 rounded-xl border border-slate-200 hover:bg-slate-50 text-xs font-bold text-slate-700 flex items-center justify-center gap-1.5 transition-colors"
               >
@@ -2770,10 +2932,38 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <div className="flex justify-center bg-slate-50 p-4 rounded-xl border border-slate-200">
-              <IdCardPreview card={inspectedCard} design={designConfig} privacy={qrPrivacy} />
+            <div className="flex flex-col items-center gap-2 bg-slate-50 p-4 rounded-xl border border-slate-200">
+              <IdCardPreview
+                card={inspectedCard}
+                design={designConfig}
+                privacy={qrPrivacy}
+                qrPayloadOverride={
+                  inspectedCard.category === 'student'
+                    ? generatedStudentQrMap[inspectedCard.id]?.payload
+                    : undefined
+                }
+                qrHighlighted={
+                  inspectedCard.category === 'student' &&
+                  Boolean(generatedStudentQrMap[inspectedCard.id])
+                }
+              />
+              {inspectedCard.category === 'student' && generatedStudentQrMap[inspectedCard.id] && (
+                <p className="text-[11px] font-mono font-semibold text-emerald-700">
+                  Admission QR Active · Encoded: {generatedStudentQrMap[inspectedCard.id].payload}
+                </p>
+              )}
             </div>
             <div className="flex flex-wrap items-center justify-end gap-2">
+              {inspectedCard.category === 'student' && (
+                <button
+                  type="button"
+                  onClick={() => void handleGenerateStudentAdmissionQr(inspectedCard)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold mr-auto whitespace-nowrap shrink-0"
+                >
+                  <QrCode className="w-3.5 h-3.5" />
+                  <span>Generate Student QR Code</span>
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() =>
@@ -2781,24 +2971,27 @@ export const SmartIdCardMaker: React.FC<SmartIdCardMakerProps> = ({
                     { ...inspectedCard, schoolLogoDataUrl: school.logoDataUrl || undefined },
                     effectiveDesignConfig,
                     qrPrivacy,
-                    'png'
+                    'png',
+                    inspectedCard.category === 'student'
+                      ? generatedStudentQrMap[inspectedCard.id]?.payload
+                      : undefined
                   )
                 }
-                className="px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-bold text-slate-700"
+                className="px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-bold text-slate-700 whitespace-nowrap shrink-0"
               >
                 Download PNG
               </button>
               <button
                 type="button"
                 onClick={() => handleExportSingleCard(inspectedCard, 'jpeg')}
-                className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold"
+                className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold whitespace-nowrap shrink-0"
               >
                 Download JPEG
               </button>
               <button
                 type="button"
                 onClick={() => handleExportSingleCard(inspectedCard, 'pdf')}
-                className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold"
+                className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold whitespace-nowrap shrink-0"
               >
                 Download PDF
               </button>

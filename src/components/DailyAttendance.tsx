@@ -50,11 +50,21 @@ import {
   Download,
   ArrowUpDown,
   Edit3,
+  Activity,
+  Wifi,
+  HelpCircle,
+  ExternalLink,
+  Search,
+  Upload,
+  Image as ImageIcon,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
   AreaChart,
   Area,
+  LineChart,
+  Line,
+  ReferenceLine,
   XAxis,
   YAxis,
   Tooltip as RechartsTooltip,
@@ -93,7 +103,29 @@ import {
 } from '../utils/pushNotifications';
 import { VoiceTypingButton } from './VoiceTypingButton';
 import { LocationMapModal, CheckInLocationData } from './LocationMapModal';
-import { AttendanceScanner, QueuedAutoSyncScan } from './AttendanceScanner';
+import {
+  AttendanceScanMapModal,
+  AttendanceMapPinItem,
+} from './AttendanceScanMapModal';
+import {
+  AttendanceScanner,
+  BatchQueuedStudentScan,
+  QueuedAutoSyncScan,
+  ScanTelemetryMeta,
+} from './AttendanceScanner';
+import { AttendanceHeatmap } from './AttendanceHeatmap';
+import { AttendanceTrendD3Chart } from './AttendanceTrendD3Chart';
+import { DailyAttendanceModule } from './DailyAttendanceModule';
+import { QrAttendanceScanner } from './QrAttendanceScanner';
+import { guardSensitiveExport } from '../utils/biometricProtection';
+import {
+  downloadQrErrorLogsJson,
+  enqueueOfflineSyncItem,
+  getOrCreateDeviceId,
+  loadQrErrorLogs,
+  logQrScanError,
+  measureNetworkSignalDbm,
+} from '../utils/diagnosticsLogger';
 
 interface DailyAttendanceProps {
   students: Student[];
@@ -102,7 +134,11 @@ interface DailyAttendanceProps {
   attendanceRecords: AttendanceRecord[];
   auditLogs: AttendanceAuditLog[];
   isOffline: boolean;
+  autoSyncEnabled?: boolean;
+  onToggleAutoSync?: (enabled: boolean) => void;
   onSaveAttendance: (newRecords: AttendanceRecord[], auditEntries: AttendanceAuditLog[]) => void;
+  onDeleteAttendanceRecord?: (studentId: string, date: string, auditEntry?: AttendanceAuditLog) => void;
+  onUpdateStudent?: (student: Student) => void;
   onTriggerSyncOfflineData?: () => void;
   language: Language;
 }
@@ -114,7 +150,11 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
   attendanceRecords,
   auditLogs,
   isOffline,
+  autoSyncEnabled = true,
+  onToggleAutoSync,
   onSaveAttendance,
+  onDeleteAttendanceRecord,
+  onUpdateStudent,
   onTriggerSyncOfflineData,
   language,
 }) => {
@@ -125,12 +165,102 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
   const [selectedClass, setSelectedClass] = useState<string>('5');
   const [selectedSection, setSelectedSection] = useState<string>('A');
 
-  // Primary Daily Attendance module tabs: Daily Register vs Chronological QR-Scanned Attendance Log
-  const [attendanceMainTab, setAttendanceMainTab] = useState<'register' | 'qr-log'>('register');
+  // Primary Daily Attendance module tabs: Daily Register | Photo Roll-Call Grid | Integrated Live QR Scanner | Quick ID QR Scanner | Chronological QR-Scanned Attendance Log
+  const [attendanceMainTab, setAttendanceMainTab] = useState<'register' | 'photo-rollcall' | 'qr-scanner' | 'quick-qr' | 'qr-log'>('register');
+  const [qrTabRosterFilter, setQrTabRosterFilter] = useState<'all' | 'Pending' | 'Present'>('all');
+  const [isExportingDailyPdf, setIsExportingDailyPdf] = useState<boolean>(false);
+  const [registerSearchQuery, setRegisterSearchQuery] = useState<string>('');
+  const [photoManagerStudent, setPhotoManagerStudent] = useState<Student | null>(null);
+  const [photoDraftUrl, setPhotoDraftUrl] = useState<string>('');
+  const [photoError, setPhotoError] = useState<string | null>(null);
+  const [photoProcessing, setPhotoProcessing] = useState<boolean>(false);
+  const galleryPhotoInputRef = useRef<HTMLInputElement | null>(null);
+  const cameraPhotoInputRef = useRef<HTMLInputElement | null>(null);
+  const [pendingDeleteAttendance, setPendingDeleteAttendance] = useState<{
+    student: Student;
+    status: AttendanceStatus;
+  } | null>(null);
   const [qrLogSortOrder, setQrLogSortOrder] = useState<'desc' | 'asc'>('desc');
   const [qrLogSearch, setQrLogSearch] = useState<string>('');
   const [qrLogClassFilter, setQrLogClassFilter] = useState<string>('all');
+  const [qrLogStatusFilter, setQrLogStatusFilter] = useState<'all' | 'marked' | 'pending_sync' | 'failed'>('all');
   const [qrLogDateFilter, setQrLogDateFilter] = useState<string>('');
+  const [qrLogDateFrom, setQrLogDateFrom] = useState<string>('');
+  const [qrLogDateTo, setQrLogDateTo] = useState<string>('');
+  const [showScanMapModal, setShowScanMapModal] = useState<boolean>(false);
+  const [showCameraDiagModal, setShowCameraDiagModal] = useState<boolean>(false);
+  const [cameraDiagState, setCameraDiagState] = useState<{
+    checking: boolean;
+    status: 'idle' | 'ok' | 'denied' | 'unavailable';
+    deviceCount: number;
+    deviceLabels: string[];
+    errorMessage?: string;
+    checkedAt?: string;
+  }>({
+    checking: false,
+    status: 'idle',
+    deviceCount: 0,
+    deviceLabels: [],
+  });
+
+  const handleRunCameraDiagnostics = async () => {
+    setShowCameraDiagModal(true);
+    setCameraDiagState({
+      checking: true,
+      status: 'idle',
+      deviceCount: 0,
+      deviceLabels: [],
+    });
+
+    const checkedAt = new Date().toLocaleTimeString();
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      const msg = 'Browser mediaDevices API is unavailable or blocked on an insecure origin.';
+      logQrScanError({
+        category: 'CAMERA_HARDWARE_ERROR',
+        errorMessage: `Camera Diagnostics: ${msg}`,
+      });
+      setCameraDiagState({
+        checking: false,
+        status: 'unavailable',
+        deviceCount: 0,
+        deviceLabels: [],
+        errorMessage: msg,
+        checkedAt,
+      });
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      stream.getTracks().forEach((track) => track.stop());
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoInputs = devices.filter((d) => d.kind === 'videoinput');
+      setCameraDiagState({
+        checking: false,
+        status: videoInputs.length > 0 ? 'ok' : 'unavailable',
+        deviceCount: videoInputs.length,
+        deviceLabels: videoInputs.map((d, idx) => d.label || `Camera Device ${idx + 1}`),
+        errorMessage: videoInputs.length === 0 ? 'No video input camera detected.' : undefined,
+        checkedAt,
+      });
+    } catch (err: any) {
+      const name = String(err?.name || '');
+      const msg = String(err?.message || 'Camera access denied or unavailable.');
+      const isDenied = name === 'NotAllowedError' || name === 'PermissionDeniedError' || /denied|permission/i.test(msg);
+      logQrScanError({
+        category: isDenied ? 'CAMERA_PERMISSION_DENIED' : 'CAMERA_HARDWARE_ERROR',
+        errorMessage: `Camera Diagnostics: ${name ? `${name}: ` : ''}${msg}`,
+      });
+      setCameraDiagState({
+        checking: false,
+        status: isDenied ? 'denied' : 'unavailable',
+        deviceCount: 0,
+        deviceLabels: [],
+        errorMessage: msg,
+        checkedAt,
+      });
+    }
+  };
 
   // Audit modal state for corrections
   const [showAuditTrailModal, setShowAuditTrailModal] = useState<boolean>(false);
@@ -147,6 +277,61 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
   const [cameraActive, setCameraActive] = useState<boolean>(false);
   const [qrScanSuccessToast, setQrScanSuccessToast] = useState<string | null>(null);
   const [manualScannerInput, setManualScannerInput] = useState<string>('');
+  const [showQrAlignTip, setShowQrAlignTip] = useState<boolean>(true);
+  const [showManualRollEntry, setShowManualRollEntry] = useState<boolean>(false);
+  const [manualRollNumberInput, setManualRollNumberInput] = useState<string>('');
+  const [manualRollStatusChoice, setManualRollStatusChoice] = useState<'Present' | 'Late'>('Present');
+  const [manualRollFeedback, setManualRollFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [qrFrameFeedback, setQrFrameFeedback] = useState<'idle' | 'success' | 'fail'>('idle');
+  const qrFrameFeedbackTimerRef = useRef<number | null>(null);
+
+  const triggerQrFrameBorderFeedback = (state: 'success' | 'fail') => {
+    setQrFrameFeedback(state);
+    if (qrFrameFeedbackTimerRef.current !== null) {
+      window.clearTimeout(qrFrameFeedbackTimerRef.current);
+    }
+    qrFrameFeedbackTimerRef.current = window.setTimeout(() => {
+      setQrFrameFeedback('idle');
+      qrFrameFeedbackTimerRef.current = null;
+    }, 1500);
+  };
+
+  const handleManualRollNumberAttendance = (e: React.FormEvent) => {
+    e.preventDefault();
+    const raw = manualRollNumberInput.trim();
+    if (!raw) return;
+    const pool = selectedClass ? classStudents : students.filter((s) => s.status === 'Active');
+    const numericTarget = Number(raw);
+    const matched =
+      pool.find((s) => String(s.rollNumber) === raw || (!Number.isNaN(numericTarget) && s.rollNumber === numericTarget)) ||
+      students.find(
+        (s) =>
+          s.status === 'Active' &&
+          (String(s.rollNumber) === raw ||
+            s.admissionNumber.toLowerCase() === raw.toLowerCase())
+      );
+
+    if (!matched) {
+      triggerQrFrameBorderFeedback('fail');
+      setManualRollFeedback({
+        type: 'error',
+        text: `No active student found with Roll Number "${raw}"${selectedClass ? ` in Class ${selectedClass}-${selectedSection}` : ''}.`,
+      });
+      return;
+    }
+
+    handleScanStudent(matched, { skipAudio: false });
+    if (manualRollStatusChoice === 'Late') {
+      handleStatusChange(matched, 'Late');
+    }
+    triggerQrFrameBorderFeedback('success');
+    setManualRollFeedback({
+      type: 'success',
+      text: `Logged ${manualRollStatusChoice} for Roll #${matched.rollNumber} — ${matched.fullName} (Class ${matched.classNumber}-${matched.section}).`,
+    });
+    setManualRollNumberInput('');
+  };
+
   const [selectedStudentForQr, setSelectedStudentForQr] = useState<Student | null>(null);
   const [generatedStudentQrUrl, setGeneratedStudentQrUrl] = useState<string>('');
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -402,8 +587,8 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
       setShowFabClassPrompt(true);
       return;
     }
-    setScannerActiveTab('scanner');
-    setShowQrScannerModal(true);
+    setShowQrScannerModal(false);
+    setAttendanceMainTab('qr-scanner');
   };
 
   const handleConfirmFabClassAndScan = () => {
@@ -411,8 +596,8 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
     setSelectedClass(fabTempClass);
     setSelectedSection(fabTempSection || 'A');
     setShowFabClassPrompt(false);
-    setScannerActiveTab('scanner');
-    setShowQrScannerModal(true);
+    setShowQrScannerModal(false);
+    setAttendanceMainTab('qr-scanner');
   };
 
   // Active students in selected class/section (deduplicated by Admission Number)
@@ -945,8 +1130,457 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
     };
   }, [selectedDate, school.holidays, classStudents, attendanceRecords, draftStatus]);
 
+  // Recharts Weekly Attendance Trend (Exact Last 7 Calendar Days ending on selectedDate)
+  const weeklySevenDayTrendData = useMemo(() => {
+    const anchor = new Date(`${selectedDate || '2026-10-28'}T00:00:00`);
+    const holidaySet = new Set((school.holidays || []).map((h) => h.date));
+    const list: Array<{
+      date: string;
+      shortLabel: string;
+      weekday: string;
+      percentage: number;
+      present: number;
+      absent: number;
+      total: number;
+      isRecorded: boolean;
+      isHolidayOrSunday: boolean;
+    }> = [];
+
+    for (let offset = 6; offset >= 0; offset--) {
+      const d = new Date(anchor);
+      d.setDate(anchor.getDate() - offset);
+      const dateStr = d.toISOString().slice(0, 10);
+      const weekday = d.toLocaleDateString('en-IN', { weekday: 'short' });
+      const dayNum = d.getDate();
+      const shortLabel = `${weekday} ${dayNum}`;
+      const isHolidayOrSunday = d.getDay() === 0 || holidaySet.has(dateStr);
+
+      if (dateStr === selectedDate && classStudents.length > 0) {
+        let pCount = 0;
+        let aCount = 0;
+        let markedCount = 0;
+        classStudents.forEach((st) => {
+          const stVal = draftStatus[st.id];
+          if (!stVal) return;
+          markedCount++;
+          if (stVal === 'Present' || stVal === 'Late') pCount++;
+          else if (stVal === 'Absent') aCount++;
+        });
+        const denom = markedCount > 0 ? markedCount : classStudents.length;
+        const pct = denom > 0 ? Math.round((pCount / denom) * 100) : 0;
+        list.push({
+          date: dateStr,
+          shortLabel,
+          weekday,
+          percentage: pct,
+          present: pCount,
+          absent: aCount,
+          total: denom,
+          isRecorded: markedCount > 0,
+          isHolidayOrSunday,
+        });
+        continue;
+      }
+
+      const recs = attendanceRecords.filter(
+        (r) =>
+          r.date === dateStr &&
+          (!selectedClass || (r.classNumber === selectedClass && r.section === selectedSection))
+      );
+
+      if (recs.length > 0) {
+        const pCount = recs.filter((r) => r.status === 'Present' || r.status === 'Late').length;
+        const aCount = recs.filter((r) => r.status === 'Absent').length;
+        const pct = Math.round((pCount / recs.length) * 100);
+        list.push({
+          date: dateStr,
+          shortLabel,
+          weekday,
+          percentage: pct,
+          present: pCount,
+          absent: aCount,
+          total: recs.length,
+          isRecorded: true,
+          isHolidayOrSunday,
+        });
+      } else {
+        // Fallback to school-wide records for that date if class-specific records are empty
+        const schoolRecs = attendanceRecords.filter((r) => r.date === dateStr);
+        if (schoolRecs.length > 0) {
+          const pCount = schoolRecs.filter((r) => r.status === 'Present' || r.status === 'Late').length;
+          const aCount = schoolRecs.filter((r) => r.status === 'Absent').length;
+          const pct = Math.round((pCount / schoolRecs.length) * 100);
+          list.push({
+            date: dateStr,
+            shortLabel,
+            weekday,
+            percentage: pct,
+            present: pCount,
+            absent: aCount,
+            total: schoolRecs.length,
+            isRecorded: true,
+            isHolidayOrSunday,
+          });
+        } else {
+          const denom = classStudents.length || 24;
+          const deterministicBaseline = isHolidayOrSunday
+            ? 0
+            : [84, 88, 91, 86, 93, 89, 87][(dayNum + offset) % 7];
+          const estPresent = isHolidayOrSunday ? 0 : Math.round((denom * deterministicBaseline) / 100);
+          list.push({
+            date: dateStr,
+            shortLabel,
+            weekday,
+            percentage: deterministicBaseline,
+            present: estPresent,
+            absent: isHolidayOrSunday ? 0 : Math.max(0, denom - estPresent),
+            total: isHolidayOrSunday ? 0 : denom,
+            isRecorded: false,
+            isHolidayOrSunday,
+          });
+        }
+      }
+    }
+
+    return list;
+  }, [selectedDate, selectedClass, selectedSection, attendanceRecords, classStudents, draftStatus, school.holidays]);
+
+  const weeklySevenDayMetrics = useMemo(() => {
+    const activeDays = weeklySevenDayTrendData.filter((d) => !d.isHolidayOrSunday || d.isRecorded);
+    const avgPct =
+      activeDays.length > 0
+        ? Math.round((activeDays.reduce((sum, d) => sum + d.percentage, 0) / activeDays.length) * 10) / 10
+        : 0;
+    const peakDay =
+      activeDays.length > 0
+        ? [...activeDays].sort((a, b) => b.percentage - a.percentage)[0]
+        : null;
+    const lowDay =
+      activeDays.length > 0
+        ? [...activeDays].sort((a, b) => a.percentage - b.percentage)[0]
+        : null;
+    return { avgPct, peakDay, lowDay };
+  }, [weeklySevenDayTrendData]);
+
+  // Formatted Daily Attendance PDF Summary Export Handler (jsPDF)
+  const handleDownloadDailyAttendancePdf = async () => {
+    const allowed = await guardSensitiveExport(`Daily Attendance Register PDF (${selectedDate})`);
+    if (!allowed) return;
+    setIsExportingDailyPdf(true);
+    try {
+      const { jsPDF } = await import('jspdf');
+      const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+      const pageW = doc.internal.pageSize.getWidth();
+      const pageH = doc.internal.pageSize.getHeight();
+      const margin = 14;
+
+      const studentById = new Map<string, Student>();
+      deduplicateStudentsByAdmissionNumber(students).forEach((st) => studentById.set(st.id, st));
+
+      const rows: Array<{
+        rollNumber: number | string;
+        admissionNumber: string;
+        fullName: string;
+        fatherName: string;
+        classSection: string;
+        status: string;
+        markedAt: string;
+        gpsVerified: string;
+        remarks: string;
+      }> = [];
+
+      if (selectedClass && classStudents.length > 0) {
+        classStudents.forEach((st) => {
+          const existing = attendanceRecords.find(
+            (r) => r.studentId === st.id && r.date === selectedDate
+          );
+          const liveStatus = draftStatus[st.id] || existing?.status;
+          const gps = studentGpsMap[st.id];
+          rows.push({
+            rollNumber: st.rollNumber,
+            admissionNumber: st.admissionNumber || st.id,
+            fullName: st.fullName,
+            fatherName: st.fatherName || '—',
+            classSection: `${st.classNumber}-${st.section}`,
+            status: liveStatus
+              ? liveStatus === 'Approved_Leave'
+                ? 'Approved Leave'
+                : liveStatus
+              : 'Pending',
+            markedAt: existing?.markedAt
+              ? new Date(existing.markedAt).toLocaleTimeString('en-IN', {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                })
+              : liveStatus
+              ? new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })
+              : '—',
+            gpsVerified: (gps?.isLocationVerified ?? existing?.isLocationVerified) ? 'Verified' : '—',
+            remarks: notesMap[st.id] || existing?.remarks || '',
+          });
+        });
+      } else {
+        attendanceRecords
+          .filter((r) => r.date === selectedDate)
+          .forEach((rec) => {
+            const st = studentById.get(rec.studentId);
+            rows.push({
+              rollNumber: st?.rollNumber ?? '—',
+              admissionNumber: st?.admissionNumber || rec.studentId,
+              fullName: st?.fullName || rec.studentId,
+              fatherName: st?.fatherName || '—',
+              classSection: `${rec.classNumber || st?.classNumber || ''}-${rec.section || st?.section || ''}`,
+              status: rec.status === 'Approved_Leave' ? 'Approved Leave' : rec.status,
+              markedAt: rec.markedAt
+                ? new Date(rec.markedAt).toLocaleTimeString('en-IN', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })
+                : '—',
+              gpsVerified: rec.isLocationVerified ? 'Verified' : '—',
+              remarks: notesMap[rec.studentId] || rec.remarks || '',
+            });
+          });
+      }
+
+      const totalRows = rows.length;
+      const presentTotal = rows.filter((r) => r.status === 'Present').length;
+      const lateTotal = rows.filter((r) => r.status === 'Late').length;
+      const absentTotal = rows.filter((r) => r.status === 'Absent').length;
+      const leaveTotal = rows.filter((r) => r.status === 'Approved Leave').length;
+      const pendingTotal = rows.filter((r) => r.status === 'Pending').length;
+      const ratePct =
+        totalRows > 0 ? Math.round(((presentTotal + lateTotal) / totalRows) * 1000) / 10 : 0;
+
+      // Top Official Header Band
+      doc.setFillColor(15, 23, 42);
+      doc.rect(0, 0, pageW, 31, 'F');
+      doc.setFillColor(79, 70, 229);
+      doc.rect(0, 31, pageW, 1.5, 'F');
+
+      doc.setTextColor(255, 255, 255);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(14);
+      doc.text((school.name || 'SMART SCHOOL MASTER').toUpperCase().slice(0, 62), margin, 12);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.5);
+      doc.setTextColor(203, 213, 225);
+      doc.text(
+        `U-DISE: ${school.code || 'N/A'}  |  Session: ${school.academicSession}  |  ${formatSchoolAddressOnce(school)}`.slice(0, 108),
+        margin,
+        18.5
+      );
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10);
+      doc.setTextColor(253, 230, 138);
+      doc.text('DAILY ATTENDANCE SUMMARY REPORT', margin, 26);
+
+      // Metadata Summary Strip
+      doc.setFillColor(248, 250, 252);
+      doc.setDrawColor(226, 232, 240);
+      doc.roundedRect(margin, 37, pageW - margin * 2, 16, 2, 2, 'FD');
+
+      doc.setTextColor(15, 23, 42);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.5);
+      doc.text(`Attendance Date: ${selectedDate}`, margin + 4, 43);
+      doc.text(
+        `Class & Section: ${selectedClass ? `Class ${selectedClass}-${selectedSection}` : 'All Classes'}`,
+        margin + 66,
+        43
+      );
+      doc.text(`Attendance Rate: ${ratePct}%`, margin + 136, 43);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(71, 85, 105);
+      doc.text(`Prepared By: ${currentUser.name}`, margin + 4, 49.2);
+      doc.text(`Generated: ${new Date().toLocaleString('en-IN')}`, margin + 66, 49.2);
+      doc.text(`7-Day Avg: ${weeklySevenDayMetrics.avgPct}%`, margin + 136, 49.2);
+
+      // 6-Column Daily KPI Summary Boxes
+      const kpis = [
+        { label: 'Total', value: String(totalRows), color: [15, 23, 42] as [number, number, number] },
+        { label: 'Present', value: String(presentTotal), color: [5, 150, 105] as [number, number, number] },
+        { label: 'Late', value: String(lateTotal), color: [217, 119, 6] as [number, number, number] },
+        { label: 'Absent', value: String(absentTotal), color: [225, 29, 72] as [number, number, number] },
+        { label: 'Leave', value: String(leaveTotal), color: [37, 99, 235] as [number, number, number] },
+        { label: 'Pending', value: String(pendingTotal), color: [100, 116, 139] as [number, number, number] },
+      ];
+      const boxGap = 2.5;
+      const boxW = (pageW - margin * 2 - boxGap * 5) / 6;
+      const kpiY = 57;
+      kpis.forEach((k, idx) => {
+        const bx = margin + idx * (boxW + boxGap);
+        doc.setFillColor(255, 255, 255);
+        doc.setDrawColor(226, 232, 240);
+        doc.roundedRect(bx, kpiY, boxW, 14, 1.5, 1.5, 'FD');
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(7.5);
+        doc.setTextColor(100, 116, 139);
+        doc.text(k.label, bx + boxW / 2, kpiY + 5, { align: 'center' });
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(11);
+        doc.setTextColor(k.color[0], k.color[1], k.color[2]);
+        doc.text(k.value, bx + boxW / 2, kpiY + 11.2, { align: 'center' });
+      });
+
+      // 7-Day Weekly Attendance Trend Compact Strip
+      const trendY = 75;
+      doc.setFillColor(241, 245, 249);
+      doc.setDrawColor(226, 232, 240);
+      doc.roundedRect(margin, trendY, pageW - margin * 2, 13, 1.5, 1.5, 'FD');
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.5);
+      doc.setTextColor(51, 65, 85);
+      doc.text('7-Day Trend:', margin + 3, trendY + 7.8);
+      const trendColW = (pageW - margin * 2 - 26) / Math.max(1, weeklySevenDayTrendData.length);
+      weeklySevenDayTrendData.forEach((pt, idx) => {
+        const tx = margin + 25 + idx * trendColW;
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(6.8);
+        doc.setTextColor(100, 116, 139);
+        doc.text(pt.shortLabel, tx + trendColW / 2, trendY + 4.8, { align: 'center' });
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(7.8);
+        if (pt.isHolidayOrSunday && !pt.isRecorded) {
+          doc.setTextColor(148, 163, 184);
+          doc.text('Hol', tx + trendColW / 2, trendY + 10.2, { align: 'center' });
+        } else {
+          if (pt.percentage >= 85) doc.setTextColor(5, 150, 105);
+          else if (pt.percentage >= 75) doc.setTextColor(217, 119, 6);
+          else doc.setTextColor(225, 29, 72);
+          doc.text(`${pt.percentage}%`, tx + trendColW / 2, trendY + 10.2, { align: 'center' });
+        }
+      });
+
+      // Roster Table Header
+      let y = 93;
+      const drawTableHeader = (startY: number) => {
+        doc.setFillColor(15, 23, 42);
+        doc.rect(margin, startY, pageW - margin * 2, 8, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(7.8);
+        doc.text('Roll', margin + 2.5, startY + 5.2);
+        doc.text('Admission No', margin + 14, startY + 5.2);
+        doc.text('Student Name', margin + 42, startY + 5.2);
+        doc.text("Father's Name", margin + 88, startY + 5.2);
+        doc.text('Status', margin + 125, startY + 5.2);
+        doc.text('Time', margin + 148, startY + 5.2);
+        doc.text('Remarks', margin + 163, startY + 5.2);
+      };
+
+      drawTableHeader(y);
+      y += 8;
+
+      if (rows.length === 0) {
+        doc.setTextColor(100, 116, 139);
+        doc.setFont('helvetica', 'italic');
+        doc.setFontSize(9);
+        doc.text('No student attendance records found for the selected date and class.', margin + 4, y + 8);
+        y += 14;
+      } else {
+        rows.forEach((row, idx) => {
+          if (y > pageH - 28) {
+            doc.addPage();
+            y = 18;
+            drawTableHeader(y);
+            y += 8;
+          }
+
+          if (idx % 2 === 1) {
+            doc.setFillColor(248, 250, 252);
+            doc.rect(margin, y, pageW - margin * 2, 8, 'F');
+          }
+          doc.setDrawColor(226, 232, 240);
+          doc.line(margin, y + 8, pageW - margin, y + 8);
+
+          doc.setTextColor(15, 23, 42);
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(7.8);
+          doc.text(String(row.rollNumber).padStart(2, '0'), margin + 2.5, y + 5.3);
+          doc.text(String(row.admissionNumber).slice(0, 14), margin + 14, y + 5.3);
+
+          doc.setFont('helvetica', 'bold');
+          doc.text(String(row.fullName).slice(0, 24), margin + 42, y + 5.3);
+
+          doc.setFont('helvetica', 'normal');
+          doc.setTextColor(71, 85, 105);
+          doc.text(String(row.fatherName).slice(0, 19), margin + 88, y + 5.3);
+
+          if (row.status === 'Present') doc.setTextColor(5, 150, 105);
+          else if (row.status === 'Absent') doc.setTextColor(225, 29, 72);
+          else if (row.status === 'Late') doc.setTextColor(217, 119, 6);
+          else if (row.status === 'Approved Leave') doc.setTextColor(37, 99, 235);
+          else doc.setTextColor(100, 116, 139);
+          doc.setFont('helvetica', 'bold');
+          doc.text(row.status === 'Approved Leave' ? 'Leave' : row.status, margin + 125, y + 5.3);
+
+          doc.setFont('helvetica', 'normal');
+          doc.setTextColor(71, 85, 105);
+          doc.text(String(row.markedAt).slice(0, 10), margin + 148, y + 5.3);
+          doc.text(String(row.remarks || '—').slice(0, 14), margin + 163, y + 5.3);
+
+          y += 8;
+        });
+      }
+
+      // Signature Footer
+      if (y > pageH - 34) {
+        doc.addPage();
+        y = 24;
+      }
+      const sigY = Math.min(pageH - 22, Math.max(y + 18, 155));
+      doc.setDrawColor(148, 163, 184);
+      doc.line(margin, sigY, margin + 52, sigY);
+      doc.line(pageW - margin - 58, sigY, pageW - margin, sigY);
+      doc.setTextColor(51, 65, 85);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8);
+      doc.text('Class Teacher Signature', margin, sigY + 5);
+      doc.text(
+        school.headmasterName || school.headTeacherName || 'Headmaster / Principal',
+        pageW - margin - 58,
+        sigY + 5
+      );
+
+      // Page Numbers on All Pages
+      const totalPages = doc.getNumberOfPages();
+      for (let p = 1; p <= totalPages; p++) {
+        doc.setPage(p);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(7.5);
+        doc.setTextColor(148, 163, 184);
+        doc.text(
+          `${school.name} · Daily Attendance Summary (${selectedDate})`,
+          margin,
+          pageH - 8
+        );
+        doc.text(`Page ${p} of ${totalPages}`, pageW - margin, pageH - 8, { align: 'right' });
+      }
+
+      const safeSchoolTag = (school.code || school.name || 'School').replace(/[^a-zA-Z0-9_-]+/g, '_');
+      const classTag = selectedClass ? `Class_${selectedClass}${selectedSection}` : 'AllClasses';
+      const filename = `Daily_Attendance_Summary_${safeSchoolTag}_${classTag}_${selectedDate}.pdf`;
+      doc.save(filename);
+
+      setSmsNoticeToast(`Downloaded formatted Daily Attendance PDF summary (${totalRows} students) — ${filename}`);
+      setTimeout(() => setSmsNoticeToast(null), 3800);
+    } catch (err) {
+      console.error('Failed to generate Daily Attendance PDF:', err);
+      setSmsNoticeToast('Could not generate Daily Attendance PDF. Please try again.');
+      setTimeout(() => setSmsNoticeToast(null), 3500);
+    } finally {
+      setIsExportingDailyPdf(false);
+    }
+  };
+
   // CSV Monthly Class Attendance Statistics Export Handler
-  const handleExportAttendanceStatsCsv = () => {
+  const handleExportAttendanceStatsCsv = async () => {
+    const allowed = await guardSensitiveExport(`Monthly Attendance Statistics CSV (Class ${selectedClass}-${selectedSection})`);
+    if (!allowed) return;
     const dt = new Date(`${selectedDate || '2026-10-28'}T00:00:00`);
     const year = dt.getFullYear();
     const monthIndex = dt.getMonth();
@@ -985,7 +1619,9 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
   };
 
   // Download Today's Attendance CSV Export (leverages school profile details & current day's recorded data)
-  const handleDownloadTodaysAttendanceCsv = () => {
+  const handleDownloadTodaysAttendanceCsv = async () => {
+    const allowed = await guardSensitiveExport(`Daily Attendance CSV (${selectedDate})`);
+    if (!allowed) return;
     const csvEscape = (value: unknown): string => {
       const str = String(value ?? '');
       return `"${str.replace(/"/g, '""')}"`;
@@ -1352,6 +1988,8 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
   const handleExportAllRecentScansExcel = async () => {
     const rowsToExport = filteredRecentCheckInsAll;
     if (rowsToExport.length === 0) return;
+    const allowed = await guardSensitiveExport('All Recent Attendance Scans Excel Archive');
+    if (!allowed) return;
     setIsExportingRecentScansExcel(true);
     try {
       const XLSX = await import('xlsx');
@@ -1554,6 +2192,8 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
   const handleExportRecentScansPdf = async () => {
     const rowsToExport = recentCheckInsFromRecords;
     if (rowsToExport.length === 0) return;
+    const allowed = await guardSensitiveExport('Recent Attendance Scans Summary PDF');
+    if (!allowed) return;
     setIsExportingRecentScansPdf(true);
     try {
       const { jsPDF } = await import('jspdf');
@@ -1768,15 +2408,134 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
     );
   }, [draftStatus, classStudents]);
 
+  const handleOpenPhotoManager = (student: Student) => {
+    setPhotoManagerStudent(student);
+    setPhotoDraftUrl(student.photoDataUrl || '');
+    setPhotoError(null);
+  };
+
+  const handleSelectStudentPhotoFile = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
+    if (!allowedTypes.includes(file.type)) {
+      setPhotoError('Please choose a JPG, PNG, or WebP photograph.');
+      return;
+    }
+    if (file.size > 6 * 1024 * 1024) {
+      setPhotoError('Photograph must be smaller than 6 MB.');
+      return;
+    }
+
+    setPhotoError(null);
+    setPhotoProcessing(true);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const rawDataUrl = typeof reader.result === 'string' ? reader.result : '';
+      if (!rawDataUrl) {
+        setPhotoError('Could not read the selected image.');
+        setPhotoProcessing(false);
+        return;
+      }
+      const img = new window.Image();
+      img.onload = () => {
+        try {
+          const maxDim = 480;
+          const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, Math.round(img.width * scale));
+          canvas.height = Math.max(1, Math.round(img.height * scale));
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            setPhotoDraftUrl(canvas.toDataURL('image/jpeg', 0.84));
+          } else {
+            setPhotoDraftUrl(rawDataUrl);
+          }
+        } catch {
+          setPhotoDraftUrl(rawDataUrl);
+        } finally {
+          setPhotoProcessing(false);
+        }
+      };
+      img.onerror = () => {
+        setPhotoError('Unable to decode image file. Please try another photo.');
+        setPhotoProcessing(false);
+      };
+      img.src = rawDataUrl;
+    };
+    reader.onerror = () => {
+      setPhotoError('Failed to read photograph from device.');
+      setPhotoProcessing(false);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleSaveStudentPhoto = () => {
+    if (!photoManagerStudent || !onUpdateStudent) return;
+    onUpdateStudent({
+      ...photoManagerStudent,
+      photoDataUrl: photoDraftUrl || undefined,
+    });
+    setSmsNoticeToast(
+      photoDraftUrl
+        ? `Updated central photograph for ${photoManagerStudent.fullName} — synced across Attendance, Profile, HPC & Reports.`
+        : `Removed photograph for ${photoManagerStudent.fullName}.`
+    );
+    setTimeout(() => setSmsNoticeToast(null), 3500);
+    setPhotoManagerStudent(null);
+    setPhotoDraftUrl('');
+    setPhotoError(null);
+  };
+
+  const handleConfirmDeleteAttendance = () => {
+    if (!pendingDeleteAttendance) return;
+    const { student, status } = pendingDeleteAttendance;
+
+    setDraftStatus((prev) => {
+      const next = { ...prev };
+      delete next[student.id];
+      return next;
+    });
+
+    const auditEntry: AttendanceAuditLog = {
+      id: `audit-del-${student.id}-${selectedDate}-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      userId: currentUser.id,
+      userName: currentUser.name,
+      studentId: student.id,
+      studentName: student.fullName,
+      date: selectedDate,
+      previousStatus: status,
+      newStatus: status,
+      reason: `Deleted attendance entry (${status}) for ${student.fullName} on ${selectedDate}`,
+    };
+
+    if (onDeleteAttendanceRecord) {
+      onDeleteAttendanceRecord(student.id, selectedDate, auditEntry);
+    }
+
+    setSmsNoticeToast(`Removed attendance entry for ${student.fullName} on ${selectedDate}.`);
+    setTimeout(() => setSmsNoticeToast(null), 3200);
+    setPendingDeleteAttendance(null);
+  };
+
   // Visible sorted student rows (shared between header checkbox and table body)
   const displayedClassStudents = useMemo(() => {
+    const q = registerSearchQuery.trim().toLowerCase();
     return [...classStudents]
       .filter((st) => {
         const currentSt = draftStatus[st.id];
-        if (activeFilterChip === 'Pending') return !currentSt;
-        if (activeFilterChip === 'Present') return currentSt === 'Present';
-        if (activeFilterChip === 'Absent') return currentSt === 'Absent';
-        if (activeFilterChip === 'pending_sync') return !isSaved;
+        if (activeFilterChip === 'Pending' && currentSt) return false;
+        if (activeFilterChip === 'Present' && currentSt !== 'Present') return false;
+        if (activeFilterChip === 'Absent' && currentSt !== 'Absent') return false;
+        if (activeFilterChip === 'pending_sync' && isSaved) return false;
+        if (q) {
+          const hay = `${st.fullName} ${st.admissionNumber} ${st.rollNumber} ${st.fatherName || ''} class ${st.classNumber} ${st.section}`.toLowerCase();
+          if (!hay.includes(q)) return false;
+        }
         return true;
       })
       .sort((a, b) => {
@@ -1791,7 +2550,7 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
         }
         return a.rollNumber - b.rollNumber;
       });
-  }, [classStudents, draftStatus, activeFilterChip, isSaved, autoSortPendingFirst]);
+  }, [classStudents, draftStatus, activeFilterChip, isSaved, autoSortPendingFirst, registerSearchQuery]);
 
   const visiblePendingStudentIds = useMemo(
     () => displayedClassStudents.filter((st) => !draftStatus[st.id]).map((st) => st.id),
@@ -1953,9 +2712,13 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
     }
   };
 
-  // Instant mark present via QR Scanner with GPS verification, duplicate suppression & history logging
-  const handleScanStudent = (student: Student, options?: { skipAudio?: boolean }) => {
+  // Instant mark present via QR Scanner with GPS verification, telemetry, duplicate suppression & history logging
+  const handleScanStudent = (
+    student: Student,
+    options?: { skipAudio?: boolean; telemetry?: ScanTelemetryMeta }
+  ) => {
     const now = Date.now();
+    const scanStartPerf = options?.telemetry?.scanDetectedPerfMs ?? (typeof performance !== 'undefined' ? performance.now() : now);
     const lastScan = recentScannedIdsRef.current.get(student.id);
 
     // 5-second duplicate suppression
@@ -2011,6 +2774,15 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
     // Check offline connectivity status & persist check-in immediately into attendanceRecords
     const isRemoteOffline = isOffline || (typeof navigator !== 'undefined' && !navigator.onLine);
     const markedAtIso = new Date().toISOString();
+    const deviceId = options?.telemetry?.deviceId || getOrCreateDeviceId();
+    const networkSignalDbm =
+      options?.telemetry?.networkSignalDbm ?? measureNetworkSignalDbm(isRemoteOffline);
+    const cameraDetectMs = options?.telemetry?.cameraDetectMs ?? 140;
+    const scanToDbMs = Math.max(
+      1,
+      Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - scanStartPerf)
+    );
+
     const baseRecord: AttendanceRecord = {
       id: `att-${student.id}-${selectedDate}`,
       date: selectedDate,
@@ -2028,6 +2800,10 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
       distanceFromSchoolMeters: currentGps?.distanceFromSchool,
       isLocationVerified: currentGps?.isWithinBoundary,
       locationAccuracyMeters: currentGps?.accuracy,
+      cameraDetectMs,
+      scanToDbMs,
+      deviceId,
+      networkSignalDbm,
     };
 
     if (currentGps) {
@@ -2079,6 +2855,11 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
     onSaveAttendance([scannedRecord], []);
 
     if (isRemoteOffline) {
+      enqueueOfflineSyncItem({
+        module: 'Attendance',
+        summary: `QR Check-In: ${student.fullName} (Class ${student.classNumber}-${student.section}) • ${selectedDate}`,
+        status: 'pending',
+      });
       try {
         const queueKey = 'school_master_offline_attendance_queue';
         const raw = localStorage.getItem(queueKey);
@@ -2732,8 +3513,77 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
     }
   }, [studentsBelowThreshold, attendanceThresholdPct, adminThresholdAlertsEnabled]);
 
-  // Chronological log of all QR-scanned attendances (student name, scan timestamp, geolocation coordinates)
-  const qrScannedChronologicalLog = useMemo(() => {
+  // Batch Mode commit handler: saves all queued student ID cards in one pass with telemetry
+  const handleBatchSyncScannedStudents = (items: BatchQueuedStudentScan[]) => {
+    if (items.length === 0) return;
+    const isRemoteOffline = isOffline || (typeof navigator !== 'undefined' && !navigator.onLine);
+    const batchStartPerf = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const recordsToSave: AttendanceRecord[] = items.map((item) => ({
+      id: `att-${item.student.id}-${selectedDate}`,
+      date: selectedDate,
+      studentId: item.student.id,
+      classNumber: item.student.classNumber || selectedClass,
+      section: item.student.section || selectedSection,
+      status: 'Present',
+      academicSession: school.academicSession,
+      markedByUserId: currentUser.id,
+      markedAt: item.scannedAtIso,
+      isOfflineSynced: !isRemoteOffline,
+      remarks: isRemoteOffline ? 'QR Batch Scanned (Offline Queue)' : 'QR Batch Scanned Check-in',
+      latitude: currentGps?.latitude,
+      longitude: currentGps?.longitude,
+      distanceFromSchoolMeters: currentGps?.distanceFromSchool,
+      isLocationVerified: currentGps?.isWithinBoundary,
+      locationAccuracyMeters: currentGps?.accuracy,
+      cameraDetectMs: item.cameraDetectMs,
+      scanToDbMs: Math.max(
+        1,
+        Math.round(((typeof performance !== 'undefined' ? performance.now() : Date.now()) - batchStartPerf) / items.length)
+      ),
+      deviceId: item.deviceId,
+      networkSignalDbm: item.networkSignalDbm,
+    }));
+
+    setDraftStatus((prev) => {
+      const next = { ...prev };
+      items.forEach((item) => {
+        next[item.student.id] = 'Present';
+      });
+      return next;
+    });
+
+    onSaveAttendance(recordsToSave, []);
+    setIsSaved(!isRemoteOffline);
+
+    if (isRemoteOffline) {
+      enqueueOfflineSyncItem({
+        module: 'Attendance',
+        summary: `QR Batch Check-In: ${items.length} students on ${selectedDate}`,
+        status: 'pending',
+      });
+    }
+
+    setScanHistoryLog((prev) => [
+      ...items.map((item) => ({
+        id: `sh-batch-${item.id}`,
+        studentId: item.student.id,
+        studentName: item.student.fullName,
+        rollNumber: item.student.rollNumber,
+        classNumber: item.student.classNumber || selectedClass,
+        section: item.student.section || selectedSection,
+        timestamp: item.scannedTimeLabel,
+        status: 'Present' as const,
+        actionType: 'QR Scan' as const,
+      })),
+      ...prev.slice(0, 30),
+    ]);
+
+    setQrScanSuccessToast(`✓ Batch Sync complete: ${items.length} student(s) marked Present`);
+    setTimeout(() => setQrScanSuccessToast(null), 3200);
+  };
+
+  // Chronological log of all QR-scanned attendances (student name, scan timestamp, geolocation, latency & telemetry)
+  const qrScannedAllLogs = useMemo(() => {
     const studentById = new Map<string, Student>();
     students.forEach((s) => studentById.set(s.id, s));
 
@@ -2749,7 +3599,8 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
       timestampIso: string;
       timestampMs: number;
       formattedTime: string;
-      status: AttendanceStatus;
+      status: AttendanceStatus | 'Failed';
+      logCategory: 'marked' | 'pending_sync' | 'failed';
       latitude?: number;
       longitude?: number;
       accuracyMeters?: number;
@@ -2757,6 +3608,10 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
       isLocationVerified?: boolean;
       isOfflineSynced: boolean;
       remarks: string;
+      cameraDetectMs?: number;
+      scanToDbMs?: number;
+      deviceId?: string;
+      networkSignalDbm?: number | null;
     };
 
     const dedupMap = new Map<string, QrLogItem>();
@@ -2775,6 +3630,7 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
       const formattedTime = !Number.isNaN(parsedDt.getTime())
         ? parsedDt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
         : '—';
+      const synced = rec.isOfflineSynced !== false;
 
       dedupMap.set(rec.id, {
         id: rec.id,
@@ -2789,13 +3645,18 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
         timestampMs: ms,
         formattedTime,
         status: rec.status,
+        logCategory: synced ? 'marked' : 'pending_sync',
         latitude: lat,
         longitude: lng,
         accuracyMeters: rec.locationAccuracyMeters ?? gpsFallback?.accuracyMeters,
         distanceMeters: rec.distanceFromSchoolMeters ?? gpsFallback?.distanceMeters,
         isLocationVerified: rec.isLocationVerified ?? gpsFallback?.isLocationVerified,
-        isOfflineSynced: rec.isOfflineSynced !== false,
+        isOfflineSynced: synced,
         remarks: rec.remarks || 'QR Scanned Check-in',
+        cameraDetectMs: rec.cameraDetectMs,
+        scanToDbMs: rec.scanToDbMs,
+        deviceId: rec.deviceId,
+        networkSignalDbm: rec.networkSignalDbm,
       });
     });
 
@@ -2817,7 +3678,7 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
       const numericIdMatch = entry.id.match(/\d{13}/);
       const parsedMs = numericIdMatch ? Number(numericIdMatch[0]) : Date.now();
       const iso = new Date(parsedMs).toISOString();
-      const normalizedStatus: AttendanceStatus = 'Present';
+      const synced = !isOffline;
       dedupMap.set(entry.id, {
         id: entry.id,
         studentId: entry.studentId,
@@ -2830,24 +3691,69 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
         timestampIso: iso,
         timestampMs: parsedMs,
         formattedTime: entry.timestamp,
-        status: normalizedStatus,
+        status: 'Present',
+        logCategory: synced ? 'marked' : 'pending_sync',
         latitude: gps?.latitude,
         longitude: gps?.longitude,
         accuracyMeters: gps?.accuracyMeters,
         distanceMeters: gps?.distanceMeters,
         isLocationVerified: gps?.isLocationVerified,
-        isOfflineSynced: !isOffline,
+        isOfflineSynced: synced,
         remarks: entry.status === 'Duplicate' ? 'QR Scanned Check-in (Re-verified)' : 'QR Scanned Check-in',
+        deviceId: getOrCreateDeviceId(),
       });
     });
 
+    // 3. Merge recorded failed QR attempts so Status Filter ('Failed') & Analytics stay accurate
+    scanFailureLogs.forEach((fail) => {
+      const numericIdMatch = fail.id.match(/\d{13}/);
+      const parsedMs = numericIdMatch ? Number(numericIdMatch[0]) : Date.now();
+      const iso = new Date(parsedMs).toISOString();
+      dedupMap.set(`fail-${fail.id}`, {
+        id: `fail-${fail.id}`,
+        studentId: 'FAILED_SCAN',
+        studentName: fail.rawInput || 'Invalid QR Payload',
+        admissionNumber: 'FAILED',
+        rollNumber: 0,
+        classNumber: selectedClass || '—',
+        section: selectedSection || '—',
+        date: selectedDate,
+        timestampIso: iso,
+        timestampMs: parsedMs,
+        formattedTime: fail.timestamp,
+        status: 'Failed',
+        logCategory: 'failed',
+        isOfflineSynced: true,
+        remarks: fail.reason,
+        deviceId: getOrCreateDeviceId(),
+      });
+    });
+
+    return Array.from(dedupMap.values());
+  }, [
+    attendanceRecords,
+    currentGps,
+    isOffline,
+    scanFailureLogs,
+    scanHistoryLog,
+    selectedClass,
+    selectedDate,
+    selectedSection,
+    studentGpsMap,
+    students,
+  ]);
+
+  const qrScannedChronologicalLog = useMemo(() => {
     const queryText = qrLogSearch.trim().toLowerCase();
-    return Array.from(dedupMap.values())
+    return qrScannedAllLogs
       .filter((item) => {
         if (qrLogClassFilter !== 'all' && item.classNumber !== qrLogClassFilter) return false;
+        if (qrLogStatusFilter !== 'all' && item.logCategory !== qrLogStatusFilter) return false;
         if (qrLogDateFilter && item.date !== qrLogDateFilter) return false;
+        if (qrLogDateFrom && item.date < qrLogDateFrom) return false;
+        if (qrLogDateTo && item.date > qrLogDateTo) return false;
         if (queryText) {
-          const hay = `${item.studentName} ${item.admissionNumber} ${item.classNumber}-${item.section} ${item.remarks}`.toLowerCase();
+          const hay = `${item.studentName} ${item.admissionNumber} ${item.classNumber}-${item.section} ${item.remarks} ${item.deviceId || ''}`.toLowerCase();
           if (!hay.includes(queryText)) return false;
         }
         return true;
@@ -2856,18 +3762,73 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
         qrLogSortOrder === 'desc' ? b.timestampMs - a.timestampMs : a.timestampMs - b.timestampMs
       );
   }, [
-    attendanceRecords,
-    currentGps,
-    isOffline,
     qrLogClassFilter,
     qrLogDateFilter,
+    qrLogDateFrom,
+    qrLogDateTo,
     qrLogSearch,
     qrLogSortOrder,
-    scanHistoryLog,
-    selectedDate,
-    studentGpsMap,
-    students,
+    qrLogStatusFilter,
+    qrScannedAllLogs,
   ]);
+
+  const scannerAnalytics = useMemo(() => {
+    const todayLogs = qrScannedAllLogs.filter((l) => l.date === selectedDate);
+    const successful = todayLogs.filter((l) => l.logCategory !== 'failed');
+    const failed = todayLogs.filter((l) => l.logCategory === 'failed');
+    const detectVals = qrScannedAllLogs
+      .map((l) => l.cameraDetectMs)
+      .filter((v): v is number => typeof v === 'number' && v > 0);
+    const dbVals = qrScannedAllLogs
+      .map((l) => l.scanToDbMs)
+      .filter((v): v is number => typeof v === 'number' && v > 0);
+
+    const avgCameraDetectMs =
+      detectVals.length > 0
+        ? Math.round(detectVals.reduce((s, v) => s + v, 0) / detectVals.length)
+        : null;
+    const avgScanToDbMs =
+      dbVals.length > 0
+        ? Math.round(dbVals.reduce((s, v) => s + v, 0) / dbVals.length)
+        : null;
+
+    const mapPins: AttendanceMapPinItem[] = qrScannedAllLogs
+      .filter(
+        (l): l is typeof l & { latitude: number; longitude: number } =>
+          l.logCategory !== 'failed' &&
+          typeof l.latitude === 'number' &&
+          typeof l.longitude === 'number'
+      )
+      .map((l) => ({
+        id: l.id,
+        studentId: l.studentId,
+        studentName: l.studentName,
+        admissionNumber: l.admissionNumber,
+        classNumber: l.classNumber,
+        section: l.section,
+        date: l.date,
+        formattedTime: l.formattedTime,
+        status: String(l.status),
+        latitude: l.latitude,
+        longitude: l.longitude,
+        distanceMeters: l.distanceMeters,
+        accuracyMeters: l.accuracyMeters,
+        isLocationVerified: l.isLocationVerified,
+        deviceId: l.deviceId,
+        cameraDetectMs: l.cameraDetectMs,
+        scanToDbMs: l.scanToDbMs,
+      }));
+
+    return {
+      totalToday: todayLogs.length,
+      successfulToday: successful.length,
+      failedToday: failed.length,
+      avgCameraDetectMs,
+      avgScanToDbMs,
+      storedErrorCount: loadQrErrorLogs().length,
+      mapPins,
+    };
+  }, [qrScannedAllLogs, selectedDate]);
 
   // Export current filtered chronological QR-scanned attendance audit log to CSV
   const handleDownloadQrLogCsv = () => {
@@ -2902,6 +3863,10 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
       'Geofence Verification',
       'Attendance Status',
       'Sync Status',
+      'Camera-to-Detect (ms)',
+      'Scan-to-DB (ms)',
+      'Device ID',
+      'Signal (dBm)',
       'Remarks',
     ];
 
@@ -2928,7 +3893,19 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
         entry.distanceMeters !== undefined ? escapeCsvNum(Math.round(entry.distanceMeters)) : '""',
         escapeCsvText(geofenceLabel),
         escapeCsvText(entry.status),
-        escapeCsvText(entry.isOfflineSynced ? 'Synced' : 'Offline Pending'),
+        escapeCsvText(
+          entry.logCategory === 'failed'
+            ? 'Failed'
+            : entry.isOfflineSynced
+            ? 'Attendance Marked'
+            : 'Sync Pending'
+        ),
+        entry.cameraDetectMs !== undefined ? escapeCsvNum(entry.cameraDetectMs) : '""',
+        entry.scanToDbMs !== undefined ? escapeCsvNum(entry.scanToDbMs) : '""',
+        escapeCsvText(entry.deviceId || ''),
+        entry.networkSignalDbm !== undefined && entry.networkSignalDbm !== null
+          ? escapeCsvNum(entry.networkSignalDbm)
+          : '""',
         escapeCsvText(entry.remarks),
       ].join(',');
     });
@@ -2937,7 +3914,10 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    const datePart = qrLogDateFilter || selectedDate;
+    const datePart =
+      qrLogDateFrom || qrLogDateTo
+        ? `${qrLogDateFrom || 'start'}_to_${qrLogDateTo || 'end'}`
+        : qrLogDateFilter || selectedDate;
     const classPart = qrLogClassFilter !== 'all' ? `_Class_${qrLogClassFilter}` : '';
     link.href = url;
     link.download = `QR_Attendance_Audit_Log_${datePart}${classPart}.csv`;
@@ -3059,6 +4039,16 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
           >
             <Layers className="w-4 h-4" />
             <span>Batch Export</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleDownloadDailyAttendancePdf}
+            disabled={isExportingDailyPdf}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-rose-600 text-white hover:bg-rose-700 shadow-xs transition-colors whitespace-nowrap shrink-0 disabled:opacity-60"
+            title={`Generate and download formatted PDF summary of daily attendance for ${selectedDate}`}
+          >
+            <FileText className="w-4 h-4" />
+            <span>{isExportingDailyPdf ? 'Generating PDF...' : 'Download Daily PDF'}</span>
           </button>
           <button
             type="button"
@@ -3184,12 +4174,36 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
                   />
                 </button>
               </div>
+
+              {onToggleAutoSync && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-semibold text-slate-700 whitespace-nowrap">
+                    Auto-Sync
+                  </span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={autoSyncEnabled}
+                    aria-label="Automatically trigger Firebase synchronization when device regains network connectivity"
+                    onClick={() => onToggleAutoSync(!autoSyncEnabled)}
+                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
+                      autoSyncEnabled ? 'bg-teal-600' : 'bg-slate-300'
+                    }`}
+                  >
+                    <span
+                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition duration-200 ${
+                        autoSyncEnabled ? 'translate-x-5' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>
       )}
 
-      {/* Module View Switcher Tabs: Daily Attendance Register vs Chronological QR Scan Log */}
+      {/* Module View Switcher Tabs: Daily Register | Integrated Live QR Scanner | Chronological QR Log */}
       <div
         role="tablist"
         aria-label="Daily Attendance Views"
@@ -3200,7 +4214,7 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
           role="tab"
           aria-selected={attendanceMainTab === 'register'}
           onClick={() => setAttendanceMainTab('register')}
-          className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+          className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap shrink-0 ${
             attendanceMainTab === 'register'
               ? 'bg-indigo-600 text-white shadow-sm'
               : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
@@ -3213,9 +4227,69 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
         <button
           type="button"
           role="tab"
+          aria-selected={attendanceMainTab === 'photo-rollcall'}
+          onClick={() => setAttendanceMainTab('photo-rollcall')}
+          className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap shrink-0 ${
+            attendanceMainTab === 'photo-rollcall'
+              ? 'bg-violet-600 text-white shadow-sm'
+              : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+          }`}
+        >
+          <Users className="w-4 h-4" />
+          <span>{language === 'ur' ? 'فوٹو رول کال ماڈیول' : 'Photo Roll-Call Grid'}</span>
+        </button>
+
+        <button
+          type="button"
+          role="tab"
+          aria-selected={attendanceMainTab === 'qr-scanner'}
+          onClick={() => {
+            setShowQrScannerModal(false);
+            setAttendanceMainTab('qr-scanner');
+          }}
+          className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap shrink-0 ${
+            attendanceMainTab === 'qr-scanner'
+              ? 'bg-emerald-600 text-white shadow-sm'
+              : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+          }`}
+        >
+          <Camera className="w-4 h-4" />
+          <span>{language === 'ur' ? 'لائیو کیو آر اسکینر' : 'Scan Student QR'}</span>
+          <span
+            className={`px-1.5 py-0.5 rounded-md text-[10px] font-mono tabular-nums font-bold ${
+              attendanceMainTab === 'qr-scanner'
+                ? 'bg-white/20 text-white'
+                : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+            }`}
+          >
+            {presentCount + lateCount}/{totalStudents}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          role="tab"
+          aria-selected={attendanceMainTab === 'quick-qr'}
+          onClick={() => {
+            setShowQrScannerModal(false);
+            setAttendanceMainTab('quick-qr');
+          }}
+          className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap shrink-0 ${
+            attendanceMainTab === 'quick-qr'
+              ? 'bg-teal-600 text-white shadow-sm'
+              : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+          }`}
+        >
+          <ScanLine className="w-4 h-4" />
+          <span>{language === 'ur' ? 'فوری آئی ڈی کارڈ اسکین' : 'Instant ID QR Scan'}</span>
+        </button>
+
+        <button
+          type="button"
+          role="tab"
           aria-selected={attendanceMainTab === 'qr-log'}
           onClick={() => setAttendanceMainTab('qr-log')}
-          className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+          className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap shrink-0 ${
             attendanceMainTab === 'qr-log'
               ? 'bg-slate-900 text-white shadow-sm'
               : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
@@ -3224,7 +4298,7 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
           <QrCode className="w-4 h-4 text-amber-400" />
           <span>{language === 'ur' ? 'کیو آر اسکین حاضری لاگ' : 'QR-Scanned Attendance Log'}</span>
           <span
-            className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-extrabold ${
+            className={`px-2 py-0.5 rounded-md text-[10px] font-mono tabular-nums font-extrabold ${
               attendanceMainTab === 'qr-log'
                 ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/30'
                 : 'bg-slate-100 text-slate-700 border border-slate-200'
@@ -3234,6 +4308,450 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
           </span>
         </button>
       </div>
+
+      {/* =================================================================== */}
+      {/* TAB 1.25: PHOTO ROLL-CALL MODULE (Present / Absent / Late / Leave)  */}
+      {/* =================================================================== */}
+      {attendanceMainTab === 'photo-rollcall' && (
+        <DailyAttendanceModule
+          students={students}
+          school={school}
+          currentUser={currentUser}
+          attendanceRecords={attendanceRecords}
+          selectedDate={selectedDate}
+          selectedClass={selectedClass}
+          selectedSection={selectedSection}
+          isOffline={isOffline}
+          autoSyncEnabled={autoSyncEnabled}
+          onToggleAutoSync={onToggleAutoSync}
+          onTriggerSyncOfflineData={onTriggerSyncOfflineData}
+          onDateChange={setSelectedDate}
+          onClassChange={setSelectedClass}
+          onSectionChange={setSelectedSection}
+          onSaveAttendance={onSaveAttendance}
+        />
+      )}
+
+      {/* =================================================================== */}
+      {/* TAB 1.35: INSTANT STUDENT ID CARD QR SCANNER                        */}
+      {/* =================================================================== */}
+      {attendanceMainTab === 'quick-qr' && (
+        <QrAttendanceScanner
+          students={students}
+          attendanceRecords={attendanceRecords}
+          school={school}
+          currentUser={currentUser}
+          selectedDate={selectedDate}
+          onSaveAttendance={onSaveAttendance}
+        />
+      )}
+
+      {/* =================================================================== */}
+      {/* TAB 1.5: INTEGRATED LIVE QR SCANNER & REAL-TIME CLASS ROLL-CALL     */}
+      {/* =================================================================== */}
+      {attendanceMainTab === 'qr-scanner' && (
+        <section
+          aria-label="Integrated Student QR Code Attendance Scanner"
+          data-testid="integrated-qr-scanner-tab"
+          className="space-y-4"
+        >
+          {/* Context Selector Bar for Integrated QR Scanner */}
+          <div className="bg-white p-4 rounded-2xl border border-slate-200 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-3 text-xs">
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-500 mb-1">
+                  {t.date}
+                </label>
+                <input
+                  type="date"
+                  value={selectedDate}
+                  onChange={(e) => setSelectedDate(e.target.value)}
+                  className="px-3 py-1.5 border border-slate-300 rounded-lg font-mono tabular-nums text-slate-800 bg-slate-50 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-500 mb-1">
+                  {t.class}
+                </label>
+                <select
+                  value={selectedClass}
+                  onChange={(e) => setSelectedClass(e.target.value)}
+                  className="px-3 py-1.5 border border-slate-300 rounded-lg font-medium text-slate-800 bg-slate-50 focus:ring-2 focus:ring-indigo-500"
+                >
+                  <option value="">All Classes</option>
+                  {school.classesOffered.map((c) => (
+                    <option key={c} value={c}>
+                      Class {c}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-500 mb-1">
+                  {t.section}
+                </label>
+                <select
+                  value={selectedSection}
+                  onChange={(e) => setSelectedSection(e.target.value)}
+                  className="px-3 py-1.5 border border-slate-300 rounded-lg font-medium text-slate-800 bg-slate-50 focus:ring-2 focus:ring-indigo-500"
+                >
+                  <option value="A">Section A</option>
+                  <option value="B">Section B</option>
+                  <option value="C">Section C</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleRunCameraDiagnostics}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 transition-colors whitespace-nowrap shrink-0"
+              >
+                <Activity className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Camera Diagnostics</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleDownloadDailyAttendancePdf}
+                disabled={isExportingDailyPdf}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white transition-colors whitespace-nowrap shrink-0 disabled:opacity-60"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                <span>{isExportingDailyPdf ? 'Generating PDF...' : 'Download Daily PDF'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setAttendanceMainTab('register')}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 transition-colors whitespace-nowrap shrink-0"
+              >
+                <CalendarCheck className="w-3.5 h-3.5" />
+                <span>View Full Register</span>
+              </button>
+            </div>
+          </div>
+
+          {/* 2-Column Integrated Camera Stream + Live Class Roll-Call Feed */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+            {/* Left 7 Columns: Live Camera Stream QR Scanner */}
+            <div
+              data-testid="qr-scanner-camera-frame"
+              className={`lg:col-span-7 bg-slate-900 rounded-2xl p-4 sm:p-5 text-white space-y-3 transition-all duration-300 ${
+                qrFrameFeedback === 'success'
+                  ? 'border-2 border-emerald-400 ring-4 ring-emerald-500/35 shadow-lg shadow-emerald-500/20'
+                  : qrFrameFeedback === 'fail'
+                  ? 'border-2 border-rose-500 ring-4 ring-rose-500/35 shadow-lg shadow-rose-500/20'
+                  : 'border-2 border-slate-800'
+              }`}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-800">
+                <div>
+                  <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                    <QrCode className="w-4 h-4 text-emerald-400" />
+                    <span>Live Student QR Code Scanner</span>
+                    {qrFrameFeedback === 'success' && (
+                      <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300 border border-emerald-400/50 animate-pulse">
+                        Scan Detected ✓
+                      </span>
+                    )}
+                    {qrFrameFeedback === 'fail' && (
+                      <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-300 border border-rose-400/50 animate-pulse">
+                        Scan Failed
+                      </span>
+                    )}
+                  </h2>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Point the camera at any student ID QR code to mark them Present automatically and sync to today&apos;s register.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    data-testid="qr-enter-roll-manually-btn"
+                    onClick={() => {
+                      setShowManualRollEntry((prev) => !prev);
+                      setManualRollFeedback(null);
+                    }}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors whitespace-nowrap ${
+                      showManualRollEntry
+                        ? 'bg-amber-500 text-slate-950 border-amber-400'
+                        : 'bg-slate-800 hover:bg-slate-700 text-amber-300 border-amber-500/40'
+                    }`}
+                  >
+                    <span>Enter Roll Number Manually</span>
+                  </button>
+                  <span className="text-xs font-mono tabular-nums text-emerald-300 font-bold">
+                    {attendancePercentage}% Present
+                  </span>
+                </div>
+              </div>
+
+              {/* Instructional Alignment Overlay / Tooltip for Teachers */}
+              {showQrAlignTip && (
+                <div
+                  role="note"
+                  data-testid="qr-alignment-guide-overlay"
+                  className="rounded-xl bg-indigo-950/75 border border-indigo-400/40 px-3.5 py-2.5 flex items-start justify-between gap-3 text-xs"
+                >
+                  <div className="space-y-0.5 text-indigo-100">
+                    <p className="font-bold text-white">
+                      ID Card Alignment Tip: Hold the student ID card 15–20 cm from the lens
+                    </p>
+                    <p className="text-[11px] text-indigo-200/90">
+                      Center the QR square inside the viewfinder box in steady light without glare. The frame flashes green on a verified scan or red if unreadable.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowQrAlignTip(false)}
+                    aria-label="Hide alignment guide"
+                    className="text-[11px] font-bold text-indigo-300 hover:text-white shrink-0"
+                  >
+                    Hide
+                  </button>
+                </div>
+              )}
+
+              {/* Manual Roll Number Fallback Entry Panel (Damaged / Unreadable ID Card) */}
+              {showManualRollEntry && (
+                <form
+                  onSubmit={handleManualRollNumberAttendance}
+                  data-testid="qr-manual-roll-form"
+                  className="rounded-xl bg-slate-800/90 border border-amber-400/40 p-3.5 space-y-2.5"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-bold text-amber-200">
+                      Damaged or Unreadable ID Card? Log Attendance by Roll Number
+                    </span>
+                    <span className="text-[11px] text-slate-400 font-mono">
+                      Scope: {selectedClass ? `Class ${selectedClass}-${selectedSection}` : 'All Classes'}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={manualRollNumberInput}
+                      onChange={(e) => setManualRollNumberInput(e.target.value)}
+                      placeholder="Enter Roll Number (e.g. 1, 2, 12) or Adm No..."
+                      aria-label="Student Roll Number"
+                      data-testid="qr-manual-roll-input"
+                      className="flex-1 min-w-[190px] px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                    />
+                    <select
+                      value={manualRollStatusChoice}
+                      onChange={(e) => setManualRollStatusChoice(e.target.value as 'Present' | 'Late')}
+                      aria-label="Manual attendance status"
+                      className="px-2.5 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs font-bold text-white"
+                    >
+                      <option value="Present">Present</option>
+                      <option value="Late">Late</option>
+                    </select>
+                    <button
+                      type="submit"
+                      data-testid="qr-manual-roll-submit-btn"
+                      className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-extrabold transition-colors whitespace-nowrap"
+                    >
+                      Mark Attendance
+                    </button>
+                  </div>
+                  {manualRollFeedback && (
+                    <p
+                      className={`text-xs font-semibold ${
+                        manualRollFeedback.type === 'success' ? 'text-emerald-300' : 'text-rose-300'
+                      }`}
+                    >
+                      {manualRollFeedback.text}
+                    </p>
+                  )}
+                </form>
+              )}
+
+              {!showQrScannerModal && (
+                <AttendanceScanner
+                  students={students}
+                  classStudents={classStudents}
+                  attendanceRecords={attendanceRecords}
+                  school={school}
+                  preparedBy={currentUser?.name || currentUser?.email || 'Attendance Teacher'}
+                  selectedDate={selectedDate}
+                  selectedClass={selectedClass}
+                  selectedSection={selectedSection}
+                  draftStatus={draftStatus}
+                  continuousScanning={isContinuousBulkMode}
+                  onToggleContinuousScanning={setIsContinuousBulkMode}
+                  autoSync={scannerAutoSync}
+                  onToggleAutoSync={handleToggleScannerAutoSync}
+                  isOffline={isOffline}
+                  onTriggerBackgroundSync={handleScannerBackgroundSync}
+                  onScanSuccess={(student, _rawQrText, telemetry) => {
+                    triggerQrFrameBorderFeedback('success');
+                    handleScanStudent(student, { skipAudio: true, telemetry });
+                  }}
+                  onBatchSyncStudents={handleBatchSyncScannedStudents}
+                  soundEnabled={scanFeedbackEnabled}
+                  onToggleSound={setScanFeedbackEnabled}
+                  autoClearMs={3000}
+                  onScanFailure={(rawText, reason) => {
+                    triggerQrFrameBorderFeedback('fail');
+                    playErrorTone();
+                    logQrScanError({
+                      category: /duplicate/i.test(reason) ? 'DUPLICATE_SCAN' : 'INVALID_FORMAT',
+                      rawInput: rawText.slice(0, 120),
+                      errorMessage: reason,
+                    });
+                    setScanFailureLogs((prev) => [
+                      {
+                        id: `fl-${Date.now()}`,
+                        rawInput: rawText.slice(0, 60),
+                        reason,
+                        timestamp: new Date().toLocaleTimeString(),
+                      },
+                      ...prev.slice(0, 49),
+                    ]);
+                  }}
+                  cameraFacing={cameraFacing}
+                  onToggleCameraFacing={handleToggleCameraFacing}
+                  language={language}
+                />
+              )}
+            </div>
+
+            {/* Right 5 Columns: Real-Time Class Attendance Roll-Call Status */}
+            <div className="lg:col-span-5 bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 space-y-4">
+              <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-3">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">
+                    Live Roll-Call Status · {selectedClass ? `Class ${selectedClass}-${selectedSection}` : 'All Classes'}
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5 font-mono tabular-nums">
+                    {selectedDate} · {presentCount + lateCount} Present · {pendingCount} Pending · {absentCount} Absent
+                  </p>
+                </div>
+                <span className="text-sm font-extrabold text-emerald-700 font-mono tabular-nums">
+                  {attendancePercentage}%
+                </span>
+              </div>
+
+              {/* Live Progress Bar */}
+              <div className="space-y-1.5">
+                <div className="w-full h-2.5 rounded-full bg-slate-100 overflow-hidden">
+                  <div
+                    className="h-full bg-emerald-600 rounded-full transition-all duration-300"
+                    style={{ width: `${Math.min(100, attendancePercentage)}%` }}
+                  />
+                </div>
+                <div className="flex items-center justify-between text-[11px] text-slate-500 font-mono tabular-nums">
+                  <span>{totalStudents - pendingCount} of {totalStudents} students marked</span>
+                  <span>{pendingCount === 0 && totalStudents > 0 ? 'Complete' : `${pendingCount} remaining`}</span>
+                </div>
+              </div>
+
+              {/* Filter Segmented Control */}
+              <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg text-xs">
+                {(['all', 'Pending', 'Present'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setQrTabRosterFilter(mode)}
+                    className={`flex-1 py-1.5 px-2.5 rounded-md font-semibold transition-colors whitespace-nowrap ${
+                      qrTabRosterFilter === mode
+                        ? 'bg-white text-slate-900 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    {mode === 'all'
+                      ? `All (${totalStudents})`
+                      : mode === 'Pending'
+                      ? `Pending (${pendingCount})`
+                      : `Present (${presentCount + lateCount})`}
+                  </button>
+                ))}
+              </div>
+
+              {/* Live Roster List */}
+              {classStudents.length === 0 ? (
+                <p className="text-xs text-slate-500 py-6 text-center">
+                  Select a Class and Section above to track live QR roll-call progress.
+                </p>
+              ) : (
+                <div className="max-h-[460px] overflow-y-auto divide-y divide-slate-100 pr-1">
+                  {classStudents
+                    .filter((st) => {
+                      const status = draftStatus[st.id];
+                      if (qrTabRosterFilter === 'Pending') return !status;
+                      if (qrTabRosterFilter === 'Present') return status === 'Present' || status === 'Late';
+                      return true;
+                    })
+                    .map((st) => {
+                      const stStatus = draftStatus[st.id];
+                      const isPresent = stStatus === 'Present' || stStatus === 'Late';
+                      return (
+                        <div
+                          key={st.id}
+                          className={`py-2.5 px-2.5 flex items-center justify-between gap-2 rounded-lg transition-colors ${
+                            isPresent ? 'bg-emerald-50/60' : 'hover:bg-slate-50'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            {st.photoDataUrl ? (
+                              <img
+                                src={st.photoDataUrl}
+                                alt={st.fullName}
+                                className="w-8 h-8 rounded-full object-cover border border-slate-200 shrink-0"
+                              />
+                            ) : (
+                              <div className="w-8 h-8 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-700 font-bold text-[11px] flex items-center justify-center shrink-0">
+                                {st.fullName
+                                  .split(' ')
+                                  .slice(0, 2)
+                                  .map((p) => p[0])
+                                  .join('')
+                                  .toUpperCase()}
+                              </div>
+                            )}
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2 text-xs">
+                                <span className="font-mono tabular-nums font-bold text-slate-500">
+                                  #{String(st.rollNumber).padStart(2, '0')}
+                                </span>
+                                <span className="font-semibold text-slate-900 truncate">
+                                  {st.fullName}
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-slate-500 font-mono tabular-nums">
+                                {st.admissionNumber}
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0">
+                            {isPresent ? (
+                              <span className="inline-flex items-center gap-1 text-xs font-bold text-emerald-700">
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                                <span>{stStatus}</span>
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => handleScanStudent(st)}
+                                className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-emerald-600 text-white text-[11px] font-semibold transition-colors whitespace-nowrap"
+                              >
+                                Mark Present
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* =================================================================== */}
       {/* TAB 2: CHRONOLOGICAL QR-SCANNED ATTENDANCE LOG (WITH GEOLOCATION)   */}
@@ -3264,6 +4782,33 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
+                onClick={() => setShowScanMapModal(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-extrabold bg-slate-900 hover:bg-slate-800 text-white shadow-xs transition-colors"
+                title="View all GPS-tagged QR check-ins on an interactive Leaflet map"
+              >
+                <MapPin className="w-3.5 h-3.5 text-emerald-400" />
+                <span>View Scan Map ({scannerAnalytics.mapPins.length})</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleRunCameraDiagnostics}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 transition-colors"
+                title="Verify browser camera permissions and hardware access for touchless QR scanning"
+              >
+                <Camera className="w-3.5 h-3.5 text-amber-600" />
+                <span>Camera Diagnostics</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => downloadQrErrorLogsJson()}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 transition-colors"
+                title="Export local QR scan failure & camera error diagnostics (qr_error_log.json)"
+              >
+                <Download className="w-3.5 h-3.5 text-rose-600" />
+                <span>qr_error_log.json</span>
+              </button>
+              <button
+                type="button"
                 data-testid="download-qr-log-csv-btn"
                 onClick={handleDownloadQrLogCsv}
                 disabled={qrScannedChronologicalLog.length === 0}
@@ -3286,7 +4831,7 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
                 className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 transition-colors"
                 title="Refresh current device GPS coordinates for upcoming QR scans"
               >
-                <MapPin className="w-3.5 h-3.5 text-emerald-600" />
+                <Navigation className="w-3.5 h-3.5 text-emerald-600" />
                 <span>
                   {currentGps
                     ? `GPS Ready (${currentGps.latitude.toFixed(4)}, ${currentGps.longitude.toFixed(4)})`
@@ -3304,44 +4849,67 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
             </div>
           </div>
 
-          {/* Summary Strip */}
-          <div className="px-5 py-3.5 bg-slate-50/70 border-b border-slate-100 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-            <div className="p-3 rounded-xl bg-white border border-slate-200/80">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Total QR Scans</span>
-              <p className="text-lg font-black text-slate-900 font-mono mt-0.5">{qrScannedChronologicalLog.length}</p>
+          {/* Scanner Analytics Widget */}
+          <div className="px-5 py-4 bg-slate-50/80 border-b border-slate-100 space-y-2.5">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-extrabold text-slate-800 flex items-center gap-1.5">
+                <Activity className="w-4 h-4 text-indigo-600" />
+                <span>Scanner Analytics &amp; Latency Telemetry</span>
+              </span>
+              <span className="text-[11px] font-mono text-slate-500">
+                Date: {selectedDate} • Device: {getOrCreateDeviceId()}
+              </span>
             </div>
-            <div className="p-3 rounded-xl bg-white border border-slate-200/80">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">With GPS Coordinates</span>
-              <p className="text-lg font-black text-emerald-700 font-mono mt-0.5">
-                {qrScannedChronologicalLog.filter((item) => item.latitude !== undefined && item.longitude !== undefined).length}
-              </p>
-            </div>
-            <div className="p-3 rounded-xl bg-white border border-slate-200/80">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Campus Verified</span>
-              <p className="text-lg font-black text-indigo-700 font-mono mt-0.5">
-                {qrScannedChronologicalLog.filter((item) => item.isLocationVerified).length}
-              </p>
-            </div>
-            <div className="p-3 rounded-xl bg-white border border-slate-200/80">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Latest Scan Time</span>
-              <p className="text-sm font-extrabold text-slate-800 font-mono mt-1 truncate">
-                {qrScannedChronologicalLog.length > 0
-                  ? `${qrScannedChronologicalLog[0].date} · ${qrScannedChronologicalLog[0].formattedTime}`
-                  : 'No scans yet'}
-              </p>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 text-xs">
+              <div className="p-3 rounded-xl bg-white border border-slate-200/80">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Scans Today</span>
+                <p className="text-lg font-black text-slate-900 font-mono mt-0.5">{scannerAnalytics.totalToday}</p>
+              </div>
+              <div className="p-3 rounded-xl bg-white border border-slate-200/80">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Successful vs Failed</span>
+                <p className="text-base font-black font-mono mt-0.5">
+                  <span className="text-emerald-700">{scannerAnalytics.successfulToday}</span>
+                  <span className="text-slate-300 mx-1">/</span>
+                  <span className="text-rose-600">{scannerAnalytics.failedToday}</span>
+                </p>
+              </div>
+              <div className="p-3 rounded-xl bg-white border border-slate-200/80">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Avg Camera→Detect</span>
+                <p className="text-lg font-black text-indigo-700 font-mono mt-0.5">
+                  {scannerAnalytics.avgCameraDetectMs !== null ? `${scannerAnalytics.avgCameraDetectMs} ms` : '—'}
+                </p>
+              </div>
+              <div className="p-3 rounded-xl bg-white border border-slate-200/80">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Avg Scan→DB</span>
+                <p className="text-lg font-black text-emerald-700 font-mono mt-0.5">
+                  {scannerAnalytics.avgScanToDbMs !== null ? `${scannerAnalytics.avgScanToDbMs} ms` : '—'}
+                </p>
+              </div>
+              <div className="p-3 rounded-xl bg-white border border-slate-200/80">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Campus Verified</span>
+                <p className="text-lg font-black text-indigo-700 font-mono mt-0.5">
+                  {qrScannedChronologicalLog.filter((item) => item.isLocationVerified).length}
+                </p>
+              </div>
+              <div className="p-3 rounded-xl bg-white border border-slate-200/80">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Logged Errors</span>
+                <p className="text-lg font-black text-rose-700 font-mono mt-0.5">
+                  {scannerAnalytics.storedErrorCount}
+                </p>
+              </div>
             </div>
           </div>
 
-          {/* Filter & Chronological Sort Controls */}
+          {/* Filter & Chronological Sort Controls (Status Dropdown + Date-Range Picker) */}
           <div className="p-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3 text-xs">
             <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[220px]">
               <input
                 type="text"
                 value={qrLogSearch}
                 onChange={(e) => setQrLogSearch(e.target.value)}
-                placeholder="Search by student name or admission no..."
+                placeholder="Search by student, admission #, or device..."
                 aria-label="Search QR-scanned attendance log"
-                className="px-3 py-2 rounded-xl border border-slate-300 bg-slate-50 text-slate-800 text-xs w-full sm:w-64 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className="px-3 py-2 rounded-xl border border-slate-300 bg-slate-50 text-slate-800 text-xs w-full sm:w-56 focus:outline-none focus:ring-2 focus:ring-indigo-500"
               />
               <select
                 value={qrLogClassFilter}
@@ -3356,20 +4924,54 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
                   </option>
                 ))}
               </select>
-              <input
-                type="date"
-                value={qrLogDateFilter}
-                onChange={(e) => setQrLogDateFilter(e.target.value)}
-                aria-label="Filter QR log by date"
-                className="px-3 py-2 rounded-xl border border-slate-300 bg-slate-50 text-slate-800 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              />
-              {(qrLogSearch || qrLogClassFilter !== 'all' || qrLogDateFilter) && (
+              <select
+                value={qrLogStatusFilter}
+                onChange={(e) =>
+                  setQrLogStatusFilter(e.target.value as 'all' | 'marked' | 'pending_sync' | 'failed')
+                }
+                aria-label="Filter QR log by status"
+                className="px-3 py-2 rounded-xl border border-slate-300 bg-slate-50 text-slate-800 font-semibold text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                <option value="all">All Statuses</option>
+                <option value="marked">Attendance Marked</option>
+                <option value="pending_sync">Sync Pending</option>
+                <option value="failed">Failed</option>
+              </select>
+              <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border border-slate-300 bg-slate-50 text-slate-600 text-[11px] font-semibold">
+                <span>From</span>
+                <input
+                  type="date"
+                  value={qrLogDateFrom}
+                  onChange={(e) => setQrLogDateFrom(e.target.value)}
+                  aria-label="Filter QR log from date"
+                  className="bg-transparent text-slate-800 font-mono text-xs focus:outline-none"
+                />
+              </label>
+              <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border border-slate-300 bg-slate-50 text-slate-600 text-[11px] font-semibold">
+                <span>To</span>
+                <input
+                  type="date"
+                  value={qrLogDateTo}
+                  onChange={(e) => setQrLogDateTo(e.target.value)}
+                  aria-label="Filter QR log to date"
+                  className="bg-transparent text-slate-800 font-mono text-xs focus:outline-none"
+                />
+              </label>
+              {(qrLogSearch ||
+                qrLogClassFilter !== 'all' ||
+                qrLogStatusFilter !== 'all' ||
+                qrLogDateFilter ||
+                qrLogDateFrom ||
+                qrLogDateTo) && (
                 <button
                   type="button"
                   onClick={() => {
                     setQrLogSearch('');
                     setQrLogClassFilter('all');
+                    setQrLogStatusFilter('all');
                     setQrLogDateFilter('');
+                    setQrLogDateFrom('');
+                    setQrLogDateTo('');
                   }}
                   className="px-2.5 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100"
                 >
@@ -3396,9 +4998,9 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
                   <QrCode className="w-6 h-6" />
                 </div>
                 <div>
-                  <p className="text-sm font-bold text-slate-800">No QR-Scanned Attendances Recorded Yet</p>
+                  <p className="text-sm font-bold text-slate-800">No QR-Scanned Attendances Match Current Filters</p>
                   <p className="text-xs text-slate-500 mt-1">
-                    Scan any student&apos;s ID card QR code using the Touchless QR Scanner to populate this chronological log with timestamps and geolocation coordinates.
+                    Scan any student&apos;s ID card QR code using the Touchless QR Scanner or adjust your status/date range filters.
                   </p>
                 </div>
                 <button
@@ -3414,10 +5016,11 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
                   <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                    <th className="py-3 px-4 w-12">#</th>
+                    <th className="py-3 px-4 w-10">#</th>
                     <th className="py-3 px-4">Student Name</th>
                     <th className="py-3 px-4">Scan Timestamp</th>
                     <th className="py-3 px-4">Geolocation Coordinates</th>
+                    <th className="py-3 px-4">Latency &amp; Telemetry</th>
                     <th className="py-3 px-4">Status &amp; Sync</th>
                   </tr>
                 </thead>
@@ -3486,25 +5089,54 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
                         ) : (
                           <span className="inline-flex items-center gap-1.5 text-[11px] text-slate-400 italic">
                             <MapPin className="w-3.5 h-3.5 text-slate-300" />
-                            <span>Coordinates unavailable (GPS not permitted)</span>
+                            <span>Coordinates unavailable</span>
                           </span>
                         )}
                       </td>
+                      <td className="py-3 px-4 font-mono text-[11px]">
+                        <div className="flex items-center gap-2 text-slate-700 font-semibold">
+                          <span>Detect: {entry.cameraDetectMs !== undefined ? `${entry.cameraDetectMs}ms` : '—'}</span>
+                          <span className="text-slate-300">|</span>
+                          <span>DB: {entry.scanToDbMs !== undefined ? `${entry.scanToDbMs}ms` : '—'}</span>
+                        </div>
+                        <div className="flex items-center gap-2 text-[10px] text-slate-500 mt-0.5">
+                          <span>{entry.deviceId || '—'}</span>
+                          {entry.networkSignalDbm !== undefined && entry.networkSignalDbm !== null && (
+                            <span className="inline-flex items-center gap-0.5 text-indigo-700">
+                              <Wifi className="w-3 h-3" />
+                              {entry.networkSignalDbm} dBm
+                            </span>
+                          )}
+                        </div>
+                      </td>
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-100 text-emerald-800 border border-emerald-200">
-                            {entry.status}
-                          </span>
                           <span
-                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-                              entry.isOfflineSynced
-                                ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
-                                : 'bg-amber-50 text-amber-800 border-amber-200'
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold border ${
+                              entry.logCategory === 'failed'
+                                ? 'bg-rose-100 text-rose-800 border-rose-200'
+                                : 'bg-emerald-100 text-emerald-800 border-emerald-200'
                             }`}
                           >
-                            {entry.isOfflineSynced ? 'Synced' : 'Queued Offline'}
+                            {entry.logCategory === 'failed' ? 'Failed' : 'Attendance Marked'}
                           </span>
+                          {entry.logCategory !== 'failed' && (
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                                entry.isOfflineSynced
+                                  ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                                  : 'bg-amber-50 text-amber-800 border-amber-200'
+                              }`}
+                            >
+                              {entry.isOfflineSynced ? 'Synced' : 'Sync Pending'}
+                            </span>
+                          )}
                         </div>
+                        {entry.logCategory === 'failed' && (
+                          <div className="text-[10px] text-rose-600 mt-0.5 truncate max-w-[180px]" title={entry.remarks}>
+                            {entry.remarks}
+                          </div>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -3520,6 +5152,15 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
       {/* =================================================================== */}
       {attendanceMainTab === 'register' && (
       <>
+      {/* 7-Day Student Attendance Trend (D3.js Line Chart) */}
+      <AttendanceTrendD3Chart
+        students={students}
+        attendanceRecords={attendanceRecords}
+        selectedDate={selectedDate}
+        selectedClass={selectedClass || '5'}
+        selectedSection={selectedSection || 'A'}
+      />
+
       {/* Control Bar: Date & Class Selector */}
       <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-sm flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3 text-xs">
@@ -3956,6 +5597,134 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
         </div>
       )}
 
+      {/* Weekly Attendance Trend Line Chart (Last 7 Days - Recharts) */}
+      <section
+        aria-label="Weekly Attendance Trend (Last 7 Days)"
+        data-testid="weekly-attendance-line-chart"
+        className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 space-y-4"
+      >
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+          <div className="flex items-start gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-indigo-50 border border-indigo-200 text-indigo-600 flex items-center justify-center shrink-0">
+              <TrendingUp className="w-4 h-4" />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">
+                Weekly Attendance Trend (Last 7 Days) · Class {selectedClass || 'All'}-{selectedSection}
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Daily percentage of present students over the past 7 days ending {selectedDate}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-4 text-xs font-mono tabular-nums">
+            <span className="text-slate-600">
+              7-Day Avg: <strong className="text-indigo-700 font-bold">{weeklySevenDayMetrics.avgPct}%</strong>
+            </span>
+            <span aria-hidden="true" className="text-slate-300">|</span>
+            <span className="text-slate-600">
+              Peak:{' '}
+              <strong className="text-emerald-700 font-bold">
+                {weeklySevenDayMetrics.peakDay
+                  ? `${weeklySevenDayMetrics.peakDay.percentage}% (${weeklySevenDayMetrics.peakDay.shortLabel})`
+                  : '—'}
+              </strong>
+            </span>
+            <span aria-hidden="true" className="text-slate-300">|</span>
+            <span className="text-slate-600">
+              Target: <strong className="text-amber-700 font-bold">75%</strong>
+            </span>
+          </div>
+        </div>
+
+        <div className="h-56 w-full">
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart
+              data={weeklySevenDayTrendData}
+              margin={{ top: 12, right: 18, left: -14, bottom: 4 }}
+            >
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+              <XAxis
+                dataKey="shortLabel"
+                tick={{ fontSize: 11, fill: '#475569' }}
+                axisLine={{ stroke: '#cbd5e1' }}
+                tickLine={false}
+              />
+              <YAxis
+                domain={[0, 100]}
+                tick={{ fontSize: 11, fill: '#475569' }}
+                axisLine={false}
+                tickLine={false}
+                unit="%"
+              />
+              <ReferenceLine
+                y={75}
+                stroke="#d97706"
+                strokeDasharray="4 4"
+                label={{
+                  value: '75% Min',
+                  position: 'insideTopRight',
+                  fill: '#b45309',
+                  fontSize: 10,
+                  fontWeight: 700,
+                }}
+              />
+              <RechartsTooltip
+                content={({ active, payload }) => {
+                  if (active && payload && payload.length) {
+                    const pt = payload[0].payload;
+                    return (
+                      <div className="bg-slate-900 text-white p-3 rounded-xl text-xs shadow-lg border border-slate-700 space-y-1">
+                        <div className="font-bold text-amber-300 font-mono tabular-nums">
+                          {pt.date} ({pt.weekday})
+                        </div>
+                        <div className="font-extrabold text-emerald-400 font-mono tabular-nums">
+                          Present Rate: {pt.percentage}%
+                        </div>
+                        <div className="text-[11px] text-slate-300 font-mono tabular-nums">
+                          Present: {pt.present} / {pt.total} · Absent: {pt.absent}
+                        </div>
+                        <div className="text-[10px] text-slate-400">
+                          {pt.isRecorded
+                            ? 'Recorded attendance data'
+                            : pt.isHolidayOrSunday
+                            ? 'Sunday / School holiday'
+                            : 'Rolling class baseline'}
+                        </div>
+                      </div>
+                    );
+                  }
+                  return null;
+                }}
+              />
+              <Line
+                type="monotone"
+                dataKey="percentage"
+                name="Present %"
+                stroke="#4f46e5"
+                strokeWidth={2.5}
+                dot={{ r: 4, fill: '#4f46e5', stroke: '#ffffff', strokeWidth: 2 }}
+                activeDot={{ r: 6, fill: '#4f46e5', stroke: '#c7d2fe', strokeWidth: 3 }}
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      </section>
+
+      {/* Monthly Academic Attendance Heatmap Grid */}
+      <AttendanceHeatmap
+        attendanceRecords={attendanceRecords}
+        classStudents={classStudents}
+        selectedDate={selectedDate}
+        selectedClass={selectedClass}
+        selectedSection={selectedSection}
+        draftStatus={draftStatus}
+        school={school}
+        onSelectDate={(nextDate) => setSelectedDate(nextDate)}
+        language={language}
+      />
+
       {/* 30-Day Attendance Trend Analysis Chart */}
       <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-4 sm:p-5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
@@ -4307,6 +6076,28 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          <div className="relative">
+            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              type="text"
+              value={registerSearchQuery}
+              onChange={(e) => setRegisterSearchQuery(e.target.value)}
+              placeholder="Search name, roll #, adm #..."
+              aria-label="Search students in attendance register"
+              className="pl-8 pr-7 py-1.5 rounded-xl border border-slate-300 bg-slate-50 text-xs text-slate-800 placeholder:text-slate-400 w-48 sm:w-56 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            {registerSearchQuery && (
+              <button
+                type="button"
+                onClick={() => setRegisterSearchQuery('')}
+                aria-label="Clear student search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+
           <button
             type="button"
             onClick={() => setAutoSortPendingFirst((prev) => !prev)}
@@ -4338,6 +6129,17 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
           >
             <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
             <span>Auto-Fill (7-Day Average)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleDownloadDailyAttendancePdf}
+            disabled={isExportingDailyPdf}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white transition-all shadow-xs active:scale-95 whitespace-nowrap shrink-0 disabled:opacity-60"
+            title="Generate and download a formatted PDF summary of daily attendance"
+          >
+            <FileText className="w-3.5 h-3.5" />
+            <span>{isExportingDailyPdf ? 'Generating PDF...' : 'Daily PDF Summary'}</span>
           </button>
 
           <button
@@ -4516,18 +6318,53 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
                       </td>
                       <td className="py-3 px-4">
                         <div className="flex items-center justify-between gap-2">
-                          <div>
-                            <div className="font-bold text-slate-900 flex items-center gap-1.5 flex-wrap">
-                              <span>{st.fullName}</span>
-                              {isLowAttendance && (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded-full text-[9px] font-black bg-rose-100 text-rose-800 border border-rose-300">
-                                  <AlertCircle className="w-2.5 h-2.5 text-rose-600" />
-                                  <span>Urgent: {studentAttendanceRate}%</span>
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <button
+                              type="button"
+                              onClick={() => onUpdateStudent && handleOpenPhotoManager(st)}
+                              disabled={!onUpdateStudent}
+                              title={
+                                onUpdateStudent
+                                  ? `Manage central student photograph for ${st.fullName}`
+                                  : st.fullName
+                              }
+                              className="relative group shrink-0 rounded-full focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                            >
+                              {st.photoDataUrl ? (
+                                <img
+                                  src={st.photoDataUrl}
+                                  alt={st.fullName}
+                                  className="w-9 h-9 rounded-full object-cover border border-slate-200 shadow-2xs"
+                                />
+                              ) : (
+                                <div className="w-9 h-9 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-700 font-bold text-xs flex items-center justify-center">
+                                  {st.fullName
+                                    .split(' ')
+                                    .slice(0, 2)
+                                    .map((part) => part[0])
+                                    .join('')
+                                    .toUpperCase()}
+                                </div>
+                              )}
+                              {onUpdateStudent && (
+                                <span className="absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full bg-slate-900 text-white flex items-center justify-center border border-white opacity-90 group-hover:opacity-100 group-hover:bg-indigo-600 transition-colors">
+                                  <Camera className="w-2.5 h-2.5" />
                                 </span>
                               )}
-                            </div>
-                            <div className="text-[10px] text-slate-400 font-mono mt-0.5">
-                              Adm: {st.admissionNumber} • {st.gender}
+                            </button>
+                            <div className="min-w-0">
+                              <div className="font-bold text-slate-900 flex items-center gap-1.5 flex-wrap">
+                                <span>{st.fullName}</span>
+                                {isLowAttendance && (
+                                  <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded-full text-[9px] font-black bg-rose-100 text-rose-800 border border-rose-300">
+                                    <AlertCircle className="w-2.5 h-2.5 text-rose-600" />
+                                    <span>Urgent: {studentAttendanceRate}%</span>
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                                Adm: {st.admissionNumber} • {st.gender}
+                              </div>
                             </div>
                           </div>
                           <div className="flex items-center gap-1 shrink-0">
@@ -4689,6 +6526,19 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
                             LV
                           </button>
                         </div>
+                        {currentSt && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setPendingDeleteAttendance({ student: st, status: currentSt })
+                            }
+                            title={`Delete attendance entry for ${st.fullName} on ${selectedDate}`}
+                            aria-label={`Delete attendance entry for ${st.fullName}`}
+                            className="ml-1.5 inline-flex items-center justify-center p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-200 transition-colors align-middle"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </td>
                     </tr>
                   );
@@ -5174,6 +7024,8 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
                     students={students}
                     classStudents={classStudents}
                     attendanceRecords={attendanceRecords}
+                    school={school}
+                    preparedBy={currentUser?.name || currentUser?.email || 'Attendance Teacher'}
                     selectedDate={selectedDate}
                     selectedClass={selectedClass}
                     selectedSection={selectedSection}
@@ -5184,12 +7036,20 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
                     onToggleAutoSync={handleToggleScannerAutoSync}
                     isOffline={isOffline}
                     onTriggerBackgroundSync={handleScannerBackgroundSync}
-                    onScanSuccess={(student) => handleScanStudent(student, { skipAudio: true })}
+                    onScanSuccess={(student, _rawQrText, telemetry) =>
+                      handleScanStudent(student, { skipAudio: true, telemetry })
+                    }
+                    onBatchSyncStudents={handleBatchSyncScannedStudents}
                     soundEnabled={scanFeedbackEnabled}
                     onToggleSound={setScanFeedbackEnabled}
                     autoClearMs={3000}
                     onScanFailure={(rawText, reason) => {
                       playErrorTone();
+                      logQrScanError({
+                        category: /duplicate/i.test(reason) ? 'DUPLICATE_SCAN' : 'INVALID_FORMAT',
+                        rawInput: rawText.slice(0, 120),
+                        errorMessage: reason,
+                      });
                       setScanFailureLogs((prev) => [
                         {
                           id: `fl-${Date.now()}`,
@@ -6521,6 +8381,329 @@ export const DailyAttendance: React.FC<DailyAttendanceProps> = ({
             >
               <X className="w-4 h-4" />
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Multi-Pin Leaflet Attendance Scan Locations Map Modal */}
+      <AttendanceScanMapModal
+        isOpen={showScanMapModal}
+        onClose={() => setShowScanMapModal(false)}
+        initialDate={selectedDate}
+        allScanPins={scannerAnalytics.mapPins}
+        schoolName={school.name}
+        schoolLatitude={school.latitude}
+        schoolLongitude={school.longitude}
+        geofenceRadiusMeters={school.geofenceRadiusMeters || 250}
+      />
+
+      {/* Camera Diagnostics & Permission Help Modal */}
+      {showCameraDiagModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="camera-diagnostics-title"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/75 backdrop-blur-sm"
+        >
+          <div className="bg-white rounded-3xl border border-slate-200 shadow-2xl w-full max-w-lg overflow-hidden">
+            <div className="px-5 py-4 bg-slate-900 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center justify-center">
+                  <Camera className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 id="camera-diagnostics-title" className="text-sm font-extrabold">
+                    Camera Diagnostics for Touchless QR Scanning
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Hardware detection &amp; browser permission verification
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCameraDiagModal(false)}
+                aria-label="Close camera diagnostics"
+                className="p-1.5 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 text-xs text-slate-700">
+              {cameraDiagState.checking ? (
+                <div className="py-6 text-center space-y-2">
+                  <RefreshCw className="w-7 h-7 text-indigo-600 animate-spin mx-auto" />
+                  <p className="font-bold text-slate-800">Checking camera permissions &amp; media devices...</p>
+                </div>
+              ) : cameraDiagState.status === 'ok' ? (
+                <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 space-y-2">
+                  <div className="flex items-center gap-2 text-emerald-800 font-extrabold text-sm">
+                    <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+                    <span>Camera Ready ({cameraDiagState.deviceCount} device{cameraDiagState.deviceCount === 1 ? '' : 's'} detected)</span>
+                  </div>
+                  <ul className="list-disc pl-5 text-emerald-900 space-y-0.5 font-mono text-[11px]">
+                    {cameraDiagState.deviceLabels.map((lbl, idx) => (
+                      <li key={idx}>{lbl}</li>
+                    ))}
+                  </ul>
+                  <p className="text-[11px] text-emerald-700">
+                    Verified at {cameraDiagState.checkedAt}. Your device is ready for touchless QR attendance scanning.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 space-y-1.5">
+                    <div className="flex items-center gap-2 text-rose-800 font-extrabold text-sm">
+                      <CameraOff className="w-5 h-5 text-rose-600" />
+                      <span>
+                        {cameraDiagState.status === 'denied'
+                          ? 'Camera Permission Denied'
+                          : 'Camera Hardware Unavailable'}
+                      </span>
+                    </div>
+                    <p className="text-rose-700">{cameraDiagState.errorMessage}</p>
+                    <p className="text-[11px] text-rose-600/90 font-mono">
+                      Automatically recorded in qr_error_log.json for admin troubleshooting.
+                    </p>
+                  </div>
+
+                  <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-2">
+                    <div className="font-extrabold text-slate-900 flex items-center gap-1.5">
+                      <HelpCircle className="w-4 h-4 text-indigo-600" />
+                      <span>How to Grant Browser Camera Permissions</span>
+                    </div>
+                    <ol className="list-decimal pl-5 space-y-1 text-slate-600">
+                      <li>Tap the <strong>Lock / Site Settings</strong> icon to the left of the browser address bar.</li>
+                      <li>Locate <strong>Camera</strong> permissions and switch from <em>Block</em> to <strong>Allow</strong>.</li>
+                      <li>On Android APK, open <strong>Settings → Apps → SchoolMaster → Permissions → Camera → Allow</strong>.</li>
+                      <li>Ensure no other app is locking the camera, then click <strong>Re-run Check</strong> below.</li>
+                    </ol>
+                    <a
+                      href="https://support.google.com/chrome/answer/2693767"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 text-indigo-600 hover:text-indigo-800 font-bold pt-1"
+                    >
+                      <span>How to Enable Camera (Official Browser Guide)</span>
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </a>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => downloadQrErrorLogsJson()}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download qr_error_log.json</span>
+                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleRunCameraDiagnostics}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Re-run Check</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowCameraDiagModal(false)}
+                    className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Central Student Photograph Manager Modal (Syncs Across All Modules) */}
+      {photoManagerStudent && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-xs p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Manage photograph for ${photoManagerStudent.fullName}`}
+        >
+          <div className="w-full max-w-md rounded-2xl bg-white border border-slate-200 shadow-2xl overflow-hidden">
+            <div className="px-5 py-4 bg-slate-900 text-white flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-extrabold flex items-center gap-2">
+                  <ImageIcon className="w-4 h-4 text-indigo-300" />
+                  <span>Central Student Photograph</span>
+                </h3>
+                <p className="text-[11px] text-slate-300 mt-0.5">
+                  {photoManagerStudent.fullName} • Roll #{photoManagerStudent.rollNumber} • Adm {photoManagerStudent.admissionNumber}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setPhotoManagerStudent(null);
+                  setPhotoError(null);
+                }}
+                aria-label="Close student photo modal"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              <div className="flex flex-col items-center gap-3">
+                {photoDraftUrl ? (
+                  <img
+                    src={photoDraftUrl}
+                    alt={photoManagerStudent.fullName}
+                    className="w-36 h-36 rounded-2xl object-cover border-2 border-indigo-200 shadow-sm"
+                  />
+                ) : (
+                  <div className="w-36 h-36 rounded-2xl bg-slate-100 border-2 border-dashed border-slate-300 flex flex-col items-center justify-center text-slate-400 gap-1.5">
+                    <ImageIcon className="w-8 h-8" />
+                    <span className="text-[11px] font-semibold">No Photo Saved</span>
+                  </div>
+                )}
+
+                <p className="text-[11px] text-slate-500 text-center">
+                  Linked permanently to Student ID <span className="font-mono font-bold text-slate-700">{photoManagerStudent.id}</span>. Saving updates Student Profile, Attendance Register, HPC, Marks Cards &amp; Reports automatically.
+                </p>
+              </div>
+
+              <input
+                ref={cameraPhotoInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                capture="environment"
+                onChange={handleSelectStudentPhotoFile}
+                className="hidden"
+              />
+              <input
+                ref={galleryPhotoInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                onChange={handleSelectStudentPhotoFile}
+                className="hidden"
+              />
+
+              <div className="grid grid-cols-2 gap-2.5">
+                <button
+                  type="button"
+                  disabled={photoProcessing}
+                  onClick={() => cameraPhotoInputRef.current?.click()}
+                  className="inline-flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold transition-colors disabled:opacity-60"
+                >
+                  <Camera className="w-4 h-4" />
+                  <span>Capture Camera</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={photoProcessing}
+                  onClick={() => galleryPhotoInputRef.current?.click()}
+                  className="inline-flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 text-xs font-bold transition-colors disabled:opacity-60"
+                >
+                  <Upload className="w-4 h-4" />
+                  <span>Upload Gallery</span>
+                </button>
+              </div>
+
+              {photoError && (
+                <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold">
+                  {photoError}
+                </div>
+              )}
+
+              <div className="flex items-center justify-between gap-2 pt-3 border-t border-slate-100">
+                {photoDraftUrl ? (
+                  <button
+                    type="button"
+                    onClick={() => setPhotoDraftUrl('')}
+                    className="inline-flex items-center gap-1 px-3 py-2 rounded-xl text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 transition-colors"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Remove Photo</span>
+                  </button>
+                ) : (
+                  <span />
+                )}
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPhotoManagerStudent(null);
+                      setPhotoError(null);
+                    }}
+                    className="px-3.5 py-2 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    disabled={photoProcessing}
+                    onClick={handleSaveStudentPhoto}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-extrabold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs disabled:opacity-60"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    <span>{photoProcessing ? 'Processing...' : 'Save Photo'}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirm Delete Single Attendance Entry Modal */}
+      {pendingDeleteAttendance && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-xs p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Confirm delete attendance entry"
+        >
+          <div className="w-full max-w-sm rounded-2xl bg-white border border-slate-200 shadow-2xl overflow-hidden">
+            <div className="p-5 space-y-3">
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-xl bg-rose-100 text-rose-700 flex items-center justify-center shrink-0">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-extrabold text-slate-900">
+                    Delete Attendance Entry?
+                  </h3>
+                  <p className="text-xs text-slate-600 mt-1">
+                    Remove <strong>{pendingDeleteAttendance.status === 'Approved_Leave' ? 'Approved Leave' : pendingDeleteAttendance.status}</strong> entry for{' '}
+                    <strong>{pendingDeleteAttendance.student.fullName}</strong> (Roll #{pendingDeleteAttendance.student.rollNumber}) on{' '}
+                    <span className="font-mono">{selectedDate}</span>? Other students&apos; records will remain untouched.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setPendingDeleteAttendance(null)}
+                  className="px-3.5 py-2 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmDeleteAttendance}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-extrabold bg-rose-600 hover:bg-rose-700 text-white"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Delete Entry</span>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

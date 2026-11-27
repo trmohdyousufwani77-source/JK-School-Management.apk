@@ -17,7 +17,7 @@ import { ExaminationModule } from './components/ExaminationModule';
 import { ReportCardGenerator } from './components/ReportCardGenerator';
 import { TeacherPerformance } from './components/TeacherPerformance';
 import { ReportsCenter } from './components/ReportsCenter';
-import { SchoolSettings } from './components/SchoolSettings';
+import { SchoolSettings, SchoolSettingsSubTab } from './components/SchoolSettings';
 import { AcceptanceTestsModal } from './components/AcceptanceTestsModal';
 import { AndroidApkGuideModal } from './components/AndroidApkGuideModal';
 import { MultiPlatformAppModal } from './components/MultiPlatformAppModal';
@@ -37,10 +37,22 @@ import { defaultPendingSyncQueue } from './utils/syncDiagnostics';
 import { SchoolNameDesignEditor } from './components/SchoolNameDesignEditor';
 import { TeacherSubjectResultCard } from './components/TeacherSubjectResultCard';
 import { AboutUsAppInfo } from './components/AboutUsAppInfo';
+import { AiSmartEducationStudio } from './components/AiSmartEducationStudio';
+import { AiQuestionGenerator } from './components/AiQuestionGenerator';
+import { LessonPlanGenerator } from './components/LessonPlanGenerator';
+import { AiStudyChatbot } from './components/AiStudyChatbot';
+import { BiometricGradeGate } from './components/BiometricGradeGate';
+import { NoticeBoard } from './components/NoticeBoard';
 import { SmartIdCardMaker } from './components/SmartIdCardMaker';
 import { PrincipalManagement } from './components/PrincipalManagement';
 import { JkepmAppraisalPortal } from './components/JkepmAppraisalPortal';
+import { SmartDigitalAttendanceSystem } from './components/SmartDigitalAttendanceSystem';
+import { UrduNastaleeqPdfMaker } from './components/UrduNastaleeqPdfMaker';
+import { StudentPortalDashboard } from './components/StudentPortalDashboard';
+import { GlobalBiometricExportModal } from './components/BiometricExportGuard';
+import { setBiometricProtectionEnabled } from './utils/biometricProtection';
 import { SchoolEmblem } from './components/SchoolEmblem';
+import { observeAndRecoverRoute } from './utils/diagnosticsLogger';
 import {
   NEW_CPIS_CODE_OFFICIAL,
   OLD_CPIS_CODE_LEGACY,
@@ -64,9 +76,13 @@ import {
   subscribeFcmForegroundMessages,
 } from './firebase';
 import {
+  dispatchLeaveCancellationNotification,
   dispatchLeaveDecisionNotification,
+  dispatchLeaveUnderReviewNotification,
+  dispatchNewLeaveRequestNotification,
   emitPushNotification,
   evaluateAttendanceThresholdNotification,
+  evaluatePendingAttendanceReminders,
   evaluateUpcomingExamNotifications,
   monitorAttendanceAndNotifyPrincipal,
   runScheduledExamReminderCheck,
@@ -91,6 +107,8 @@ import {
   ExcelMappingSchema,
   IdCardDesignConfig,
   IdCardQrPrivacySettings,
+  NoticeBoardItem,
+  NoticePriority,
   PrincipalRecord,
   SchoolIdCardRecord,
   SchoolProfile,
@@ -157,11 +175,187 @@ function SchoolMasterApp() {
   const [currentTab, setCurrentTab] = useState<TabType>('dashboard');
   const [principalInitialMode, setPrincipalInitialMode] = useState<'list' | 'add' | 'edit'>('list');
   const [teacherSubTab, setTeacherSubTab] = useState<'jkhrms' | 'service-book' | 'jkepm' | 'attendance'>('jkhrms');
-  const [settingsSubTab, setSettingsSubTab] = useState<'profile' | 'administrative' | 'location' | 'grading' | 'holidays' | 'backup' | 'admin-access'>('profile');
+  const [settingsSubTab, setSettingsSubTab] = useState<SchoolSettingsSubTab>('profile');
   const [isSessionLocked, setIsSessionLocked] = useState<boolean>(false);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState<boolean>(false);
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [isSyncingCloud, setIsSyncingCloud] = useState<boolean>(false);
+  const [gradeModulesUnlocked, setGradeModulesUnlocked] = useState<boolean>(false);
+
+  // School Notice Board (persisted locally without altering existing school data)
+  const [notices, setNotices] = useState<NoticeBoardItem[]>(() => {
+    try {
+      const raw = localStorage.getItem(`${STORAGE_KEY_PREFIX}notices_v1`);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch {
+      // ignore malformed storage
+    }
+    const nowIso = new Date().toISOString();
+    const expiry1 = new Date(Date.now() + 21 * 86400000).toISOString().slice(0, 10);
+    const expiry2 = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+    return [
+      {
+        id: 'notice-seed-1',
+        title: 'Monthly Staff Meeting & Holistic Progress Card Verification',
+        body: 'All class teachers are requested to complete daily attendance verification and ensure student photographs are updated before the upcoming Holistic Progress Card (HPC) review meeting in the Headmaster Office.',
+        expirationDate: expiry1,
+        priority: 'Important',
+        pinned: true,
+        authorId: 'usr-admin-1',
+        authorName: 'Headmaster Office',
+        authorRole: 'Administrator',
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        readReceipts: [],
+      },
+      {
+        id: 'notice-seed-2',
+        title: 'Examination Schedule & Marks Entry Biometric Lock Notice',
+        body: 'Please note that Marks Entry and Examination modules now require biometric/authorized staff verification before submitting or editing academic grades. Contact the school office if your device needs verification assistance.',
+        expirationDate: expiry2,
+        priority: 'Normal',
+        pinned: false,
+        authorId: 'usr-admin-1',
+        authorName: 'Examination Cell',
+        authorRole: 'Administrator',
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        readReceipts: [],
+      },
+    ];
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(`${STORAGE_KEY_PREFIX}notices_v1`, JSON.stringify(notices));
+    } catch {
+      // ignore storage quota errors
+    }
+  }, [notices]);
+
+  const handleCreateNotice = (input: {
+    title: string;
+    body: string;
+    expirationDate: string;
+    priority: NoticePriority;
+    pinned: boolean;
+  }) => {
+    const nowIso = new Date().toISOString();
+    const newNotice: NoticeBoardItem = {
+      id: `notice-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      title: input.title,
+      body: input.body,
+      expirationDate: input.expirationDate,
+      priority: input.priority,
+      pinned: input.pinned,
+      authorId: currentUser.id,
+      authorName: currentUser.name,
+      authorRole:
+        effectiveRole === 'teacher'
+          ? 'Teacher'
+          : currentUser.role === 'head_teacher'
+          ? 'Headmaster'
+          : 'Administrator',
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      readReceipts: [
+        {
+          userId: currentUser.id,
+          staffName: currentUser.name,
+          role:
+            effectiveRole === 'teacher'
+              ? 'Teacher'
+              : currentUser.role === 'head_teacher'
+              ? 'Headmaster'
+              : 'Administrator',
+          readAt: nowIso,
+        },
+      ],
+    };
+    setNotices((prev) => [newNotice, ...prev]);
+  };
+
+  const handleUpdateNotice = (
+    noticeId: string,
+    updates: {
+      title: string;
+      body: string;
+      expirationDate: string;
+      priority: NoticePriority;
+      pinned: boolean;
+    }
+  ) => {
+    const nowIso = new Date().toISOString();
+    setNotices((prev) =>
+      prev.map((n) =>
+        n.id === noticeId
+          ? {
+              ...n,
+              ...updates,
+              updatedAt: nowIso,
+            }
+          : n
+      )
+    );
+  };
+
+  const handleDeleteNotice = (noticeId: string) => {
+    setNotices((prev) => prev.filter((n) => n.id !== noticeId));
+  };
+
+  const handleMarkNoticeRead = (noticeId: string) => {
+    const nowIso = new Date().toISOString();
+    const matchedTeacher = teachers.find(
+      (t) => t.id === currentUser.id || t.name.toLowerCase() === currentUser.name.toLowerCase()
+    );
+    setNotices((prev) =>
+      prev.map((n) => {
+        if (n.id !== noticeId) return n;
+        const alreadyRead = n.readReceipts.some(
+          (r) =>
+            r.userId === currentUser.id ||
+            r.staffName.toLowerCase() === currentUser.name.toLowerCase()
+        );
+        if (alreadyRead) return n;
+        return {
+          ...n,
+          readReceipts: [
+            ...n.readReceipts,
+            {
+              userId: currentUser.id,
+              staffName: currentUser.name,
+              role:
+                matchedTeacher?.designation ||
+                (effectiveRole === 'teacher'
+                  ? 'Teacher'
+                  : currentUser.role === 'head_teacher'
+                  ? 'Headmaster'
+                  : 'Administrator'),
+              employeeId: matchedTeacher?.employeeId,
+              readAt: nowIso,
+            },
+          ],
+        };
+      })
+    );
+  };
+
+  // NavigationObserver: capture navigation state and recover invalid deep-links to root '/'
+  useEffect(() => {
+    observeAndRecoverRoute(currentTab);
+  }, [currentTab]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handlePopState = () => {
+      observeAndRecoverRoute(currentTab);
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [currentTab]);
 
   // 3. Device simulation mode
   const [deviceView, setDeviceView] = useState<'desktop' | 'phone' | 'tablet'>('desktop');
@@ -180,119 +374,110 @@ function SchoolMasterApp() {
     localStorage.setItem(`${STORAGE_KEY_PREFIX}current_user`, JSON.stringify(currentUser));
   }, [currentUser]);
 
-  // 5. School Profile
+  // 5. School Profile (Primary Institution is editable and never forced back to Pamposh Colony)
   const [school, setSchool] = useState<SchoolProfile>(() => {
     const saved = localStorage.getItem(`${STORAGE_KEY_PREFIX}school`);
     if (saved) {
       try {
         const parsed: SchoolProfile = JSON.parse(saved);
+        const alreadyClearedLegacyDefault =
+          localStorage.getItem('sm_primary_institution_default_cleared_v1') === 'true';
+        const normalizedName = (parsed.name || '').trim().toLowerCase();
         if (
-          parsed.state === 'Uttar Pradesh' ||
-          !parsed.state ||
-          parsed.name.includes('Pattan') ||
-          parsed.name.includes('Model') ||
-          parsed.name.includes('Boys') ||
-          !parsed.nameUrdu ||
-          parsed.nameUrdu.includes('ماڈل')
+          !alreadyClearedLegacyDefault &&
+          (normalizedName === 'govt middle school pamposh colony' ||
+            normalizedName === 'govt middle school, pamposh colony' ||
+            normalizedName === 'government middle school pamposh colony' ||
+            normalizedName === 'government boys middle school pamposh colony')
         ) {
-          parsed.name = 'Govt Middle School Pamposh Colony';
-          parsed.nameUrdu = 'گورنمنٹ مڈل اسکول پامپوش کالونی';
-          parsed.nameHi = 'राजकीय मध्य विद्यालय पम्पोष कॉलोनी';
-          parsed.state = 'Jammu and Kashmir';
-          parsed.district = 'Srinagar';
-          parsed.villageTown = 'Pamposh Colony';
-          parsed.blockTehsil = 'Palapora Zone, Iddgah';
-          parsed.pinCode = '';
-          parsed.address = STANDARDIZED_ADDRESS;
-          parsed.locationAddress = 'Campus Main Gate, Pamposh Colony, Palapora Zone, Iddgah';
+          parsed.name = '';
+          parsed.nameUrdu = '';
+          parsed.nameHi = '';
+          localStorage.setItem('sm_primary_institution_default_cleared_v1', 'true');
         }
-        // Always migrate legacy Palpora/Tehsil Iddgah/190017 address to the updated official address
-        if (!parsed.address || isLegacySchoolAddress(parsed.address)) {
-          parsed.address = STANDARDIZED_ADDRESS;
-          parsed.villageTown = 'Pamposh Colony';
-          parsed.blockTehsil = 'Palapora Zone, Iddgah';
-          if (parsed.pinCode === '190017') parsed.pinCode = '';
-        }
-        if (!parsed.locationAddress || isLegacySchoolAddress(parsed.locationAddress)) {
-          parsed.locationAddress = 'Campus Main Gate, Pamposh Colony, Palapora Zone, Iddgah';
-        }
+        // Administrator identity is always permanently fixed to Mohd Yousuf Wani
+        parsed.adminName = 'Mohd Yousuf Wani';
         return parsed;
       } catch (e) { /* ignore */ }
     }
-    return initialSchoolProfile;
+    return {
+      ...initialSchoolProfile,
+      adminName: 'Mohd Yousuf Wani',
+    };
   });
 
   useEffect(() => {
-    localStorage.setItem(`${STORAGE_KEY_PREFIX}school`, JSON.stringify(school));
+    const normalizedSchool: SchoolProfile = {
+      ...school,
+      adminName: 'Mohd Yousuf Wani',
+    };
+    localStorage.setItem(`${STORAGE_KEY_PREFIX}school`, JSON.stringify(normalizedSchool));
+    setBiometricProtectionEnabled(Boolean(school.biometricProtectionEnabled));
   }, [school]);
 
-  // 5.5 Administrator / App Developer Profiles (About Us / App Information)
-  const [devAdminProfiles, setDevAdminProfiles] = useState<DeveloperAdminProfile[]>(() => {
-    const saved = localStorage.getItem(`${STORAGE_KEY_PREFIX}dev_profiles`);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      } catch (e) { /* ignore */ }
-    }
-    return [initialDeveloperAdminProfile];
-  });
-
-  const [activeDevAdminId, setActiveDevAdminId] = useState<string>(() => {
-    return localStorage.getItem(`${STORAGE_KEY_PREFIX}active_dev_profile_id`) || initialDeveloperAdminProfile.id;
-  });
-
+  // Hydrate Primary Institution from backend store if persisted server-side and local is unset
   useEffect(() => {
-    localStorage.setItem(`${STORAGE_KEY_PREFIX}dev_profiles`, JSON.stringify(devAdminProfiles));
-  }, [devAdminProfiles]);
+    fetch('/api/primary-institution')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data?.ok && typeof data.primaryInstitution === 'string' && data.primaryInstitution.trim()) {
+          setSchool((prev) => {
+            if (prev.name && prev.name.trim()) return prev;
+            return {
+              ...prev,
+              name: data.primaryInstitution.trim(),
+              adminName: 'Mohd Yousuf Wani',
+            };
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
 
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_KEY_PREFIX}active_dev_profile_id`, activeDevAdminId);
-  }, [activeDevAdminId]);
-
-  const activeDevAdmin =
-    devAdminProfiles.find((p) => p.id === activeDevAdminId) || devAdminProfiles[0] || initialDeveloperAdminProfile;
-
-  const syncSchoolWithAdminProfile = (prof: DeveloperAdminProfile) => {
-    localStorage.setItem('sm_admin_profile_name', prof.name);
+  // Safe School Profile updater: preserves Primary Institution edits while locking Administrator Identity
+  const handleUpdateSchoolProfile: React.Dispatch<React.SetStateAction<SchoolProfile>> = (
+    updater
+  ) => {
     setSchool((prev) => {
-      const locationChanged =
-        (prof.district && prof.district.toLowerCase() !== (prev.district || '').toLowerCase()) ||
-        (prof.locality && !(prev.address || '').toLowerCase().includes(prof.locality.toLowerCase()));
-
-      const updatedAddress = locationChanged
-        ? `${[prof.locality || prev.villageTown, prof.district ? `District ${prof.district}` : '', prof.unionTerritory || prev.state].filter(Boolean).join(', ')}${prev.pinCode ? ` - ${prev.pinCode}` : ''}`
-        : prev.address;
-
-      return {
-        ...prev,
-        name: prof.institution || prev.name,
-        adminName: prof.name,
-        district: prof.district || prev.district,
-        villageTown: prof.locality || prev.villageTown,
-        address: updatedAddress,
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      const protectedSchool: SchoolProfile = {
+        ...next,
+        adminName: 'Mohd Yousuf Wani',
       };
+      localStorage.setItem('sm_primary_institution_default_cleared_v1', 'true');
+      void fetch('/api/primary-institution', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ primaryInstitution: protectedSchool.name || '' }),
+      }).catch(() => {});
+      return protectedSchool;
     });
   };
 
-  const handleSaveDevAdminProfile = (updated: DeveloperAdminProfile) => {
-    setDevAdminProfiles((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
-    syncSchoolWithAdminProfile(updated);
+  // Independent Primary Institution updater (never touches Administrator Identity)
+  const handleUpdatePrimaryInstitution = (newInstitutionName: string) => {
+    const trimmed = newInstitutionName.trim();
+    localStorage.setItem('sm_primary_institution_default_cleared_v1', 'true');
+    setSchool((prev) => ({
+      ...prev,
+      name: trimmed,
+      adminName: 'Mohd Yousuf Wani',
+    }));
+    void fetch('/api/primary-institution', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ primaryInstitution: trimmed }),
+    }).catch(() => {});
   };
 
-  const handleAddDevAdminProfile = (created: DeveloperAdminProfile) => {
-    setDevAdminProfiles((prev) => [created, ...prev]);
-    setActiveDevAdminId(created.id);
-    syncSchoolWithAdminProfile(created);
-  };
+  // 5.5 Fixed / Protected Administrator & App Developer Identity (Always Mohd Yousuf Wani)
+  const fixedAdministratorProfile: DeveloperAdminProfile = initialDeveloperAdminProfile;
+  const devAdminProfiles: DeveloperAdminProfile[] = [fixedAdministratorProfile];
+  const activeDevAdminId = fixedAdministratorProfile.id;
+  const activeDevAdmin: DeveloperAdminProfile = fixedAdministratorProfile;
 
-  const handleSelectActiveDevAdmin = (profileId: string) => {
-    const found = devAdminProfiles.find((p) => p.id === profileId);
-    if (found) {
-      setActiveDevAdminId(found.id);
-      syncSchoolWithAdminProfile(found);
-    }
-  };
+  // Protected Administrator identity is permanently fixed across Android, iOS, Windows & Web
+  const handleSelectActiveDevAdmin = (_profileId: string) => {};
 
   // 5.7 Principal / Headmaster Records & Firebase Auth Sync
   const [principals, setPrincipals] = useState<PrincipalRecord[]>(() => {
@@ -317,7 +502,7 @@ function SchoolMasterApp() {
     });
     let unsubFcm: () => void = () => {};
     subscribeFcmForegroundMessages((payload) => {
-      const title = payload.notification?.title || payload.data?.title || 'GMS Pamposh Colony Alert';
+      const title = payload.notification?.title || payload.data?.title || 'SchoolMaster Alert';
       const body = payload.notification?.body || payload.data?.message || '';
       if (title || body) {
         emitPushNotification({
@@ -500,15 +685,15 @@ function SchoolMasterApp() {
             updated.district = 'Srinagar';
           }
           if (!updated.currentSchool || updated.currentSchool.includes('Pattan') || updated.currentSchool.includes('Model')) {
-            updated.currentSchool = 'Govt Middle School Pamposh Colony';
+            updated.currentSchool = school.name || '';
           }
           if (!updated.schoolName || updated.schoolName.includes('Pattan') || updated.schoolName.includes('Model')) {
-            updated.schoolName = 'Govt Middle School Pamposh Colony';
+            updated.schoolName = school.name || '';
           }
           if (updated.serviceHistory) {
             updated.serviceHistory = updated.serviceHistory.map((s) => {
               if (s.schoolName.includes('Pattan') || s.schoolName.includes('Model')) {
-                return { ...s, schoolName: 'Govt Middle School Pamposh Colony', district: 'Srinagar' };
+                return { ...s, schoolName: school.name || '', district: school.district || '' };
               }
               return s;
             });
@@ -1223,6 +1408,19 @@ function SchoolMasterApp() {
     }
   };
 
+  const handleDeleteAttendanceRecord = (
+    studentId: string,
+    date: string,
+    auditEntry?: AttendanceAuditLog
+  ) => {
+    setAttendanceRecords((prev) =>
+      prev.filter((r) => !(r.studentId === studentId && r.date === date))
+    );
+    if (auditEntry) {
+      setAuditLogs((prev) => [auditEntry, ...prev]);
+    }
+  };
+
   // Populate sample queue for testing or demoing sync progress bar (5 Marks, 3 Attendance)
   const handleSimulateSampleQueue = () => {
     setOfflineSyncQueue(defaultPendingSyncQueue);
@@ -1353,7 +1551,38 @@ function SchoolMasterApp() {
     [attendanceRecords, leaveApplications, offlineSyncQueue, students, teacherAttendance]
   );
 
-  // Automatically trigger Firebase 'Sync Now' when device regains internet after offline usage
+  // User-configurable Auto-Sync preference for Attendance settings (default ON)
+  const [autoSyncEnabled, setAutoSyncEnabled] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('sm_attendance_auto_sync_enabled_v1');
+      return saved === null ? true : saved === 'true';
+    } catch {
+      return true;
+    }
+  });
+
+  const handleToggleAutoSync = useCallback(
+    (enabled: boolean) => {
+      setAutoSyncEnabled(enabled);
+      try {
+        localStorage.setItem('sm_attendance_auto_sync_enabled_v1', String(enabled));
+      } catch {
+        // ignore storage errors
+      }
+      if (enabled && typeof navigator !== 'undefined' && navigator.onLine && !isOffline) {
+        const hasPending =
+          hadOfflinePeriodRef.current ||
+          offlineSyncQueue.length > 0 ||
+          attendanceRecords.some((r) => r.isOfflineSynced === false);
+        if (hasPending) {
+          void handleSyncOfflineData('auto-reconnect');
+        }
+      }
+    },
+    [attendanceRecords, handleSyncOfflineData, isOffline, offlineSyncQueue.length]
+  );
+
+  // Automatically trigger Firebase 'Sync Now' when device regains internet after offline usage (when Auto-Sync is enabled)
   useEffect(() => {
     const handleBrowserOffline = () => {
       hadOfflinePeriodRef.current = true;
@@ -1363,6 +1592,7 @@ function SchoolMasterApp() {
     };
 
     const handleBrowserOnline = () => {
+      if (!autoSyncEnabled) return;
       const hasUnsyncedLocal =
         hadOfflinePeriodRef.current ||
         offlineSyncQueue.length > 0 ||
@@ -1375,8 +1605,9 @@ function SchoolMasterApp() {
     window.addEventListener('offline', handleBrowserOffline);
     window.addEventListener('online', handleBrowserOnline);
 
-    // Also auto-sync if the user was offline before reload and is now back online
+    // Also auto-sync if the user was offline before reload and is now back online (when Auto-Sync is enabled)
     if (
+      autoSyncEnabled &&
       typeof navigator !== 'undefined' &&
       navigator.onLine &&
       !isOffline &&
@@ -1396,17 +1627,17 @@ function SchoolMasterApp() {
       window.removeEventListener('offline', handleBrowserOffline);
       window.removeEventListener('online', handleBrowserOnline);
     };
-  }, [attendanceRecords, handleSyncOfflineData, isOffline, offlineSyncQueue.length]);
+  }, [attendanceRecords, autoSyncEnabled, handleSyncOfflineData, isOffline, offlineSyncQueue.length]);
 
-  // Also trigger auto-sync when switching from Offline Mode -> Online Mode in-app
+  // Also trigger auto-sync when switching from Offline Mode -> Online Mode in-app (when Auto-Sync is enabled)
   useEffect(() => {
-    if (prevIsOfflineRef.current && !isOffline) {
+    if (prevIsOfflineRef.current && !isOffline && autoSyncEnabled) {
       if (typeof navigator === 'undefined' || navigator.onLine) {
         void handleSyncOfflineData('auto-reconnect');
       }
     }
     prevIsOfflineRef.current = isOffline;
-  }, [isOffline, handleSyncOfflineData]);
+  }, [autoSyncEnabled, isOffline, handleSyncOfflineData]);
 
   // Handlers for Leaves (Full CRUD + Review / Approve / Reject + Soft-Delete Audit + Offline Queue + API & Firestore Sync)
   const handleApplyLeave = (newLeave: TeacherLeaveApplication) => {
@@ -1439,6 +1670,7 @@ function SchoolMasterApp() {
       }).catch(() => {});
       syncTeacherLeaveToFirestore(newLeave, true).catch(() => {});
     }
+    dispatchNewLeaveRequestNotification(newLeave, school.code);
   };
 
   const handleUpdateLeave = (updatedLeave: TeacherLeaveApplication) => {
@@ -1504,6 +1736,7 @@ function SchoolMasterApp() {
       body: JSON.stringify({ deletedBy: currentUser.name, reason: deletionReason }),
     }).catch(() => {});
     syncTeacherLeaveToFirestore(archived, false).catch(() => {});
+    dispatchLeaveCancellationNotification(archived, deletionReason, school.code);
   };
 
   const handleMarkLeaveUnderReview = (leaveId: string, remarks: string) => {
@@ -1539,6 +1772,7 @@ function SchoolMasterApp() {
       body: JSON.stringify({ status: 'Under_Review', actorName: currentUser.name, headmasterRemarks: remarks }),
     }).catch(() => {});
     syncTeacherLeaveToFirestore(updated, false).catch(() => {});
+    dispatchLeaveUnderReviewNotification(updated, remarks, school.code);
   };
 
   const handleApproveLeave = (leaveId: string, remarks: string) => {
@@ -1597,7 +1831,7 @@ function SchoolMasterApp() {
       body: JSON.stringify({ status: 'Approved', actorName: currentUser.name, headmasterRemarks: remarks }),
     }).catch(() => {});
     syncTeacherLeaveToFirestore(updated, false).catch(() => {});
-    dispatchLeaveDecisionNotification(updated, 'Approved', remarks);
+    dispatchLeaveDecisionNotification(updated, 'Approved', remarks, school.code);
   };
 
   const handleRejectLeave = (leaveId: string, rejectionReason: string, remarks?: string) => {
@@ -1641,7 +1875,7 @@ function SchoolMasterApp() {
       }),
     }).catch(() => {});
     syncTeacherLeaveToFirestore(updated, false).catch(() => {});
-    dispatchLeaveDecisionNotification(updated, 'Rejected', combinedRemarks);
+    dispatchLeaveDecisionNotification(updated, 'Rejected', combinedRemarks, school.code);
   };
 
   // Handlers for Marks
@@ -1669,10 +1903,11 @@ function SchoolMasterApp() {
     const stopScheduler = startAutomatedNotificationScheduler(
       () => examinations,
       () => attendanceRecords,
-      () => students
+      () => students,
+      () => school.code
     );
     return () => stopScheduler();
-  }, [examinations, attendanceRecords, students]);
+  }, [examinations, attendanceRecords, students, school.code]);
 
   // Handlers for Free Textbook Distribution
   const handleAddTextbookRecord = (record: TextbookDistributionRecord) => {
@@ -1697,8 +1932,6 @@ function SchoolMasterApp() {
     setTextbookRecords(sampleTextbookRecords);
     setHolisticRecords(sampleHolisticRecords);
     setTeacherAttendance(sampleTeacherAttendanceRecords);
-    setDevAdminProfiles([initialDeveloperAdminProfile]);
-    setActiveDevAdminId(initialDeveloperAdminProfile.id);
     const resetDesign = getDefaultDesignConfig(initialSchoolProfile);
     setIdCardDesignConfig(resetDesign);
     setQrPrivacySettings(DEFAULT_QR_PRIVACY_SETTINGS);
@@ -1739,14 +1972,10 @@ function SchoolMasterApp() {
     URL.revokeObjectURL(url);
   };
 
-  // Import JSON backup
+  // Import JSON backup (never overwrites protected Administrator profiles)
   const handleImportBackup = (jsonStr: string) => {
     const data = JSON.parse(jsonStr);
     if (data.school) setSchool(data.school);
-    if (Array.isArray(data.devAdminProfiles) && data.devAdminProfiles.length > 0) {
-      setDevAdminProfiles(data.devAdminProfiles);
-    }
-    if (data.activeDevAdminId) setActiveDevAdminId(data.activeDevAdminId);
     if (data.students) setStudents(deduplicateStudentsByAdmissionNumber(data.students));
     if (data.teachers) setTeachers(data.teachers);
     if (data.attendanceRecords) setAttendanceRecords(data.attendanceRecords);
@@ -1843,6 +2072,24 @@ function SchoolMasterApp() {
             onCloudBackupSync={handleCloudBackupSync}
             onLockSession={() => setShowLogoutConfirm(true)}
             onUpdateSchool={setSchool}
+            isOffline={isOffline}
+            pendingAttendanceCount={
+              attendanceRecords.filter((r) => r.isOfflineSynced === false).length +
+              offlineSyncQueue.filter((i) => i.category === 'attendance' && i.status !== 'synced').length
+            }
+            pendingLeaveCount={
+              leaveApplications.filter((l) => l.status === 'Pending').length +
+              offlineSyncQueue.filter((i) => i.category === 'leave' && i.status !== 'synced').length
+            }
+            pendingSyncQueueCount={offlineSyncQueue.filter((i) => i.status !== 'synced').length}
+            isSyncingOffline={Boolean(syncProgress?.isSyncing)}
+            lastFirebaseSyncSummary={lastFirebaseSyncSummary}
+            onManualFirebaseSync={() => void handleSyncOfflineData('manual')}
+            notices={notices}
+            onCreateNotice={handleCreateNotice}
+            onUpdateNotice={handleUpdateNotice}
+            onDeleteNotice={handleDeleteNotice}
+            onMarkNoticeRead={handleMarkNoticeRead}
           />
         );
       case 'principal-management':
@@ -1941,16 +2188,24 @@ function SchoolMasterApp() {
         );
       case 'marks-entry':
         return (
-          <MarksEntryModule
-            students={students}
-            examinations={examinations}
-            marksEntries={marksEntries}
-            school={school}
+          <BiometricGradeGate
+            moduleName="Marks Entry"
             currentUser={currentUser}
-            language={language}
-            subjectConfigs={subjectConfigs}
-            onSaveMarks={handleSaveMarks}
-          />
+            isUnlocked={gradeModulesUnlocked}
+            onUnlock={() => setGradeModulesUnlocked(true)}
+            onLock={() => setGradeModulesUnlocked(false)}
+          >
+            <MarksEntryModule
+              students={students}
+              examinations={examinations}
+              marksEntries={marksEntries}
+              school={school}
+              currentUser={currentUser}
+              language={language}
+              subjectConfigs={subjectConfigs}
+              onSaveMarks={handleSaveMarks}
+            />
+          </BiometricGradeGate>
         );
       case 'evaluation-register':
         return (
@@ -1976,7 +2231,11 @@ function SchoolMasterApp() {
             attendanceRecords={attendanceRecords}
             auditLogs={auditLogs}
             isOffline={isOffline}
+            autoSyncEnabled={autoSyncEnabled}
+            onToggleAutoSync={handleToggleAutoSync}
             onSaveAttendance={handleSaveAttendance}
+            onDeleteAttendanceRecord={handleDeleteAttendanceRecord}
+            onUpdateStudent={handleUpdateStudent}
             onTriggerSyncOfflineData={handleSyncOfflineData}
             language={language}
           />
@@ -2111,18 +2370,26 @@ function SchoolMasterApp() {
         );
       case 'examinations':
         return (
-          <ExaminationModule
-            examinations={examinations}
-            students={students}
-            marksEntries={marksEntries}
-            school={school}
+          <BiometricGradeGate
+            moduleName="Examination"
             currentUser={currentUser}
-            subjectConfigs={subjectConfigs}
-            onSaveMarks={handleSaveMarks}
-            onAddExamination={handleAddExamination}
-            onUpdateExamination={handleUpdateExamination}
-            language={language}
-          />
+            isUnlocked={gradeModulesUnlocked}
+            onUnlock={() => setGradeModulesUnlocked(true)}
+            onLock={() => setGradeModulesUnlocked(false)}
+          >
+            <ExaminationModule
+              examinations={examinations}
+              students={students}
+              marksEntries={marksEntries}
+              school={school}
+              currentUser={currentUser}
+              subjectConfigs={subjectConfigs}
+              onSaveMarks={handleSaveMarks}
+              onAddExamination={handleAddExamination}
+              onUpdateExamination={handleUpdateExamination}
+              language={language}
+            />
+          </BiometricGradeGate>
         );
       case 'teacher-performance':
         return (
@@ -2168,18 +2435,92 @@ function SchoolMasterApp() {
         return (
           <SchoolSettings
             school={school}
-            onUpdateSchool={setSchool}
+            onUpdateSchool={handleUpdateSchoolProfile}
             onResetData={handleResetData}
             onExportBackup={handleExportBackup}
             onImportBackup={handleImportBackup}
             language={language}
             effectiveRole={effectiveRole}
             initialSubTab={settingsSubTab}
+            onTriggerOfflineSync={() => void handleSyncOfflineData('manual')}
             onOpenMultiPlatformModal={(plat) => {
               setSelectedModalPlatform(plat);
               setIsMultiPlatformModalOpen(true);
             }}
             onOpenDownloadHub={() => setIsDownloadHubOpen(true)}
+          />
+        );
+      case 'notice-board':
+        return (
+          <NoticeBoard
+            mode="full"
+            school={school}
+            currentUser={currentUser}
+            isAdmin={effectiveRole !== 'teacher'}
+            teachers={teachers}
+            notices={notices}
+            onCreateNotice={handleCreateNotice}
+            onUpdateNotice={handleUpdateNotice}
+            onDeleteNotice={handleDeleteNotice}
+            onMarkNoticeRead={handleMarkNoticeRead}
+          />
+        );
+      case 'digital-staff-attendance':
+        return (
+          <SmartDigitalAttendanceSystem
+            school={school}
+            currentUser={currentUser}
+            teachers={teachers}
+            onUpdateSchool={handleUpdateSchoolProfile}
+          />
+        );
+      case 'ai-question-generator':
+        return (
+          <AiQuestionGenerator
+            school={school}
+            currentUser={currentUser}
+          />
+        );
+      case 'lesson-plan-generator':
+        return (
+          <LessonPlanGenerator
+            school={school}
+            currentUser={currentUser}
+          />
+        );
+      case 'ai-smart-edu':
+        return (
+          <AiSmartEducationStudio
+            school={school}
+            currentUser={currentUser}
+            isAdmin={effectiveRole !== 'teacher'}
+          />
+        );
+      case 'urdu-pdf-maker':
+        return (
+          <UrduNastaleeqPdfMaker
+            school={school}
+            currentUser={currentUser}
+          />
+        );
+      case 'student-portal':
+        return (
+          <StudentPortalDashboard
+            school={school}
+            currentUser={currentUser}
+            students={students}
+            attendanceRecords={attendanceRecords}
+            examinations={examinations}
+            marksEntries={marksEntries}
+            notices={notices}
+            onMarkAttendance={handleSaveAttendance}
+          />
+        );
+      case 'ai-chatbot':
+        return (
+          <AiStudyChatbot
+            language={language}
+            schoolName={school.name}
           />
         );
       case 'about-us':
@@ -2189,10 +2530,9 @@ function SchoolMasterApp() {
             activeProfile={activeDevAdmin}
             school={school}
             language={language}
-            onUpdateSchool={setSchool}
-            onSaveProfile={handleSaveDevAdminProfile}
-            onAddProfile={handleAddDevAdminProfile}
+            onUpdatePrimaryInstitution={handleUpdatePrimaryInstitution}
             onSelectActiveProfile={handleSelectActiveDevAdmin}
+            onNavigateToChatbot={() => setCurrentTab('ai-chatbot')}
           />
         );
       default:
@@ -2262,6 +2602,7 @@ function SchoolMasterApp() {
         onOpenAboutUs={() => setCurrentTab('about-us')}
         onRunNotificationChecks={() => {
           monitorAttendanceAndNotifyPrincipal(attendanceRecords, students, 75, { force: true });
+          evaluatePendingAttendanceReminders(attendanceRecords, students, school.code, { force: true });
           evaluateUpcomingExamNotifications(examinations);
         }}
         students={students}
@@ -2269,6 +2610,7 @@ function SchoolMasterApp() {
           setFocusedStudentId(student.id);
           setCurrentTab('students');
         }}
+        onNavigateTab={(tab) => setCurrentTab(tab as Parameters<typeof setCurrentTab>[0])}
       />
 
       <div className="flex-1 flex max-w-7xl w-full mx-auto">
@@ -2401,6 +2743,13 @@ function SchoolMasterApp() {
                 {translations[language].attendance}
               </button>
               <button
+                onClick={() => { setCurrentTab('digital-staff-attendance'); setIsMobileMoreOpen(false); }}
+                className="p-3 rounded-xl bg-indigo-50 hover:bg-indigo-100 font-bold text-indigo-950 text-left border border-indigo-200 col-span-2 flex items-center justify-between"
+              >
+                <span>{language === 'ur' ? 'اسمارٹ ڈیجیٹل حاضری نظام' : 'Smart Digital Attendance System'}</span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-600 text-white font-extrabold">Face • ML • OD</span>
+              </button>
+              <button
                 onClick={() => { setCurrentTab('teacher-leave'); setIsMobileMoreOpen(false); }}
                 className="p-3 rounded-xl bg-slate-50 hover:bg-slate-100 font-semibold text-slate-800 text-left border"
               >
@@ -2417,7 +2766,21 @@ function SchoolMasterApp() {
                 className="p-3 rounded-xl bg-amber-50 hover:bg-amber-100 font-bold text-amber-950 text-left border border-amber-200 col-span-2 flex items-center justify-between"
               >
                 <span>{language === 'ur' ? 'ایپ اور ایڈمن پروفائل' : 'About Us & Admin Profile'}</span>
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-600 text-white font-extrabold">Editable</span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-700 text-white font-extrabold">Read-Only</span>
+              </button>
+              <button
+                onClick={() => { setCurrentTab('urdu-pdf-maker'); setIsMobileMoreOpen(false); }}
+                className="p-3 rounded-xl bg-emerald-50 hover:bg-emerald-100 font-bold text-emerald-950 text-left border border-emerald-200 col-span-2 flex items-center justify-between"
+              >
+                <span>{language === 'ur' ? 'اردو نستعلیق پی ڈی ایف میکر' : 'Urdu Nastaleeq PDF Maker'}</span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-600 text-white font-extrabold">Noori PDF</span>
+              </button>
+              <button
+                onClick={() => { setCurrentTab('student-portal'); setIsMobileMoreOpen(false); }}
+                className="p-3 rounded-xl bg-sky-50 hover:bg-sky-100 font-bold text-sky-950 text-left border border-sky-200 col-span-2 flex items-center justify-between"
+              >
+                <span>{language === 'ur' ? 'طالب علم ڈیش بورڈ' : 'Student Portal Dashboard'}</span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-600 text-white font-extrabold">Student</span>
               </button>
               <button
                 onClick={() => { setCurrentTab('banner-editor'); setIsMobileMoreOpen(false); }}
@@ -2573,6 +2936,8 @@ function SchoolMasterApp() {
           </div>
         </div>
       )}
+      {/* Global Biometric Protection Guard Modal for Sensitive Exports */}
+      <GlobalBiometricExportModal actorName={currentUser.name} />
     </div>
   );
 

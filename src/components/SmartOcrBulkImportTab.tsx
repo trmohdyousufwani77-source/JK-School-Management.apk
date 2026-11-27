@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
+import { guardSensitiveExport } from '../utils/biometricProtection';
 import { ExcelMappingSchema, OcrImportBatchHistory, SchoolProfile, Student, User } from '../types';
 import {
   applySchemaToUploadedHeaders,
@@ -677,11 +678,13 @@ export const SmartOcrBulkImportTab: React.FC<SmartOcrBulkImportTabProps> = ({
     XLSX.writeFile(wb, `School_20Col_Register_Template_${school.code}.xlsx`);
   };
 
-  const handleExportPopulatedTemplate = (source: 'ocr-preview' | 'filtered-students') => {
+  const handleExportPopulatedTemplate = async (source: 'ocr-preview' | 'filtered-students') => {
     if (templateColumns.length === 0) {
       setScanError('Upload an existing Excel template or load the 20-Column template first.');
       return;
     }
+    const allowed = await guardSensitiveExport('Populated Excel Template Export');
+    if (!allowed) return;
 
     const recordsToPopulate =
       source === 'ocr-preview'
@@ -716,7 +719,9 @@ export const SmartOcrBulkImportTab: React.FC<SmartOcrBulkImportTabProps> = ({
     );
   };
 
-  const handleExportRegisterExcel = () => {
+  const handleExportRegisterExcel = async () => {
+    const allowed = await guardSensitiveExport('Student Admission Register Excel');
+    if (!allowed) return;
     const rows = filteredExportStudents.map((s) => ({
       'Student ID': s.id,
       'Admission Number': s.admissionNumber,
@@ -743,7 +748,9 @@ export const SmartOcrBulkImportTab: React.FC<SmartOcrBulkImportTabProps> = ({
     XLSX.writeFile(wb, `Smart_Student_Register_${school.code}_${new Date().toISOString().slice(0, 10)}.xlsx`);
   };
 
-  const handleExportRegisterCsv = () => {
+  const handleExportRegisterCsv = async () => {
+    const allowed = await guardSensitiveExport('Student Admission Register CSV');
+    if (!allowed) return;
     const header = [
       'Admission Number',
       'Student Name',
@@ -784,7 +791,9 @@ export const SmartOcrBulkImportTab: React.FC<SmartOcrBulkImportTabProps> = ({
     URL.revokeObjectURL(url);
   };
 
-  const handleExportRegisterPdf = () => {
+  const handleExportRegisterPdf = async () => {
+    const allowed = await guardSensitiveExport('Student Admission Register PDF');
+    if (!allowed) return;
     const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
     pdf.setFontSize(14);
     pdf.text(`${school.name} — Official Student Admission Register`, 14, 14);

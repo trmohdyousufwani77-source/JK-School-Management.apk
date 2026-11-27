@@ -16,6 +16,8 @@ interface IdCardPreviewProps {
   design: IdCardDesignConfig;
   privacy: IdCardQrPrivacySettings;
   compact?: boolean;
+  qrPayloadOverride?: string;
+  qrHighlighted?: boolean;
 }
 
 export const IdCardPreview: React.FC<IdCardPreviewProps> = ({
@@ -23,6 +25,8 @@ export const IdCardPreview: React.FC<IdCardPreviewProps> = ({
   design,
   privacy,
   compact = false,
+  qrPayloadOverride,
+  qrHighlighted = false,
 }) => {
   const [qrUrl, setQrUrl] = useState<string>('');
 
@@ -58,7 +62,10 @@ export const IdCardPreview: React.FC<IdCardPreviewProps> = ({
       : 'text-[11px]';
 
   useEffect(() => {
-    const payload = buildIdCardQrPayload(card, privacy);
+    const payload =
+      qrPayloadOverride && qrPayloadOverride.trim().length > 0
+        ? qrPayloadOverride.trim()
+        : buildIdCardQrPayload(card, privacy);
     QRCode.toDataURL(payload, {
       width: 180,
       margin: 1,
@@ -67,7 +74,7 @@ export const IdCardPreview: React.FC<IdCardPreviewProps> = ({
     })
       .then((url) => setQrUrl(url))
       .catch(() => {});
-  }, [card, privacy]);
+  }, [card, privacy, qrPayloadOverride]);
 
   const mottoText = card.motto || design.motto;
   const emergencyText = card.emergencyContact || design.emergencyContact;
@@ -229,8 +236,12 @@ export const IdCardPreview: React.FC<IdCardPreviewProps> = ({
               {qrUrl && (
                 <img
                   src={qrUrl}
-                  alt="ID QR"
-                  className="w-16 h-16 rounded-md bg-white p-0.5 border border-slate-200 shrink-0"
+                  alt={qrPayloadOverride ? `Student QR (${qrPayloadOverride})` : 'ID QR'}
+                  className={`w-16 h-16 rounded-md bg-white p-0.5 shrink-0 transition-all ${
+                    qrHighlighted
+                      ? 'border-2 border-emerald-500 ring-2 ring-emerald-400/50'
+                      : 'border border-slate-200'
+                  }`}
                 />
               )}
               <div className="text-[9px] font-mono leading-tight space-y-0.5">
@@ -428,8 +439,12 @@ export const IdCardPreview: React.FC<IdCardPreviewProps> = ({
             {qrUrl && (
               <img
                 src={qrUrl}
-                alt="QR Verification"
-                className="w-[76px] h-[76px] rounded-lg bg-white p-0.5 border border-slate-200"
+                alt={qrPayloadOverride ? `Student QR (${qrPayloadOverride})` : 'QR Verification'}
+                className={`w-[76px] h-[76px] rounded-lg bg-white p-0.5 transition-all ${
+                  qrHighlighted
+                    ? 'border-2 border-emerald-500 ring-2 ring-emerald-400/50'
+                    : 'border border-slate-200'
+                }`}
               />
             )}
             <p className="text-[8px] font-mono text-slate-500 mt-0.5">EXP {card.expiryDate}</p>

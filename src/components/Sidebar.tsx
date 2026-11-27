@@ -23,6 +23,9 @@ import {
   Info,
   IdCard,
   ClipboardCheck,
+  Bot,
+  Megaphone,
+  FileText,
 } from 'lucide-react';
 import { Language, translations } from '../utils/translations';
 import { UserRole } from '../types';
@@ -35,6 +38,7 @@ export type TabType =
   | 'marks-entry'
   | 'evaluation-register'
   | 'attendance'
+  | 'digital-staff-attendance'
   | 'holistic-assessment'
   | 'progress-cards'
   | 'teacher-subject-results'
@@ -56,6 +60,13 @@ export type TabType =
   | 'id-card-maker'
   | 'principal-management'
   | 'jkepm-appraisal'
+  | 'notice-board'
+  | 'ai-question-generator'
+  | 'lesson-plan-generator'
+  | 'ai-smart-edu'
+  | 'ai-chatbot'
+  | 'urdu-pdf-maker'
+  | 'student-portal'
   | 'about-us';
 
 interface SidebarProps {
@@ -86,6 +97,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   // 11 Main Navigation Sections specified by Holistic Student Progress Card Management System
   const menuItems = [
     { id: 'dashboard' as TabType, label: t.dashboard || 'Dashboard', icon: LayoutDashboard },
+    { id: 'notice-board' as TabType, label: language === 'ur' ? 'نوٹس بورڈ' : 'Notice Board', icon: Megaphone },
     { id: 'principal-management' as TabType, label: language === 'ur' ? 'پرنسپل / ہیڈماسٹر' : 'Principal / Headmaster', icon: Crown },
     { id: 'students' as TabType, label: t.students || 'Students', icon: Users },
     { id: 'excel-import' as TabType, label: language === 'ur' ? 'اسمارٹ او سی آر و ایکسل امپورٹ' : 'Smart OCR & Excel Import', icon: FileSpreadsheet },
@@ -95,6 +107,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'marks-entry' as TabType, label: language === 'ur' ? 'اندراج نمبرات' : 'Marks Entry', icon: BookOpenCheck },
     { id: 'evaluation-register' as TabType, label: language === 'ur' ? 'تشخیصی رجسٹر' : 'Evaluation Register', icon: FileSpreadsheet },
     { id: 'attendance' as TabType, label: t.attendance || 'Attendance', icon: CalendarCheck },
+    { id: 'digital-staff-attendance' as TabType, label: language === 'ur' ? 'اسمارٹ ڈیجیٹل حاضری نظام' : 'Smart Digital Attendance', icon: ShieldCheck },
     { id: 'holistic-assessment' as TabType, label: language === 'ur' ? 'جامع تشخیص' : 'Holistic Assessment', icon: Sparkles },
     { id: 'progress-cards' as TabType, label: language === 'ur' ? 'ترقیاتی کارڈ' : 'Progress Cards', icon: Award },
     { id: 'id-card-maker' as TabType, label: language === 'ur' ? 'اسمارٹ شناختی کارڈ میکر' : 'Smart ID Card Maker', icon: IdCard },
@@ -131,6 +144,36 @@ export const Sidebar: React.FC<SidebarProps> = ({
       label: t.schoolSettings || 'Settings',
       icon: Settings,
       adminOnly: true,
+    },
+    {
+      id: 'ai-question-generator' as TabType,
+      label: language === 'ur' ? 'اے آئی سوالات جنریٹر' : 'AI Question Generator',
+      icon: FileSpreadsheet,
+    },
+    {
+      id: 'lesson-plan-generator' as TabType,
+      label: language === 'ur' ? 'سبق کا منصوبہ جنریٹر' : 'Lesson Plan Generator',
+      icon: ClipboardCheck,
+    },
+    {
+      id: 'ai-smart-edu' as TabType,
+      label: language === 'ur' ? 'اے آئی تدریسی و تعلیمی اسٹوڈیو' : 'AI Teaching & Learning Studio',
+      icon: Sparkles,
+    },
+    {
+      id: 'urdu-pdf-maker' as TabType,
+      label: language === 'ur' ? 'اردو نستعلیق پی ڈی ایف میکر' : 'Urdu Nastaleeq PDF Maker',
+      icon: FileText,
+    },
+    {
+      id: 'student-portal' as TabType,
+      label: language === 'ur' ? 'طالب علم ڈیش بورڈ' : 'Student Dashboard',
+      icon: GraduationCap,
+    },
+    {
+      id: 'ai-chatbot' as TabType,
+      label: language === 'ur' ? 'اے آئی اسٹڈی چیٹ بوٹ' : 'AI Study Chatbot',
+      icon: Bot,
     },
     {
       id: 'about-us' as TabType,

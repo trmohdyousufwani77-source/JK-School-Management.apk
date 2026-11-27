@@ -18,6 +18,7 @@ import { Language } from '../utils/translations';
 import { deduplicateStudentsByAdmissionNumber, formatSchoolAddressOnce } from '../utils/calculations';
 import { SmartOcrBulkImportTab } from './SmartOcrBulkImportTab';
 import { ExcelTemplateMappingPage } from './ExcelTemplateMappingPage';
+import { guardSensitiveExport } from '../utils/biometricProtection';
 
 interface ExcelStudentImportRegisterProps {
   students: Student[];
@@ -279,7 +280,9 @@ export const ExcelStudentImportRegister: React.FC<ExcelStudentImportRegisterProp
   };
 
   // Export Class-Wise Register to Excel
-  const handleExportClassToExcel = () => {
+  const handleExportClassToExcel = async () => {
+    const allowed = await guardSensitiveExport(`Class ${selectedClass} Student Register Excel`);
+    if (!allowed) return;
     const data = filteredClassStudents.map((s, idx) => ({
       'S. No.': idx + 1,
       'Student Name (Full Name)': s.fullName,

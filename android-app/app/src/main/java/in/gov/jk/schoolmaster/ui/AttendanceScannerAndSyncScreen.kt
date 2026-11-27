@@ -10,12 +10,16 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -34,9 +38,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.ArrowDropDown
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CloudDone
@@ -45,6 +51,7 @@ import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.PictureAsPdf
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material.icons.rounded.Search
@@ -53,9 +60,12 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -66,6 +76,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -104,6 +115,7 @@ import `in`.gov.jk.schoolmaster.data.local.StudentEntity
 import `in`.gov.jk.schoolmaster.data.local.TeacherAttendanceEntity
 import `in`.gov.jk.schoolmaster.security.LauncherIconAlias
 import `in`.gov.jk.schoolmaster.security.ScannerHistoryCsvExporter
+import `in`.gov.jk.schoolmaster.security.ScannerHistoryPdfExporter
 import `in`.gov.jk.schoolmaster.security.SecurityPreferences
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -227,10 +239,14 @@ fun AttendanceScannerAndSyncScreen(
         when (selectedSubTab) {
             0 -> OfflineQrAttendanceScannerView(
                 students = students,
-                onQrCodeScanned = onQrCodeScanned
+                scannerHistory = scannerHistory,
+                pendingSyncCount = pendingSyncCount,
+                onQrCodeScanned = onQrCodeScanned,
+                onSyncAllPending = onSyncAllPending
             )
             1 -> ScannerHistoryListView(scannerHistory = scannerHistory)
             else -> SyncStatusAndIconDashboard(
+                scannerHistory = scannerHistory,
                 teacherAttendance = teacherAttendance,
                 pendingSyncCount = pendingSyncCount,
                 onQueueOfflineAttendance = onQueueOfflineAttendance,
@@ -243,7 +259,10 @@ fun AttendanceScannerAndSyncScreen(
 @Composable
 private fun OfflineQrAttendanceScannerView(
     students: List<StudentEntity>,
-    onQrCodeScanned: (String) -> Unit
+    scannerHistory: List<ScannerHistoryEntity>,
+    pendingSyncCount: Int,
+    onQrCodeScanned: (String) -> Unit,
+    onSyncAllPending: () -> Unit
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -263,13 +282,64 @@ private fun OfflineQrAttendanceScannerView(
     var manualCode by remember { mutableStateOf("") }
     var lastScanFeedback by remember { mutableStateOf<String?>(null) }
     var lastScanMillis by remember { mutableLongStateOf(0L) }
+    var soundAndHapticsEnabled by remember { mutableStateOf(true) }
+    var manualOverrideEnabled by remember { mutableStateOf(false) }
+    var overrideSearchQuery by remember { mutableStateOf("") }
+    var selectedHistoryClassFilter by remember { mutableStateOf("All Classes") }
+    var historyFilterDropdownOpen by remember { mutableStateOf(false) }
+    var scanSuccessOverlayLabel by remember { mutableStateOf<String?>(null) }
+    var scanSuccessOverlayKey by remember { mutableLongStateOf(0L) }
+
+    LaunchedEffect(scanSuccessOverlayKey) {
+        if (scanSuccessOverlayKey > 0L) {
+            delay(1500L)
+            scanSuccessOverlayLabel = null
+        }
+    }
+
+    val todayPrefix = remember {
+        SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+    }
+    val todayScansByClass = remember(scannerHistory, students, todayPrefix) {
+        val studentMap = students.associateBy { it.id }
+        val uniqueToday = scannerHistory
+            .filter { SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(it.scannedAtMillis)) == todayPrefix }
+            .distinctBy { it.studentId }
+        val breakdown = linkedMapOf<String, Int>()
+        uniqueToday.forEach { entry ->
+            val st = studentMap[entry.studentId]
+            val label = if (st != null) "Class ${st.classNumber}-${st.section}" else entry.classSection.ifBlank { "Unassigned" }
+            breakdown[label] = (breakdown[label] ?: 0) + 1
+        }
+        uniqueToday.size to breakdown
+    }
+
+    val availableHistoryClasses = remember(students, todayScansByClass, scannerHistory) {
+        buildSet {
+            students.forEach { add("Class ${it.classNumber}-${it.section}") }
+            todayScansByClass.second.keys.forEach { add(it) }
+            scannerHistory.forEach { if (it.classSection.isNotBlank()) add(it.classSection) }
+        }.sorted()
+    }
 
     val handleDecodedPayload: (String) -> Unit = { decoded ->
         val now = System.currentTimeMillis()
         if (now - lastScanMillis > 1800L) {
             lastScanMillis = now
+            if (soundAndHapticsEnabled) {
+                triggerClassroomScanConfirmation(context)
+            }
+            val matched = students.find {
+                it.admissionNumber.equals(decoded.trim(), ignoreCase = true) ||
+                    it.id.equals(decoded.trim(), ignoreCase = true) ||
+                    decoded.contains(it.admissionNumber, ignoreCase = true)
+            }
+            scanSuccessOverlayLabel = matched?.let {
+                "${it.fullName} · Class ${it.classNumber}-${it.section}"
+            } ?: decoded.lines().firstOrNull()?.take(42) ?: "Marked Present"
+            scanSuccessOverlayKey = now
             onQrCodeScanned(decoded)
-            lastScanFeedback = "QR scanned & queued offline: ${decoded.lines().firstOrNull() ?: decoded}"
+            lastScanFeedback = "QR scanned & marked Present: ${decoded.lines().firstOrNull() ?: decoded}"
         }
     }
 
@@ -279,6 +349,390 @@ private fun OfflineQrAttendanceScannerView(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        // Daily Scan Summary Card with Class-Wise Breakdown
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFFEEF2FF)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "Daily Scan Summary ($todayPrefix)",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF0F172A)
+                        )
+                        Text(
+                            text = "Students marked 'Present' via QR today",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF475569)
+                        )
+                    }
+                    Text(
+                        text = "${todayScansByClass.first} Present",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFF047857)
+                    )
+                }
+                if (todayScansByClass.second.isNotEmpty()) {
+                    todayScansByClass.second.entries.sortedBy { it.key }.forEach { (clsLabel, cnt) ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(clsLabel, style = MaterialTheme.typography.bodySmall, color = Color(0xFF1E293B))
+                            Text(
+                                "$cnt Present",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF059669)
+                            )
+                        }
+                    }
+                }
+                // Class Filter Dropdown Menu inside Summary Card for Last 5 Scan History Log
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Filter Scan History by Class",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFF334155)
+                    )
+                    Box {
+                        OutlinedButton(
+                            onClick = { historyFilterDropdownOpen = true },
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text(
+                                text = selectedHistoryClassFilter,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Icon(
+                                imageVector = Icons.Rounded.ArrowDropDown,
+                                contentDescription = "Filter scan history by class"
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = historyFilterDropdownOpen,
+                            onDismissRequest = { historyFilterDropdownOpen = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("All Classes") },
+                                onClick = {
+                                    selectedHistoryClassFilter = "All Classes"
+                                    historyFilterDropdownOpen = false
+                                }
+                            )
+                            availableHistoryClasses.forEach { clsOption ->
+                                DropdownMenuItem(
+                                    text = { Text(clsOption) },
+                                    onClick = {
+                                        selectedHistoryClassFilter = clsOption
+                                        historyFilterDropdownOpen = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+                if (pendingSyncCount > 0) {
+                    val totalTracked = (todayScansByClass.first + pendingSyncCount).coerceAtLeast(pendingSyncCount)
+                    val syncedCount = (totalTracked - pendingSyncCount).coerceAtLeast(0)
+                    val syncFraction = if (totalTracked > 0) syncedCount.toFloat() / totalTracked.toFloat() else 0f
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFFFFFBEB))
+                            .border(1.dp, Color(0xFFFDE68A), RoundedCornerShape(10.dp))
+                            .padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "$pendingSyncCount unsynced record(s) remaining",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF92400E)
+                            )
+                            Text(
+                                text = "$syncedCount/$totalTracked synced (${(syncFraction * 100).toInt()}%)",
+                                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF475569)
+                            )
+                        }
+                        LinearProgressIndicator(
+                            progress = { syncFraction },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(7.dp)
+                                .clip(RoundedCornerShape(4.dp)),
+                            color = Color(0xFF059669),
+                            trackColor = Color(0xFFFDE68A)
+                        )
+                        OutlinedButton(
+                            onClick = onSyncAllPending,
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.align(Alignment.End)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Sync,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Sync Remaining ($pendingSyncCount)", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Scan History Log — Last 5 Successful Student Scans with Timestamps (filtered by class)
+        val lastFiveScans = remember(scannerHistory, selectedHistoryClassFilter) {
+            scannerHistory
+                .filter { entry ->
+                    selectedHistoryClassFilter == "All Classes" ||
+                        entry.classSection.equals(selectedHistoryClassFilter, ignoreCase = true) ||
+                        "Class ${entry.classSection}".equals(selectedHistoryClassFilter, ignoreCase = true)
+                }
+                .sortedByDescending { it.scannedAtMillis }
+                .take(5)
+        }
+        val scanTimeFormatter = remember { SimpleDateFormat("HH:mm:ss", Locale.US) }
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.White),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (selectedHistoryClassFilter == "All Classes") {
+                            "Scan History — Last 5 Scans"
+                        } else {
+                            "Scan History ($selectedHistoryClassFilter)"
+                        },
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF0F172A)
+                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                val exported = ScannerHistoryPdfExporter.exportScanHistoryToPdf(
+                                    context = context,
+                                    dateLabel = todayPrefix,
+                                    totalScannedToday = todayScansByClass.first,
+                                    classBreakdown = todayScansByClass.second,
+                                    entries = lastFiveScans,
+                                    classFilterLabel = selectedHistoryClassFilter
+                                )
+                                lastScanFeedback = if (exported != null) {
+                                    "Exported scan history PDF: ${exported.name}"
+                                } else {
+                                    "Unable to export scan history PDF."
+                                }
+                            },
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.PictureAsPdf,
+                                contentDescription = "Export scan history PDF",
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("PDF", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                        }
+                        Text(
+                            text = "${lastFiveScans.size} / 5",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF475569)
+                        )
+                    }
+                }
+                if (lastFiveScans.isEmpty()) {
+                    Text(
+                        text = if (selectedHistoryClassFilter == "All Classes") {
+                            "No successful scans yet. Last 5 student scans with timestamps will appear here."
+                        } else {
+                            "No successful scans yet for $selectedHistoryClassFilter."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF64748B)
+                    )
+                } else {
+                    lastFiveScans.forEach { entry ->
+                        val initials = entry.studentName
+                            .trim()
+                            .split(Regex("\\s+"))
+                            .take(2)
+                            .mapNotNull { it.firstOrNull()?.uppercaseChar() }
+                            .joinToString("")
+                            .ifBlank { "ST" }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(32.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFFEEF2FF))
+                                        .border(1.dp, Color(0xFFC7D2FE), CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = initials,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF3730A3)
+                                    )
+                                }
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = entry.studentName,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF0F172A)
+                                    )
+                                    Text(
+                                        text = "${entry.classSection} · ${entry.admissionNumber} · ${entry.syncStatus}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFF64748B)
+                                    )
+                                }
+                            }
+                            Text(
+                                text = scanTimeFormatter.format(Date(entry.scannedAtMillis)),
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF059669)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Classroom Sound/Haptic + Manual Override Controls
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            FilterChip(
+                selected = soundAndHapticsEnabled,
+                onClick = { soundAndHapticsEnabled = !soundAndHapticsEnabled },
+                label = { Text(if (soundAndHapticsEnabled) "Beep & Haptics On" else "Sound Muted") }
+            )
+            FilterChip(
+                selected = manualOverrideEnabled,
+                onClick = { manualOverrideEnabled = !manualOverrideEnabled },
+                label = { Text(if (manualOverrideEnabled) "Manual Override: ON" else "Manual Override") }
+            )
+        }
+
+        if (manualOverrideEnabled) {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFFFFFBEB)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "Manual Override — Missing or Damaged ID Card",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF92400E)
+                    )
+                    OutlinedTextField(
+                        value = overrideSearchQuery,
+                        onValueChange = { overrideSearchQuery = it },
+                        placeholder = { Text("Search student by name...") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    val filtered = remember(students, overrideSearchQuery) {
+                        val q = overrideSearchQuery.trim().lowercase()
+                        if (q.isEmpty()) students.take(5)
+                        else students.filter {
+                            it.fullName.lowercase().contains(q) ||
+                                it.admissionNumber.lowercase().contains(q) ||
+                                it.classNumber.lowercase().contains(q)
+                        }.take(8)
+                    }
+                    filtered.forEach { st ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(st.fullName, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+                                Text(
+                                    "Class ${st.classNumber}-${st.section} · ${st.admissionNumber}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF64748B)
+                                )
+                            }
+                            Button(
+                                onClick = {
+                                    if (soundAndHapticsEnabled) {
+                                        triggerClassroomScanConfirmation(context)
+                                    }
+                                    onQrCodeScanned(st.admissionNumber)
+                                    lastScanFeedback = "Manual Override: ${st.fullName} marked Present"
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669))
+                            ) {
+                                Text("Mark Present")
+                            }
+                        }
+                    }
+                }
+            }
+        }
         Card(
             shape = RoundedCornerShape(20.dp),
             colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
@@ -407,6 +861,56 @@ private fun OfflineQrAttendanceScannerView(
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                     )
+                }
+                // 'Scan Successful' Animated Overlay over the Camera Viewport
+                AnimatedVisibility(
+                    visible = scanSuccessOverlayLabel != null,
+                    enter = fadeIn(tween(180)) + scaleIn(initialScale = 0.86f, animationSpec = tween(220)),
+                    exit = fadeOut(tween(260)),
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color(0xC0064E3B)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                            modifier = Modifier.padding(16.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(60.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF10B981)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.CheckCircle,
+                                    contentDescription = "Scan Successful",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(36.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Scan Successful",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color.White
+                            )
+                            scanSuccessOverlayLabel?.let { label ->
+                                Text(
+                                    text = label,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFFA7F3D0)
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1008,6 +1512,43 @@ fun SyncStatusDashboardCard(
                 }
             }
 
+            // Granular Remaining Sync Progress Indicator
+            val totalRecords = teacherAttendance.size.coerceAtLeast(pendingSyncCount)
+            val syncedRecords = (totalRecords - pendingSyncCount).coerceAtLeast(0)
+            val syncRatio = if (totalRecords > 0) syncedRecords.toFloat() / totalRecords.toFloat() else 1f
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = if (pendingSyncCount > 0) {
+                            "$pendingSyncCount record(s) remaining to upload"
+                        } else {
+                            "All local attendance records synced"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (pendingSyncCount > 0) Color(0xFF92400E) else Color(0xFF047857)
+                    )
+                    Text(
+                        text = "$syncedRecords/$totalRecords (${(syncRatio * 100).toInt()}%)",
+                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF475569)
+                    )
+                }
+                LinearProgressIndicator(
+                    progress = { syncRatio },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(8.dp)
+                        .clip(RoundedCornerShape(4.dp)),
+                    color = if (isSyncing) Color(0xFF4F46E5) else Color(0xFF059669),
+                    trackColor = if (pendingSyncCount > 0) Color(0xFFFDE68A) else Color(0xFFE2E8F0)
+                )
+            }
+
             // 7-Day Pending Sync Trend Chart (Compose Canvas)
             Column(
                 modifier = Modifier
@@ -1120,6 +1661,7 @@ fun SyncStatusDashboardCard(
 
 @Composable
 private fun SyncStatusAndIconDashboard(
+    scannerHistory: List<ScannerHistoryEntity>,
     teacherAttendance: List<TeacherAttendanceEntity>,
     pendingSyncCount: Int,
     onQueueOfflineAttendance: () -> Unit,
@@ -1127,6 +1669,13 @@ private fun SyncStatusAndIconDashboard(
 ) {
     val context = LocalContext.current
     var activeAlias by remember { mutableStateOf(SecurityPreferences.getActiveLauncherIconAlias(context)) }
+    var autoSyncEnabled by remember {
+        mutableStateOf(SecurityPreferences.isAttendanceAutoSyncEnabled(context))
+    }
+    var pendingCsvFeedback by remember { mutableStateOf<String?>(null) }
+    val pendingScanCount = remember(scannerHistory) {
+        scannerHistory.count { it.syncStatus.equals("PENDING", ignoreCase = true) }
+    }
 
     Column(
         modifier = Modifier
@@ -1140,6 +1689,69 @@ private fun SyncStatusAndIconDashboard(
             onQueueOfflineAttendance = onQueueOfflineAttendance,
             onSyncAllPending = onSyncAllPending
         )
+
+        // Attendance Sync Settings: Auto-Sync Toggle + Pending Local Scans CSV Export
+        Card(
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.White),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Auto-Sync on Network Reconnect",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF0F172A)
+                        )
+                        Text(
+                            text = "Automatically sync pending offline records to Firebase the moment internet returns",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF64748B)
+                        )
+                    }
+                    androidx.compose.material3.Switch(
+                        checked = autoSyncEnabled,
+                        onCheckedChange = { enabled ->
+                            autoSyncEnabled = enabled
+                            SecurityPreferences.setAttendanceAutoSyncEnabled(context, enabled)
+                        }
+                    )
+                }
+
+                Button(
+                    onClick = {
+                        val file = `in`.gov.jk.schoolmaster.security.ScannerHistoryCsvExporter
+                            .exportPendingScansToTempCsvFile(context, scannerHistory)
+                        pendingCsvFeedback = if (file != null) {
+                            "Exported $pendingScanCount pending scan(s) to ${file.name}"
+                        } else {
+                            "No pending local scan records to export."
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD97706)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Export Pending Local Scans CSV ($pendingScanCount)")
+                }
+
+                if (!pendingCsvFeedback.isNullOrBlank()) {
+                    Text(
+                        text = pendingCsvFeedback ?: "",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF047857)
+                    )
+                }
+            }
+        }
 
         // Dynamic Android Launcher Icon Alias Selector
         Card(

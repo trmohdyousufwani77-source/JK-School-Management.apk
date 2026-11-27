@@ -17,6 +17,7 @@ import {
   Clock,
   Check,
 } from 'lucide-react';
+import { guardSensitiveExport } from '../utils/biometricProtection';
 import {
   Examination,
   SchoolProfile,
@@ -255,7 +256,9 @@ export const EvaluationRegister: React.FC<EvaluationRegisterProps> = ({
     showToast(`Evaluation record for ${item.studentName} successfully synchronized!`);
   };
 
-  const handleExportExcel = () => {
+  const handleExportExcel = async () => {
+    const allowed = await guardSensitiveExport(`Evaluation Register Excel (Class ${selectedClass})`);
+    if (!allowed) return;
     const data = filteredRecords.map((r) => ({
       'Roll No': r.rollNumber,
       'Student Name': r.studentName,

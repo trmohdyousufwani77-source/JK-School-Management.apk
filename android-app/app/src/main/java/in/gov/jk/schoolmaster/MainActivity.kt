@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Badge
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Lock
@@ -65,6 +66,7 @@ import androidx.fragment.app.FragmentActivity
 import `in`.gov.jk.schoolmaster.data.local.SchoolMasterDatabase
 import `in`.gov.jk.schoolmaster.data.local.SchoolMasterRepository
 import `in`.gov.jk.schoolmaster.security.OfficialLogoStore
+import `in`.gov.jk.schoolmaster.ui.AiSmartEduScreen
 import `in`.gov.jk.schoolmaster.ui.AppUpdatesScreen
 import `in`.gov.jk.schoolmaster.ui.AttendanceScannerAndSyncScreen
 import `in`.gov.jk.schoolmaster.ui.DirectoryScreen
@@ -97,6 +99,7 @@ private enum class AppTab(val label: String) {
     PROTECTED("Protected"),
     PORTAL("Portal"),
     QR_IDS("QR IDs"),
+    AI_EDU("AI Edu"),
     UPDATES("Settings")
 }
 
@@ -152,6 +155,18 @@ fun SchoolMasterApp(activity: FragmentActivity) {
     var selectedStudentId by remember { mutableStateOf<String?>(null) }
     var selectedTeacherId by remember { mutableStateOf<String?>(null) }
     var sensitiveModulesUnlocked by remember { mutableStateOf(false) }
+    var wasOffline by remember { mutableStateOf(!isOnline) }
+
+    LaunchedEffect(isOnline) {
+        if (!isOnline) {
+            wasOffline = true
+        } else if (wasOffline) {
+            wasOffline = false
+            if (`in`.gov.jk.schoolmaster.security.SecurityPreferences.isAttendanceAutoSyncEnabled(context)) {
+                repository.syncAllPendingTeacherAttendance()
+            }
+        }
+    }
 
     val students by remember(searchQuery) {
         repository.observeStudents(searchQuery)
@@ -261,6 +276,13 @@ fun SchoolMasterApp(activity: FragmentActivity) {
                     }
                 },
                 actions = {
+                    IconButton(onClick = { activeTab = AppTab.AI_EDU }) {
+                        Icon(
+                            imageVector = Icons.Rounded.AutoAwesome,
+                            contentDescription = "AI Smart Education",
+                            tint = if (activeTab == AppTab.AI_EDU) Color(0xFF4F46E5) else Color(0xFF475569)
+                        )
+                    }
                     IconButton(onClick = { activeTab = AppTab.QR_IDS }) {
                         Icon(
                             imageVector = Icons.Rounded.QrCode2,
@@ -464,6 +486,8 @@ fun SchoolMasterApp(activity: FragmentActivity) {
                 },
                 modifier = contentModifier
             )
+
+            AppTab.AI_EDU -> AiSmartEduScreen(modifier = contentModifier)
 
             AppTab.PORTAL -> SchoolPortalWebView(modifier = contentModifier)
         }

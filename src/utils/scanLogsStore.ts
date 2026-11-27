@@ -18,6 +18,12 @@ export interface PersistentScanLogEntry {
   source: ScanLogSource;
   rawPayload: string;
   syncState: 'synced' | 'queued';
+  cameraDetectMs?: number;
+  scanToDbMs?: number;
+  deviceId?: string;
+  networkSignalDbm?: number | null;
+  latitude?: number;
+  longitude?: number;
 }
 
 export interface ScanLogFilterOptions {

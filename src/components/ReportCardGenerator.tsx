@@ -58,6 +58,7 @@ import {
   User,
 } from '../types';
 import { Language, translations } from '../utils/translations';
+import { TeacherRemarksAutoFit } from './TeacherRemarksAutoFit';
 import {
   calculateStudentExamSummary,
   deduplicateStudentsByAdmissionNumber,
@@ -2335,16 +2336,19 @@ const SingleStudentProgressCardView: React.FC<SingleStudentProgressCardViewProps
         </div>
 
         <div className="p-2 bg-slate-50 rounded-lg border border-slate-200 overflow-hidden">
-          <p className="text-slate-600 text-[clamp(7px,1.35vw,11px)] print:text-[9.5px] leading-tight whitespace-nowrap tracking-tight">
-            <strong className="text-slate-800 font-bold">Teacher Remarks:</strong>{' '}
-            {(
-              hol.teacherRemarks ||
-              'Diligent learner demonstrating steady holistic growth across academic and Co-Scholastic activities.'
-            )
-              .replace(/^teacher remarks:\s*/i, '')
-              .replace(/\s+/g, ' ')
-              .trim()}
-          </p>
+          <div className="flex items-center gap-1.5 overflow-hidden whitespace-nowrap">
+            <strong className="text-slate-800 font-bold text-[10px] shrink-0">Teacher Remarks:</strong>
+            <TeacherRemarksAutoFit
+              text={(
+                hol.teacherRemarks ||
+                'Diligent learner demonstrating steady holistic growth across academic and Co-Scholastic activities.'
+              ).replace(/^teacher remarks:\s*/i, '')}
+              maxLength={150}
+              defaultFontSizePx={11}
+              minFontSizePx={7.5}
+              className="text-slate-600 flex-1 min-w-0"
+            />
+          </div>
         </div>
 
         <div className="grid grid-cols-2 gap-2">
@@ -3663,8 +3667,33 @@ const HolisticProgressCardModal: React.FC<HolisticProgressCardModalProps> = ({
                     <textarea rows={2} value={draftHolistic.areasForImprovement} onChange={(e) => setDraftHolistic({ ...draftHolistic, areasForImprovement: e.target.value })} className="w-full p-2 rounded-lg border border-indigo-200 bg-white text-xs" />
                   </div>
                   <div>
-                    <label className="block text-[10px] font-bold text-slate-700 uppercase mb-0.5">11. Teacher Remarks</label>
-                    <textarea rows={2} value={draftHolistic.teacherRemarks} onChange={(e) => setDraftHolistic({ ...draftHolistic, teacherRemarks: e.target.value })} className="w-full p-2 rounded-lg border border-indigo-200 bg-white text-xs" />
+                    <div className="flex items-center justify-between mb-0.5">
+                      <label className="block text-[10px] font-bold text-slate-700 uppercase">
+                        11. Teacher Remarks (Single-Line Auto-Fit)
+                      </label>
+                      <span
+                        className={`text-[10px] font-mono font-bold ${
+                          (draftHolistic.teacherRemarks || '').length >= 140
+                            ? 'text-amber-600'
+                            : 'text-slate-500'
+                        }`}
+                      >
+                        {(draftHolistic.teacherRemarks || '').length} / 150
+                      </span>
+                    </div>
+                    <textarea
+                      rows={2}
+                      maxLength={150}
+                      value={(draftHolistic.teacherRemarks || '').slice(0, 150)}
+                      onChange={(e) =>
+                        setDraftHolistic({
+                          ...draftHolistic,
+                          teacherRemarks: e.target.value.slice(0, 150),
+                        })
+                      }
+                      placeholder="Concise single-line remark (max 150 characters)..."
+                      className="w-full p-2 rounded-lg border border-indigo-200 bg-white text-xs"
+                    />
                   </div>
                   <div>
                     <label className="block text-[10px] font-bold text-slate-700 uppercase mb-0.5">12. Parent Remarks &amp; Suggestions</label>
@@ -3725,16 +3754,19 @@ const HolisticProgressCardModal: React.FC<HolisticProgressCardModalProps> = ({
 
                 <div className="grid grid-cols-1 gap-2">
                   <div className="p-2 bg-slate-50 rounded-lg border border-slate-200 overflow-hidden">
-                    <p className="text-slate-600 text-[clamp(7px,1.35vw,11px)] print:text-[9.5px] leading-tight whitespace-nowrap tracking-tight">
-                      <strong className="text-slate-800 font-bold">Teacher Remarks:</strong>{' '}
-                      {(
-                        baseHolistic.teacherRemarks ||
-                        'Diligent learner demonstrating steady holistic growth across academic and Co-Scholastic activities.'
-                      )
-                        .replace(/^teacher remarks:\s*/i, '')
-                        .replace(/\s+/g, ' ')
-                        .trim()}
-                    </p>
+                    <div className="flex items-center gap-1.5 overflow-hidden whitespace-nowrap">
+                      <strong className="text-slate-800 font-bold text-[10px] shrink-0">Teacher Remarks:</strong>
+                      <TeacherRemarksAutoFit
+                        text={(
+                          baseHolistic.teacherRemarks ||
+                          'Diligent learner demonstrating steady holistic growth across academic and Co-Scholastic activities.'
+                        ).replace(/^teacher remarks:\s*/i, '')}
+                        maxLength={150}
+                        defaultFontSizePx={11}
+                        minFontSizePx={7.5}
+                        className="text-slate-600 flex-1 min-w-0"
+                      />
+                    </div>
                   </div>
                   <div className="p-2 bg-slate-50 rounded-lg border border-slate-200">
                     <strong className="text-slate-800 block text-[10px] uppercase font-bold">Parent Remarks &amp; Suggestions:</strong>

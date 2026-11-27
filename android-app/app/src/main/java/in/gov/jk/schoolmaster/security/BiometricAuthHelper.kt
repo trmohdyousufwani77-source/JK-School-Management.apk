@@ -106,4 +106,31 @@ object BiometricAuthHelper {
             onFailure(errorMsg)
         }
     }
+
+    /**
+     * Dedicated AndroidX BiometricPrompt guard for Marks Entry and Examination modules.
+     */
+    fun authenticateGradeModule(
+        activity: FragmentActivity,
+        moduleTitle: String,
+        onSuccess: (authMethod: String) -> Unit,
+        onFailure: (String) -> Unit,
+        onAuditEvent: (outcome: String, authMethod: String, detailMessage: String) -> Unit = { _, _, _ -> }
+    ) {
+        var resolvedMethod = "AndroidX BiometricPrompt"
+        authenticateSensitiveModule(
+            activity = activity,
+            moduleTitle = moduleTitle,
+            subtitle = "Confirm fingerprint, face, or device credential to modify $moduleTitle academic grades.",
+            onSuccess = { onSuccess(resolvedMethod) },
+            onFailure = onFailure,
+            onAuditEvent = { outcome, authMethod, detail ->
+                if (outcome == "SUCCESS") {
+                    resolvedMethod = authMethod
+                }
+                onAuditEvent(outcome, authMethod, detail)
+            }
+        )
+    }
 }
+

@@ -64,7 +64,7 @@ export const OfflineIndicator: React.FC<OfflineIndicatorProps> = ({
   onSyncNow,
   onSimulateSampleQueue,
   language = 'en',
-  schoolName = 'Government Boys Middle School Pamposh Colony',
+  schoolName = 'SchoolMaster Platform',
   onResolveConflictsCallback,
   lastFirebaseSyncSummary,
   localAttendanceCount = 0,

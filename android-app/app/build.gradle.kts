@@ -13,6 +13,23 @@ android {
         ?: System.getenv("GITHUB_REPOSITORY")
         ?: ""
 
+    val productionAppUrl = (
+        (project.findProperty("APP_URL") as? String)
+            ?: System.getenv("APP_URL")
+            ?: "https://ais-pre-r7tdws3aisr6uosq6lza7m-370699773036.asia-northeast1.run.app"
+    ).trim().trimEnd('/')
+
+    if (
+        gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) } &&
+        (productionAppUrl.contains("localhost", ignoreCase = true) ||
+            productionAppUrl.contains("127.0.0.1") ||
+            !productionAppUrl.startsWith("https://"))
+    ) {
+        throw GradleException(
+            "Invalid production APP_URL for release APK: '$productionAppUrl'. Must be a live HTTPS production URL."
+        )
+    }
+
     val releaseKeystorePath = (project.findProperty("ANDROID_KEYSTORE_PATH") as? String)
         ?: System.getenv("ANDROID_KEYSTORE_PATH")
         ?: ""
@@ -40,6 +57,7 @@ android {
         versionName = "1.0.4"
 
         buildConfigField("String", "GITHUB_REPO", "\"$githubRepoSlug\"")
+        buildConfigField("String", "APP_URL", "\"$productionAppUrl\"")
 
         vectorDrawables {
             useSupportLibrary = true

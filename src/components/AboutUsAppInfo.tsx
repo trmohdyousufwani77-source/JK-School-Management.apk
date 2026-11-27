@@ -1,24 +1,29 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
+  Activity,
   AlertTriangle,
   BookOpen,
+  Bot,
   Building2,
   CheckCircle2,
   ClipboardList,
+  Clock,
   Copyright,
-  Edit2,
+  Download,
+  Edit3,
+  ExternalLink,
   FileText,
   Globe,
+  HelpCircle,
   History,
-  ImagePlus,
   Info,
-  KeyRound,
+  Loader2,
   Lock,
   Mail,
   MapPin,
   MessageSquareQuote,
   Phone,
-  Plus,
+  RefreshCw,
   Save,
   Shield,
   ShieldAlert,
@@ -26,9 +31,9 @@ import {
   Smartphone,
   Sparkles,
   Target,
-  Unlock,
   UserCheck,
-  UserPlus,
+  Wifi,
+  WifiOff,
   X,
 } from 'lucide-react';
 import {
@@ -39,12 +44,22 @@ import {
 } from '../types';
 import { Language } from '../utils/translations';
 import { usePermissions } from '../hooks/usePermissions';
-import { AdminEditor } from './AdminEditor';
+import { auth } from '../firebase';
+import { SchoolFaqModule } from './SchoolFaqModule';
 import {
-  appendSchoolInfoAuditLogToFirestore,
-  syncProtectedDeveloperProfileToFirestore,
-  syncSchoolAboutUsToFirestore,
-} from '../firebase';
+  downloadAppErrorsJson,
+  HeartbeatPingResult,
+  loadAppErrorLogs,
+  loadOfflineSyncQueue,
+  runProductionHeartbeatPing,
+} from '../utils/diagnosticsLogger';
+
+interface ChangelogRelease {
+  version: string;
+  releaseDate: string;
+  channel: string;
+  highlights: string[];
+}
 
 interface AboutUsAppInfoProps {
   profiles: DeveloperAdminProfile[];
@@ -52,53 +67,59 @@ interface AboutUsAppInfoProps {
   school: SchoolProfile;
   language: Language;
   onUpdateSchool?: (updated: SchoolProfile) => void;
-  onSaveProfile: (updated: DeveloperAdminProfile) => void;
-  onAddProfile: (created: DeveloperAdminProfile) => void;
-  onSelectActiveProfile: (profileId: string) => void;
+  onUpdatePrimaryInstitution?: (newInstitutionName: string) => void;
+  onSaveProfile?: (updated: DeveloperAdminProfile) => void;
+  onAddProfile?: (created: DeveloperAdminProfile) => void;
+  onSelectActiveProfile?: (profileId: string) => void;
+  onNavigateToChatbot?: () => void;
 }
 
 const ABOUT_US_STORAGE_KEY = 'school_master_v1_school_about_us_info';
 const ABOUT_AUDIT_STORAGE_KEY = 'school_master_v1_school_info_audit_logs';
-const DEV_PROFILE_PWD_KEY = 'school_master_v1_dev_profile_pwd_hash';
-const LEGACY_WANI_PWD_KEY = 'sm_admin_pwd_hash_user-admin-wani';
-const ORIGINAL_DEVELOPER_EMAIL = 'mohdyousufwani1977@gmail.com';
 
-async function hashAdminSecret(secret: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(secret + '_schoolmaster_salt_2026');
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
-}
+// Fixed, immutable App Developer & Administrator identity across Android, iOS, Windows & Web
+const FIXED_ADMIN_NAME = 'Mohd Yousuf Wani';
+const FIXED_ADMIN_DESIGNATION = 'App Developer / Administrator';
+
+const isLegacyDefaultInstitution = (value?: string): boolean => {
+  const normalized = (value || '').trim().toLowerCase();
+  return (
+    normalized === 'govt middle school pamposh colony' ||
+    normalized === 'govt middle school, pamposh colony' ||
+    normalized === 'government middle school pamposh colony' ||
+    normalized === 'government boys middle school pamposh colony'
+  );
+};
 
 function buildDefaultAboutUsInfo(school: SchoolProfile): SchoolAboutUsInfo {
+  const institutionName = (school.name || '').trim();
   return {
     id: 'school-about-main',
-    schoolName: school.name || 'Govt Middle School Pamposh Colony',
+    schoolName: institutionName,
     schoolIntroduction:
-      'Government Middle School Pamposh Colony is a dedicated public educational institution committed to foundational literacy, numeracy, and holistic student development under the NEP 2020 framework.',
+      'A dedicated educational institution using the SchoolMaster platform to deliver structured academics, digital attendance tracking, and holistic student development under the NEP 2020 framework.',
     schoolHistory:
-      'Established to serve families in Pamposh Colony and the Palapora Zone, Iddgah, the school has steadily grown its academic, co-scholastic, and digital record-keeping capabilities for classes 1 through 8.',
+      'Committed to transparent academic administration, inclusive learning, and modern digital record-keeping across primary, middle, and secondary classrooms.',
     schoolVision:
       'To nurture confident, compassionate, and lifelong learners equipped with strong foundational skills, ethical values, and digital readiness.',
     schoolMission:
       'Deliver inclusive, student-centric education through regular attendance tracking, Holistic Progress Cards (HPC), engaged teaching faculty, and transparent parent-school collaboration.',
     schoolObjectives:
       '1. Ensure 100% enrollment and consistent daily student attendance.\n2. Track academic and co-scholastic progress transparently through NEP 2020 Holistic Progress Cards.\n3. Empower teachers with streamlined leave, attendance, and JKEPM appraisal workflows.',
-    schoolAddress: school.address || 'Pamposh Colony, Palapora Zone, Iddgah',
-    schoolContactNumber: school.contactNumber || '+91 194 240 0000',
-    schoolEmail: school.email || 'gmspamposhcolony@jk.gov.in',
+    schoolAddress: school.address || '',
+    schoolContactNumber: school.contactNumber || '',
+    schoolEmail: school.email || '',
     schoolWebsite: school.website || 'https://education.jk.gov.in',
     schoolLogoDataUrl: school.logoDataUrl,
     schoolFacilities:
-      'Well-ventilated classrooms, School Library & Reading Corner, Drinking Water & Sanitation Facilities, Mid-Day Meal (PM POSHAN) Kitchen, Playground, and Smart Digital Attendance & ID Card System.',
+      'Well-ventilated classrooms, School Library & Reading Corner, Drinking Water & Sanitation Facilities, Playground, and Smart Digital Attendance & ID Card System.',
     principalsMessage:
       'Welcome to our digital school platform. Together with dedicated teachers and supportive parents, we strive every day to build a safe, joyful, and high-achieving learning environment for every child.',
     otherSchoolInfo: `U-DISE Code: ${school.code} • Academic Session: ${school.academicSession} • Working Days: ${school.workingDaysPerWeek} days/week`,
     appName: 'SchoolMaster (HPC & JKHRMS)',
     appDescription:
       'Comprehensive School Administration, Touchless QR Daily Attendance, NEP 2020 Holistic Progress Card (HPC), Teacher Leave Management, and JKEPM Appraisal application.',
-    appVersion: 'v1.0.0 (Android / PWA)',
+    appVersion: 'v1.0.4 (Android / iOS / Windows / Web)',
     appFeatures:
       '• Touchless QR Student Attendance with Geolocation Audit\n• NEP 2020 13-Section Holistic Progress Cards (HPC) & PDF Export\n• Student Admission, Promotion & Smart QR ID Card Studio\n• Teacher Management, Service Book & Leave Statement System\n• JKEPM Quarterly Self-Assessment & CPIS Portal\n• Offline-First Sync with Firebase Cloud Backup',
     appPurpose:
@@ -109,73 +130,74 @@ function buildDefaultAboutUsInfo(school: SchoolProfile): SchoolAboutUsInfo {
       'Student and teacher records are stored securely with strict role-based access control. Personal data is used solely for authorized school administration, attendance tracking, and statutory educational reporting. No student information is shared with unauthorized third parties.',
     termsAndConditions:
       'Authorized school personnel must maintain confidentiality of login credentials and student records. All administrative updates to school profiles, attendance, and appraisals are logged for institutional accountability.',
-    copyrightInfo: `© ${new Date().getFullYear()} ${school.name || 'Govt Middle School Pamposh Colony'} • SchoolMaster Platform. All Rights Reserved.`,
+    copyrightInfo: `© ${new Date().getFullYear()} ${institutionName || 'SchoolMaster Platform'}. All Rights Reserved.`,
     updatedAt: new Date().toISOString(),
     updatedByName: 'System Default',
     updatedByRole: 'school_admin',
   };
 }
 
-function validateEmail(value: string): boolean {
-  if (!value.trim()) return true;
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
-}
-
-function validateWebsite(value: string): boolean {
-  if (!value.trim()) return true;
-  return /^(https?:\/\/)?[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(\/.*)?$/.test(value.trim());
-}
-
-function validatePhone(value: string): boolean {
-  if (!value.trim()) return true;
-  return /^[0-9+\-\s()]{7,25}$/.test(value.trim());
-}
-
 export const AboutUsAppInfo: React.FC<AboutUsAppInfoProps> = ({
-  profiles,
-  activeProfile,
   school,
   language,
   onUpdateSchool,
-  onSaveProfile,
-  onAddProfile,
-  onSelectActiveProfile,
+  onUpdatePrimaryInstitution,
+  onNavigateToChatbot,
 }) => {
-  const { currentUser, effectiveRole, addAuditLog } = usePermissions();
+  const { currentUser, effectiveRole } = usePermissions();
 
-  // Strict Role-Based Access Control (RBAC):
-  // 1. School Admin (primary_admin / senior_admin / junior_admin) can edit ONLY About Us & App Information.
-  // 2. Teacher is strictly read-only across all sections.
-  // 3. ONLY the original verified App Developer / Super Administrator can manage the separate Protected Developer Profile.
-  const canEditSchoolInfo =
+  // Admin privilege check for independent Primary Institution editing ONLY.
+  // Administrator identity (Mohd Yousuf Wani) and App Information remain permanently locked for ALL users.
+  const hasAdminPrivileges =
     effectiveRole === 'primary_admin' ||
     effectiveRole === 'senior_admin' ||
     effectiveRole === 'junior_admin';
 
-  const isOriginalSuperDeveloper =
-    effectiveRole === 'primary_admin' &&
-    (currentUser.email || '').trim().toLowerCase() === ORIGINAL_DEVELOPER_EMAIL;
-
-  const activeRoleDisplay = isOriginalSuperDeveloper
-    ? 'Super Admin / App Developer'
-    : canEditSchoolInfo
-    ? 'School Admin'
-    : 'Teacher (Read-Only)';
+  const activeRoleDisplay =
+    effectiveRole === 'primary_admin'
+      ? 'Super Admin'
+      : hasAdminPrivileges
+      ? 'School Admin'
+      : 'Read-Only User';
 
   // Section tabs
-  const [activeSection, setActiveSection] = useState<'about-us' | 'app-info' | 'developer' | 'audit'>('about-us');
+  const [activeSection, setActiveSection] = useState<'about-us' | 'faq' | 'app-info' | 'developer' | 'audit'>(() => {
+    if (typeof window !== 'undefined' && window.location.hash.startsWith('#faq-')) {
+      return 'faq';
+    }
+    return 'about-us';
+  });
 
-  // School Admin Editable State (About Us + App Information) — strictly isolated from Developer Profile
-  const [schoolAboutInfo, setSchoolAboutInfo] = useState<SchoolAboutUsInfo>(() => {
+  // Independent Primary Institution editing state (enabled ONLY for users with admin privileges)
+  const [isEditingPrimaryInstitution, setIsEditingPrimaryInstitution] = useState<boolean>(false);
+  const [primaryInstitutionDraft, setPrimaryInstitutionDraft] = useState<string>(school.name || '');
+
+  useEffect(() => {
+    setPrimaryInstitutionDraft(school.name || '');
+  }, [school.name]);
+
+  // Automatically close Primary Institution editor if user switches to a non-admin role
+  useEffect(() => {
+    if (!hasAdminPrivileges && isEditingPrimaryInstitution) {
+      setIsEditingPrimaryInstitution(false);
+    }
+  }, [hasAdminPrivileges, isEditingPrimaryInstitution]);
+
+  // Read-Only Institutional About Us & App Information state
+  const [schoolAboutInfo] = useState<SchoolAboutUsInfo>(() => {
     const fallback = buildDefaultAboutUsInfo(school);
     try {
       const raw = localStorage.getItem(ABOUT_US_STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw) as Partial<SchoolAboutUsInfo>;
+        const cleanedSchoolName = isLegacyDefaultInstitution(parsed.schoolName)
+          ? ''
+          : parsed.schoolName || '';
         return {
           ...fallback,
           ...parsed,
-          schoolLogoDataUrl: parsed.schoolLogoDataUrl || school.logoDataUrl,
+          schoolName: (school.name || cleanedSchoolName || '').trim(),
+          schoolLogoDataUrl: parsed.schoolLogoDataUrl !== undefined ? parsed.schoolLogoDataUrl : school.logoDataUrl,
         };
       }
     } catch {
@@ -184,7 +206,47 @@ export const AboutUsAppInfo: React.FC<AboutUsAppInfoProps> = ({
     return fallback;
   });
 
-  const [aboutAuditLogs, setAboutAuditLogs] = useState<SchoolInfoAuditEntry[]>(() => {
+  const currentPrimaryInstitution = (school.name || '').trim();
+
+  const handleSavePrimaryInstitution = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!hasAdminPrivileges) {
+      setIsEditingPrimaryInstitution(false);
+      return;
+    }
+    const trimmed = primaryInstitutionDraft.trim();
+    if (onUpdatePrimaryInstitution) {
+      onUpdatePrimaryInstitution(trimmed);
+    } else if (onUpdateSchool) {
+      onUpdateSchool({
+        ...school,
+        name: trimmed,
+        adminName: FIXED_ADMIN_NAME,
+      });
+    }
+    try {
+      const raw = localStorage.getItem(ABOUT_US_STORAGE_KEY);
+      const existing = raw ? (JSON.parse(raw) as Record<string, any>) : {};
+      localStorage.setItem(
+        ABOUT_US_STORAGE_KEY,
+        JSON.stringify({
+          ...existing,
+          schoolName: trimmed,
+          updatedAt: new Date().toISOString(),
+        })
+      );
+    } catch {
+      // ignore storage errors
+    }
+    setIsEditingPrimaryInstitution(false);
+    showToast(
+      trimmed
+        ? `Primary Institution updated to "${trimmed}". Administrator identity remains unchanged.`
+        : 'Primary Institution cleared. You can enter a new institution name anytime.'
+    );
+  };
+
+  const [aboutAuditLogs] = useState<SchoolInfoAuditEntry[]>(() => {
     try {
       const raw = localStorage.getItem(ABOUT_AUDIT_STORAGE_KEY);
       if (raw) return JSON.parse(raw) as SchoolInfoAuditEntry[];
@@ -194,475 +256,104 @@ export const AboutUsAppInfo: React.FC<AboutUsAppInfoProps> = ({
     return [];
   });
 
-  const [isEditingAboutUs, setIsEditingAboutUs] = useState<boolean>(false);
-  const [isEditingAppInfo, setIsEditingAppInfo] = useState<boolean>(false);
-  const [draftForm, setDraftForm] = useState<SchoolAboutUsInfo>(schoolAboutInfo);
-  const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
-  const [isSavingSchoolInfo, setIsSavingSchoolInfo] = useState<boolean>(false);
-  const logoFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [revisionLimit, setRevisionLimit] = useState<5 | 10>(10);
 
-  // Separate Protected Super Admin / App Developer unlock state (NEVER accessible to School Admin)
-  const [isDevVaultUnlocked, setIsDevVaultUnlocked] = useState<boolean>(false);
-  const [hasPasswordConfigured, setHasPasswordConfigured] = useState<boolean>(false);
-  const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
-  const [pendingDevAction, setPendingDevAction] = useState<'edit' | 'add' | null>(null);
-  const [passwordInput, setPasswordInput] = useState<string>('');
-  const [newPasswordInput, setNewPasswordInput] = useState<string>('');
-  const [confirmPasswordInput, setConfirmPasswordInput] = useState<string>('');
-  const [authError, setAuthError] = useState<string | null>(null);
-  const [devMode, setDevMode] = useState<'view' | 'edit' | 'add'>('view');
-  const [isChangingPassword, setIsChangingPassword] = useState<boolean>(false);
+  // Changelog Modal & Network Health Ping State
+  const [showChangelogModal, setShowChangelogModal] = useState<boolean>(false);
+  const [changelogEntries, setChangelogEntries] = useState<ChangelogRelease[]>([]);
+  const [loadingChangelog, setLoadingChangelog] = useState<boolean>(false);
+  const [pingResult, setPingResult] = useState<HeartbeatPingResult | null>(null);
+  const [isPinging, setIsPinging] = useState<boolean>(false);
+  const [offlineQueueCount, setOfflineQueueCount] = useState<number>(() => loadOfflineSyncQueue().length);
+  const [appErrorCount, setAppErrorCount] = useState<number>(() => loadAppErrorLogs().length);
+  const [isBrowserOnline, setIsBrowserOnline] = useState<boolean>(
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
+  const [lastSyncAt, setLastSyncAt] = useState<string>(() => {
+    try {
+      return localStorage.getItem('school_master_last_cloud_sync_at') || new Date().toISOString();
+    } catch {
+      return new Date().toISOString();
+    }
+  });
 
   const [toastMsg, setToastMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   useEffect(() => {
-    const devHash = localStorage.getItem(DEV_PROFILE_PWD_KEY);
-    const waniHash = localStorage.getItem(LEGACY_WANI_PWD_KEY);
-    setHasPasswordConfigured(Boolean(devHash || waniHash));
+    const handleOnline = () => setIsBrowserOnline(true);
+    const handleOffline = () => setIsBrowserOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
   }, []);
 
-  // Keep localStorage synced for School About Us & Audit Logs
-  useEffect(() => {
+  const handleOpenChangelog = async () => {
+    setShowChangelogModal(true);
+    if (changelogEntries.length > 0) return;
+    setLoadingChangelog(true);
     try {
-      localStorage.setItem(ABOUT_US_STORAGE_KEY, JSON.stringify(schoolAboutInfo));
+      const res = await fetch('/version_history.json', { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data?.releases)) {
+          setChangelogEntries(data.releases as ChangelogRelease[]);
+        }
+      }
     } catch {
-      // ignore storage quota
+      // ignore fetch error
+    } finally {
+      setLoadingChangelog(false);
     }
-  }, [schoolAboutInfo]);
+  };
 
-  useEffect(() => {
+  const handleRunProductionPing = async () => {
+    setIsPinging(true);
     try {
-      localStorage.setItem(ABOUT_AUDIT_STORAGE_KEY, JSON.stringify(aboutAuditLogs));
-    } catch {
-      // ignore storage quota
+      const result = await runProductionHeartbeatPing('/api/health');
+      setPingResult(result);
+      setOfflineQueueCount(loadOfflineSyncQueue().length);
+      setAppErrorCount(loadAppErrorLogs().length);
+      if (result.ok) {
+        const ts = new Date().toISOString();
+        setLastSyncAt(ts);
+        try {
+          localStorage.setItem('school_master_last_cloud_sync_at', ts);
+        } catch {
+          // ignore
+        }
+        showToast(`Production API reachable (HTTP ${result.status}) in ${result.latencyMs} ms.`);
+      } else {
+        showToast(
+          `Production API check failed (${result.status || 'Network Error'}). Logged to app_errors.json.`,
+          'error'
+        );
+      }
+    } finally {
+      setIsPinging(false);
     }
-  }, [aboutAuditLogs]);
-
-  // If role drops (e.g. simulated switch to Teacher or School Admin), immediately cancel restricted edit modes
-  useEffect(() => {
-    if (!canEditSchoolInfo) {
-      setIsEditingAboutUs(false);
-      setIsEditingAppInfo(false);
-    }
-    if (!isOriginalSuperDeveloper) {
-      setIsDevVaultUnlocked(false);
-      setDevMode('view');
-      setShowAuthModal(false);
-    }
-  }, [canEditSchoolInfo, isOriginalSuperDeveloper]);
+  };
 
   const showToast = (text: string, type: 'success' | 'error' = 'success') => {
     setToastMsg({ type, text });
     window.setTimeout(() => setToastMsg(null), 4500);
   };
 
-  // Start editing About Us or App Information (School Admin only)
-  const handleStartEditAboutUs = () => {
-    if (!canEditSchoolInfo) {
-      showToast('Access Denied: Only School Admin can edit About Us information.', 'error');
-      return;
-    }
-    setDraftForm({
-      ...schoolAboutInfo,
-      schoolLogoDataUrl: schoolAboutInfo.schoolLogoDataUrl || school.logoDataUrl,
-    });
-    setValidationErrors({});
-    setIsEditingAboutUs(true);
-  };
+  const displayedLogo =
+    schoolAboutInfo.schoolLogoDataUrl !== undefined
+      ? schoolAboutInfo.schoolLogoDataUrl
+      : school.logoDataUrl;
 
-  const handleStartEditAppInfo = () => {
-    if (!canEditSchoolInfo) {
-      showToast('Access Denied: Only School Admin can edit App Information.', 'error');
-      return;
-    }
-    setDraftForm({ ...schoolAboutInfo });
-    setValidationErrors({});
-    setIsEditingAppInfo(true);
-  };
-
-  const handleCancelSchoolEdit = () => {
-    setDraftForm({ ...schoolAboutInfo });
-    setValidationErrors({});
-    setIsEditingAboutUs(false);
-    setIsEditingAppInfo(false);
-  };
-
-  const handleLogoFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file) return;
-
-    if (!['image/png', 'image/jpeg', 'image/webp', 'image/svg+xml'].includes(file.type)) {
-      setValidationErrors((prev) => ({
-        ...prev,
-        schoolLogoDataUrl: 'Please upload a valid PNG, JPG, WEBP, or SVG logo image.',
-      }));
-      return;
-    }
-    if (file.size > 2 * 1024 * 1024) {
-      setValidationErrors((prev) => ({
-        ...prev,
-        schoolLogoDataUrl: 'School logo image must be smaller than 2 MB.',
-      }));
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setDraftForm((prev) => ({ ...prev, schoolLogoDataUrl: reader.result as string }));
-        setValidationErrors((prev) => {
-          const next = { ...prev };
-          delete next.schoolLogoDataUrl;
-          return next;
-        });
-      }
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const validateSection = (section: 'About Us' | 'App Information', data: SchoolAboutUsInfo) => {
-    const errs: Record<string, string> = {};
-    if (section === 'About Us') {
-      if (data.schoolName.trim().length < 2) {
-        errs.schoolName = 'School Name is required (minimum 2 characters).';
-      }
-      if (data.schoolAddress.trim().length < 3) {
-        errs.schoolAddress = 'School Address is required.';
-      }
-      if (!validateEmail(data.schoolEmail)) {
-        errs.schoolEmail = 'Please enter a valid School Email Address.';
-      }
-      if (!validatePhone(data.schoolContactNumber)) {
-        errs.schoolContactNumber = 'Please enter a valid School Contact Number (7–25 digits).';
-      }
-      if (!validateWebsite(data.schoolWebsite)) {
-        errs.schoolWebsite = 'Please enter a valid School Website URL (e.g. https://school.edu.in).';
-      }
-    } else {
-      if (data.appName.trim().length < 2) {
-        errs.appName = 'App Name is required (minimum 2 characters).';
-      }
-      if (data.appVersion.trim().length < 1) {
-        errs.appVersion = 'App Version is required (e.g. v1.0.0).';
-      }
-      if (!validateEmail(data.appSupportEmail)) {
-        errs.appSupportEmail = 'Please enter a valid Support Email Address.';
-      }
-      if (!validatePhone(data.appSupportContactNumber)) {
-        errs.appSupportContactNumber = 'Please enter a valid Support Contact Number.';
-      }
-    }
-    return errs;
-  };
-
-  const handleSaveSchoolSection = async (section: 'About Us' | 'App Information') => {
-    if (!canEditSchoolInfo) {
-      showToast('Permission Denied: Only School Admin can save school information.', 'error');
-      return;
-    }
-
-    const errs = validateSection(section, draftForm);
-    setValidationErrors(errs);
-    if (Object.keys(errs).length > 0) {
-      showToast('Please correct the highlighted validation errors before saving.', 'error');
-      return;
-    }
-
-    setIsSavingSchoolInfo(true);
-    try {
-      const nowIso = new Date().toISOString();
-      const fieldList: Array<keyof SchoolAboutUsInfo> =
-        section === 'About Us'
-          ? [
-              'schoolName',
-              'schoolIntroduction',
-              'schoolHistory',
-              'schoolVision',
-              'schoolMission',
-              'schoolObjectives',
-              'schoolAddress',
-              'schoolContactNumber',
-              'schoolEmail',
-              'schoolWebsite',
-              'schoolLogoDataUrl',
-              'schoolFacilities',
-              'principalsMessage',
-              'otherSchoolInfo',
-            ]
-          : [
-              'appName',
-              'appDescription',
-              'appVersion',
-              'appFeatures',
-              'appPurpose',
-              'appSupportEmail',
-              'appSupportContactNumber',
-              'privacyPolicy',
-              'termsAndConditions',
-              'copyrightInfo',
-            ];
-
-      const changedFields: string[] = [];
-      fieldList.forEach((key) => {
-        if ((schoolAboutInfo[key] || '') !== (draftForm[key] || '')) {
-          changedFields.push(String(key));
-        }
-      });
-
-      const updatedInfo: SchoolAboutUsInfo = {
-        ...schoolAboutInfo,
-        ...draftForm,
-        schoolName: draftForm.schoolName.trim(),
-        schoolAddress: draftForm.schoolAddress.trim(),
-        appName: draftForm.appName.trim(),
-        appVersion: draftForm.appVersion.trim(),
-        updatedAt: nowIso,
-        updatedByName: currentUser.name,
-        updatedByRole: effectiveRole,
-      };
-
-      // 1. Update local state (NEVER touches DeveloperAdminProfile!)
-      setSchoolAboutInfo(updatedInfo);
-
-      // 2. Sync core institutional fields with SchoolProfile when About Us is saved
-      if (section === 'About Us' && onUpdateSchool) {
-        onUpdateSchool({
-          ...school,
-          name: updatedInfo.schoolName || school.name,
-          address: updatedInfo.schoolAddress || school.address,
-          contactNumber: updatedInfo.schoolContactNumber || school.contactNumber,
-          email: updatedInfo.schoolEmail || school.email,
-          website: updatedInfo.schoolWebsite || school.website,
-          logoDataUrl: updatedInfo.schoolLogoDataUrl || school.logoDataUrl,
-        });
-      }
-
-      // 3. Create immutable Audit Log entry
-      const auditEntry: SchoolInfoAuditEntry = {
-        id: `about-audit-${Date.now()}`,
-        section:
-          changedFields.length === 1 && changedFields[0] === 'schoolLogoDataUrl'
-            ? 'School Logo'
-            : section,
-        action: 'UPDATE',
-        changedFields: changedFields.length > 0 ? changedFields : [section],
-        summary: `Updated ${section} (${
-          changedFields.length > 0 ? changedFields.join(', ') : 'confirmed details'
-        })`,
-        actorName: currentUser.name,
-        actorRole: effectiveRole,
-        timestamp: nowIso,
-        syncedToCloud: false,
-      };
-
-      // 4. Backend Express RBAC API enforcement + Firestore persistence
-      let cloudSynced = false;
-      try {
-        await fetch('/api/school-about-us', {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-user-role': effectiveRole,
-            'x-user-name': currentUser.name,
-          },
-          body: JSON.stringify({
-            section: auditEntry.section,
-            summary: auditEntry.summary,
-            actorName: currentUser.name,
-            actorRole: effectiveRole,
-            data: updatedInfo,
-          }),
-        });
-      } catch {
-        // Offline-capable local persistence remains intact
-      }
-
-      try {
-        const syncedDoc = await syncSchoolAboutUsToFirestore(
-          updatedInfo,
-          currentUser.name,
-          effectiveRole
-        );
-        if (syncedDoc) {
-          await appendSchoolInfoAuditLogToFirestore(auditEntry);
-          cloudSynced = true;
-        }
-      } catch {
-        // Structured Firestore error already logged via handleFirestoreError
-      }
-
-      const finalAuditEntry: SchoolInfoAuditEntry = {
-        ...auditEntry,
-        syncedToCloud: cloudSynced,
-      };
-      setAboutAuditLogs((prev) => [finalAuditEntry, ...prev.slice(0, 99)]);
-
-      addAuditLog({
-        actorId: currentUser.id,
-        actorName: `${currentUser.name} (${effectiveRole})`,
-        actionType: 'SECURITY_POLICY_UPDATE',
-        description: `${finalAuditEntry.summary} — Protected Developer Profile untouched.`,
-        newValue: section === 'About Us' ? updatedInfo.schoolName : `${updatedInfo.appName} ${updatedInfo.appVersion}`,
-        status: 'SUCCESS',
-      });
-
-      setIsEditingAboutUs(false);
-      setIsEditingAppInfo(false);
-      showToast(
-        `${section} updated and saved successfully${cloudSynced ? ' (Synced to Cloud Firestore)' : ''}.`
-      );
-    } finally {
-      setIsSavingSchoolInfo(false);
-    }
-  };
-
-  // Protected Developer / Super Administrator actions — STRICTLY blocked for School Admin & Teacher
-  const handleRequestSuperDevAction = (action: 'edit' | 'add') => {
-    if (!isOriginalSuperDeveloper) {
-      showToast(
-        'Protected Section: School Admin cannot edit, replace, or delete the original App Developer / Administrator Profile.',
-        'error'
-      );
-      return;
-    }
-
-    if (isDevVaultUnlocked) {
-      setDevMode(action);
-      return;
-    }
-
-    setPendingDevAction(action);
-    setPasswordInput('');
-    setNewPasswordInput('');
-    setConfirmPasswordInput('');
-    setAuthError(null);
-    setShowAuthModal(true);
-  };
-
-  const handleVerifyOrCreatePassword = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!isOriginalSuperDeveloper) {
-      setAuthError('Forbidden: Only the original App Developer / Super Admin can unlock this console.');
-      return;
-    }
-    setAuthError(null);
-
-    const existingDevHash = localStorage.getItem(DEV_PROFILE_PWD_KEY);
-    const existingWaniHash = localStorage.getItem(LEGACY_WANI_PWD_KEY);
-
-    if ((!existingDevHash && !existingWaniHash) || isChangingPassword) {
-      if (isChangingPassword && (existingDevHash || existingWaniHash)) {
-        const currentHash = await hashAdminSecret(passwordInput);
-        const currentMatches =
-          (existingDevHash && currentHash === existingDevHash) ||
-          (existingWaniHash && currentHash === existingWaniHash);
-        if (!currentMatches) {
-          setAuthError('Current Super Admin password is incorrect.');
-          return;
-        }
-      }
-
-      if (newPasswordInput.trim().length < 4) {
-        setAuthError('Please enter a protection password of at least 4 characters.');
-        return;
-      }
-      if (newPasswordInput !== confirmPasswordInput) {
-        setAuthError('Passwords do not match.');
-        return;
-      }
-      const hashed = await hashAdminSecret(newPasswordInput);
-      localStorage.setItem(DEV_PROFILE_PWD_KEY, hashed);
-      setHasPasswordConfigured(true);
-      setIsDevVaultUnlocked(true);
-      setIsChangingPassword(false);
-      setShowAuthModal(false);
-
-      addAuditLog({
-        actorId: currentUser.id,
-        actorName: `${currentUser.name} (Super Admin)`,
-        actionType: 'CREDENTIAL_RESET',
-        description: isChangingPassword
-          ? 'Updated protected Developer Profile vault password'
-          : 'Configured protected Developer Profile vault password',
-        status: 'SUCCESS',
-      });
-
-      if (pendingDevAction) setDevMode(pendingDevAction);
-      else showToast('Protected Developer Console password saved.');
-      setPendingDevAction(null);
-      return;
-    }
-
-    const enteredHash = await hashAdminSecret(passwordInput);
-    const matches =
-      (existingDevHash && enteredHash === existingDevHash) ||
-      (existingWaniHash && enteredHash === existingWaniHash);
-
-    if (!matches) {
-      setAuthError('Incorrect Super Admin password. Protected Developer Profile remains locked.');
-      return;
-    }
-
-    setIsDevVaultUnlocked(true);
-    setShowAuthModal(false);
-    if (pendingDevAction) setDevMode(pendingDevAction);
-    setPendingDevAction(null);
-  };
-
-  const handleAdminEditorSave = async (profile: DeveloperAdminProfile, isNew: boolean) => {
-    if (!isOriginalSuperDeveloper) {
-      showToast('Access Denied: Only the original App Developer / Super Admin can modify this record.', 'error');
-      setDevMode('view');
-      return;
-    }
-
-    if (isNew) {
-      onAddProfile(profile);
-      void syncProtectedDeveloperProfileToFirestore(profile, true).catch(() => {});
-      addAuditLog({
-        actorId: currentUser.id,
-        actorName: `${currentUser.name} (Super Admin)`,
-        actionType: 'USER_CREATE',
-        description: `Added protected Developer/Administrator Profile: ${profile.name} (${profile.designation})`,
-        newValue: `${profile.name} — ${profile.institution}`,
-        status: 'SUCCESS',
-      });
-      setDevMode('view');
-      showToast(`Added protected Developer Profile for ${profile.name}.`);
-      return;
-    }
-
-    onSaveProfile(profile);
-    void syncProtectedDeveloperProfileToFirestore(profile, false).catch(() => {});
-    addAuditLog({
-      actorId: currentUser.id,
-      actorName: `${currentUser.name} (Super Admin)`,
-      actionType: 'USER_UPDATE',
-      description: `Updated protected Developer/Administrator Profile: ${profile.name} (${profile.designation})`,
-      oldValue: `${activeProfile.name} (${activeProfile.designation})`,
-      newValue: `${profile.name} (${profile.designation})`,
-      status: 'SUCCESS',
-    });
-    setDevMode('view');
-    showToast('Protected Developer Profile updated via Super Admin Console.');
-  };
-
-  const developerLocationSummary = useMemo(
-    () =>
-      [
-        activeProfile.locality,
-        activeProfile.district ? `District ${activeProfile.district}` : '',
-        activeProfile.unionTerritory,
-      ]
-        .filter(Boolean)
-        .join(', '),
-    [activeProfile]
-  );
-
-  const displayedLogo = isEditingAboutUs
-    ? draftForm.schoolLogoDataUrl || school.logoDataUrl
-    : schoolAboutInfo.schoolLogoDataUrl || school.logoDataUrl;
+  const latestSchoolUpdate = useMemo(() => {
+    return aboutAuditLogs.find(
+      (entry) =>
+        entry.section === 'About Us' ||
+        entry.section === 'App Information' ||
+        entry.section === 'School Logo'
+    );
+  }, [aboutAuditLogs]);
 
   return (
     <div className="space-y-6 max-w-6xl mx-auto">
@@ -707,41 +398,81 @@ export const AboutUsAppInfo: React.FC<AboutUsAppInfoProps> = ({
               {language === 'ur' ? 'ہمارے بارے میں اور ایپ کی معلومات' : 'About Us & App Information'}
             </h1>
             <p className="text-xs text-slate-500 mt-0.5">
-              Manage institutional About Us &amp; App Information with strict Role-Based Protection for the original App Developer Profile.
+              Read-only institutional About Us, Application Information, and protected Administrator Profile across Android, iOS, Windows, and Web.
             </p>
           </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2 text-xs">
-          <span
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-bold border ${
-              isOriginalSuperDeveloper
-                ? 'bg-indigo-50 text-indigo-800 border-indigo-200'
-                : canEditSchoolInfo
-                ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                : 'bg-slate-100 text-slate-700 border-slate-200'
-            }`}
-          >
-            <ShieldCheck className="w-3.5 h-3.5" />
-            <span>Role: {activeRoleDisplay}</span>
+          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-bold border bg-slate-100 text-slate-700 border-slate-200">
+            <ShieldCheck className="w-3.5 h-3.5 text-indigo-600" />
+            <span>{activeRoleDisplay}</span>
           </span>
-          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-bold bg-amber-50 text-amber-800 border border-amber-200">
-            <Lock className="w-3.5 h-3.5 text-amber-600" />
-            <span>Developer Profile Protected</span>
+          <span
+            data-testid="about-us-locked-badge"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-bold bg-amber-50 text-amber-900 border border-amber-300"
+          >
+            <Lock className="w-3.5 h-3.5 text-amber-700" />
+            <span>{hasAdminPrivileges ? 'Administrator Identity Locked' : 'Locked Read-Only Mode'}</span>
           </span>
         </div>
+      </div>
+
+      {/* Prominent Locked Status Visual Banner */}
+      <div
+        data-testid="about-us-locked-status-banner"
+        className={`rounded-2xl border p-4 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs ${
+          hasAdminPrivileges
+            ? 'bg-amber-50/90 border-amber-300 text-amber-950'
+            : 'bg-slate-900 border-slate-800 text-slate-100'
+        }`}
+      >
+        <div className="flex items-start gap-3">
+          <div
+            className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border ${
+              hasAdminPrivileges
+                ? 'bg-amber-100 border-amber-300 text-amber-700'
+                : 'bg-amber-400/20 border-amber-300/40 text-amber-300'
+            }`}
+          >
+            <Lock className="w-4 h-4" />
+          </div>
+          <div className="space-y-0.5">
+            <p className="font-black">
+              {hasAdminPrivileges
+                ? 'Protected Configuration Status: Administrator Identity & App Info Permanently Locked'
+                : 'Locked Read-Only Status: Administrative Privileges Required for Primary Institution Updates'}
+            </p>
+            <p className={hasAdminPrivileges ? 'text-amber-900/90 leading-relaxed' : 'text-slate-300 leading-relaxed'}>
+              {hasAdminPrivileges
+                ? 'App Developer & Administrator details (Mohd Yousuf Wani — App Developer / Administrator) and App Information are strictly read-only across Android, iOS, Windows, and Web. Primary Institution can be configured independently below.'
+                : 'Your account does not hold administrative privileges. All edit inputs and update/remove action buttons are hidden and replaced with read-only displays across Android, iOS, Windows, and Web.'}
+            </p>
+          </div>
+        </div>
+        <span
+          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-extrabold text-[11px] shrink-0 self-start sm:self-center border ${
+            hasAdminPrivileges
+              ? 'bg-white border-amber-300 text-amber-900'
+              : 'bg-amber-400/15 border-amber-300/40 text-amber-200'
+          }`}
+        >
+          <ShieldAlert className="w-3.5 h-3.5" />
+          <span>LOCKED</span>
+        </span>
       </div>
 
       {/* Navigation Tabs */}
       <div
         role="tablist"
         aria-label="About Us and App Information sections"
-        className="bg-white p-1.5 rounded-2xl border border-slate-200 shadow-xs inline-flex flex-wrap gap-1.5"
+        className="bg-white p-1.5 rounded-2xl border border-slate-200 shadow-xs inline-flex flex-wrap gap-1.5 no-print"
       >
         {[
           { id: 'about-us' as const, label: 'About Us (School)', icon: Building2 },
-          { id: 'app-info' as const, label: 'App Information', icon: Smartphone },
-          { id: 'developer' as const, label: 'Developer Profile (Protected)', icon: Shield },
+          { id: 'faq' as const, label: 'FAQ Center', icon: HelpCircle },
+          { id: 'app-info' as const, label: 'App Info & Network Health', icon: Smartphone },
+          { id: 'developer' as const, label: 'Administrator Profile (Protected)', icon: Shield },
           {
             id: 'audit' as const,
             label: `Update Audit Log (${aboutAuditLogs.length})`,
@@ -758,7 +489,6 @@ export const AboutUsAppInfo: React.FC<AboutUsAppInfoProps> = ({
               aria-selected={active}
               onClick={() => {
                 setActiveSection(tab.id);
-                setValidationErrors({});
               }}
               className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-extrabold transition-all cursor-pointer ${
                 active
@@ -784,15 +514,44 @@ export const AboutUsAppInfo: React.FC<AboutUsAppInfoProps> = ({
           data-testid="about-us-school-section"
           className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden"
         >
-          {/* Header Banner with Logo & Edit/Save/Cancel */}
+          {/* Top Transparency Banner — appears ONLY after a School Admin has updated school info */}
+          {latestSchoolUpdate && (
+            <div
+              data-testid="about-us-transparency-banner"
+              className="px-5 py-2.5 bg-emerald-50 border-b border-emerald-200 text-emerald-950 text-xs flex flex-wrap items-center justify-between gap-2"
+            >
+              <div className="flex items-center gap-2 font-bold">
+                <Clock className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span>
+                  Last updated on{' '}
+                  <strong className="font-extrabold">
+                    {new Date(latestSchoolUpdate.timestamp).toLocaleDateString(undefined, {
+                      year: 'numeric',
+                      month: 'short',
+                      day: 'numeric',
+                    })}
+                  </strong>{' '}
+                  by {latestSchoolUpdate.actorName} ({latestSchoolUpdate.section})
+                </span>
+              </div>
+              <span className="text-[11px] font-mono text-emerald-800">
+                {new Date(latestSchoolUpdate.timestamp).toLocaleTimeString([], {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                })}
+              </span>
+            </div>
+          )}
+
+          {/* Header Banner with Circular Logo Preview & Conditionally Disabled Edit/Save */}
           <div className="p-6 bg-gradient-to-r from-indigo-950 via-slate-900 to-indigo-950 text-white flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div className="flex items-center gap-4 min-w-0">
-              <div className="w-20 h-20 rounded-2xl bg-white p-2 border-2 border-white/20 flex items-center justify-center shrink-0 shadow-md">
+              <div className="w-20 h-20 rounded-full bg-white p-2 border-2 border-white/30 flex items-center justify-center shrink-0 shadow-md overflow-hidden">
                 {displayedLogo ? (
                   <img
                     src={displayedLogo}
-                    alt={`${schoolAboutInfo.schoolName} Logo`}
-                    className="max-w-full max-h-full object-contain"
+                    alt={`${currentPrimaryInstitution || 'Institution'} Logo`}
+                    className="w-full h-full object-cover rounded-full"
                   />
                 ) : (
                   <Building2 className="w-9 h-9 text-indigo-700" />
@@ -801,273 +560,140 @@ export const AboutUsAppInfo: React.FC<AboutUsAppInfoProps> = ({
               <div className="min-w-0 space-y-1">
                 <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/30 text-[10px] font-extrabold uppercase tracking-wider text-emerald-200">
                   <Building2 className="w-3 h-3" />
-                  <span>School Admin Managed • About Us</span>
+                  <span>About Us</span>
                 </span>
                 <h2 className="text-lg sm:text-2xl font-black tracking-tight text-white truncate">
-                  {schoolAboutInfo.schoolName}
+                  {currentPrimaryInstitution || 'Primary Institution Not Configured'}
                 </h2>
-                <p className="text-xs text-indigo-200 flex items-center gap-1.5">
-                  <MapPin className="w-3.5 h-3.5 text-amber-300 shrink-0" />
-                  <span className="truncate">{schoolAboutInfo.schoolAddress}</span>
-                </p>
+                {schoolAboutInfo.schoolAddress && (
+                  <p className="text-xs text-indigo-200 flex items-center gap-1.5">
+                    <MapPin className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+                    <span className="truncate">{schoolAboutInfo.schoolAddress}</span>
+                  </p>
+                )}
               </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-2 shrink-0">
-              {canEditSchoolInfo ? (
-                isEditingAboutUs ? (
-                  <>
-                    <button
-                      type="button"
-                      onClick={handleCancelSchoolEdit}
-                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white border border-white/25 text-xs font-bold transition-colors"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                      <span>Cancel</span>
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isSavingSchoolInfo}
-                      onClick={() => void handleSaveSchoolSection('About Us')}
-                      data-testid="save-about-us-btn"
-                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-extrabold shadow-md transition-colors disabled:opacity-60"
-                    >
-                      <Save className="w-3.5 h-3.5" />
-                      <span>{isSavingSchoolInfo ? 'Saving...' : 'Save About Us'}</span>
-                    </button>
-                  </>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={handleStartEditAboutUs}
-                    data-testid="edit-about-us-btn"
-                    className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-extrabold shadow-md transition-colors"
-                  >
-                    <Edit2 className="w-3.5 h-3.5" />
-                    <span>Edit About Us</span>
-                  </button>
-                )
-              ) : (
-                <span className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white/10 text-slate-200 border border-white/20 text-xs font-bold">
-                  <Lock className="w-3.5 h-3.5 text-amber-300" />
-                  <span>School Admin Edit Only</span>
-                </span>
-              )}
+              <span
+                data-testid="about-us-readonly-badge"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white/10 border border-white/25 text-white text-xs font-extrabold"
+              >
+                <Lock className="w-3.5 h-3.5 text-amber-300" />
+                <span>Protected About Us</span>
+              </span>
             </div>
           </div>
 
           <div className="p-6 space-y-6">
-            {isEditingAboutUs ? (
               <div className="space-y-5 text-xs">
-                {/* School Logo Upload */}
-                <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                  <div className="flex items-center gap-4">
-                    <div className="w-16 h-16 rounded-2xl bg-white border border-slate-200 p-2 flex items-center justify-center shrink-0">
-                      {displayedLogo ? (
-                        <img
-                          src={displayedLogo}
-                          alt="School Logo Preview"
-                          className="max-w-full max-h-full object-contain"
-                        />
+                {/* Primary Institution (Editable independently) + Fixed App Developer & Administrator Card */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  {/* Independent Editable Primary Institution Card */}
+                  <div
+                    data-testid="primary-institution-card"
+                    className="p-4 rounded-2xl bg-indigo-50/60 border border-indigo-200 space-y-3"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-black uppercase tracking-wider text-indigo-900 flex items-center gap-1.5">
+                        <Building2 className="w-4 h-4 text-indigo-600" />
+                        <span>Primary Institution</span>
+                      </span>
+                      {hasAdminPrivileges ? (
+                        !isEditingPrimaryInstitution && (
+                          <button
+                            type="button"
+                            data-testid="edit-primary-institution-btn"
+                            onClick={() => {
+                              setPrimaryInstitutionDraft(currentPrimaryInstitution);
+                              setIsEditingPrimaryInstitution(true);
+                            }}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold transition-colors"
+                          >
+                            <Edit3 className="w-3 h-3" />
+                            <span>Edit Primary Institution</span>
+                          </button>
+                        )
                       ) : (
-                        <Building2 className="w-7 h-7 text-slate-400" />
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-200 text-slate-700 text-[10px] font-extrabold">
+                          <Lock className="w-3 h-3" />
+                          <span>Read-Only</span>
+                        </span>
                       )}
                     </div>
-                    <div>
-                      <p className="font-extrabold text-slate-900">School Logo</p>
-                      <p className="text-[11px] text-slate-500 mt-0.5">
-                        Upload PNG, JPG, WEBP, or SVG (max 2 MB). Original aspect ratio is preserved cleanly.
-                      </p>
-                      {validationErrors.schoolLogoDataUrl && (
-                        <p className="text-[11px] font-bold text-rose-600 mt-1">
-                          {validationErrors.schoolLogoDataUrl}
+
+                    {hasAdminPrivileges && isEditingPrimaryInstitution ? (
+                      <form onSubmit={handleSavePrimaryInstitution} className="space-y-2.5">
+                        <input
+                          type="text"
+                          data-testid="primary-institution-input"
+                          value={primaryInstitutionDraft}
+                          onChange={(e) => setPrimaryInstitutionDraft(e.target.value)}
+                          placeholder="Enter Primary Institution Name"
+                          maxLength={180}
+                          className="w-full px-3 py-2 rounded-xl border border-indigo-300 bg-white text-slate-900 font-bold text-xs focus:outline-hidden focus:ring-2 focus:ring-indigo-500"
+                        />
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="submit"
+                            data-testid="save-primary-institution-btn"
+                            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs"
+                          >
+                            <Save className="w-3.5 h-3.5" />
+                            <span>Save Institution</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setPrimaryInstitutionDraft(currentPrimaryInstitution);
+                              setIsEditingPrimaryInstitution(false);
+                            }}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 font-bold text-xs"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                            <span>Cancel</span>
+                          </button>
+                        </div>
+                      </form>
+                    ) : (
+                      <div className="space-y-1">
+                        <p
+                          data-testid="primary-institution-display"
+                          className="text-sm font-black text-slate-900"
+                        >
+                          {currentPrimaryInstitution || 'Not Configured'}
                         </p>
-                      )}
+                        <p className="text-[11px] text-slate-600">
+                          {hasAdminPrivileges
+                            ? 'Primary Institution is editable independently and synced across Android, iOS, Windows, and Web.'
+                            : 'Displayed in read-only mode. Contact a School Administrator to update the Primary Institution.'}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Fixed Protected App Developer & Administrator Card */}
+                  <div
+                    data-testid="about-us-fixed-administrator-card"
+                    className="p-4 rounded-2xl bg-slate-900 text-white border border-slate-800 space-y-2.5"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-black uppercase tracking-wider text-amber-300 flex items-center gap-1.5">
+                        <ShieldCheck className="w-4 h-4 text-amber-300" />
+                        <span>App Developer &amp; Administrator</span>
+                      </span>
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-amber-400/20 border border-amber-300/30 text-amber-200 text-[10px] font-extrabold">
+                        <Lock className="w-3 h-3" />
+                        <span>Locked</span>
+                      </span>
+                    </div>
+                    <div className="pt-0.5">
+                      <p className="text-base font-black text-white">{FIXED_ADMIN_NAME}</p>
+                      <p className="text-xs font-bold text-indigo-200 mt-0.5">{FIXED_ADMIN_DESIGNATION}</p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <input
-                      ref={logoFileInputRef}
-                      type="file"
-                      accept="image/png,image/jpeg,image/webp,image/svg+xml"
-                      onChange={handleLogoFileUpload}
-                      className="hidden"
-                      aria-label="Upload school logo"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => logoFileInputRef.current?.click()}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold transition-colors"
-                    >
-                      <ImagePlus className="w-3.5 h-3.5" />
-                      <span>Upload School Logo</span>
-                    </button>
-                  </div>
                 </div>
 
-                {/* Core Institutional Identity & Contact */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">School Name *</label>
-                    <input
-                      type="text"
-                      value={draftForm.schoolName}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, schoolName: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                    {validationErrors.schoolName && (
-                      <p className="text-rose-600 font-semibold mt-1">{validationErrors.schoolName}</p>
-                    )}
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">School Address *</label>
-                    <input
-                      type="text"
-                      value={draftForm.schoolAddress}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, schoolAddress: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                    {validationErrors.schoolAddress && (
-                      <p className="text-rose-600 font-semibold mt-1">{validationErrors.schoolAddress}</p>
-                    )}
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">School Contact Number</label>
-                    <input
-                      type="text"
-                      value={draftForm.schoolContactNumber}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, schoolContactNumber: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                    {validationErrors.schoolContactNumber && (
-                      <p className="text-rose-600 font-semibold mt-1">{validationErrors.schoolContactNumber}</p>
-                    )}
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">School Email Address</label>
-                    <input
-                      type="email"
-                      value={draftForm.schoolEmail}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, schoolEmail: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                    {validationErrors.schoolEmail && (
-                      <p className="text-rose-600 font-semibold mt-1">{validationErrors.schoolEmail}</p>
-                    )}
-                  </div>
-                  <div className="md:col-span-2">
-                    <label className="block font-bold text-slate-700 mb-1">School Website</label>
-                    <input
-                      type="text"
-                      value={draftForm.schoolWebsite}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, schoolWebsite: e.target.value }))}
-                      placeholder="https://example.edu.in"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                    {validationErrors.schoolWebsite && (
-                      <p className="text-rose-600 font-semibold mt-1">{validationErrors.schoolWebsite}</p>
-                    )}
-                  </div>
-                </div>
-
-                {/* Narrative Fields */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">School Introduction / About School</label>
-                    <textarea
-                      rows={3}
-                      value={draftForm.schoolIntroduction}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, schoolIntroduction: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">School History</label>
-                    <textarea
-                      rows={3}
-                      value={draftForm.schoolHistory}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, schoolHistory: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">School Vision</label>
-                    <textarea
-                      rows={3}
-                      value={draftForm.schoolVision}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, schoolVision: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">School Mission</label>
-                    <textarea
-                      rows={3}
-                      value={draftForm.schoolMission}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, schoolMission: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">School Objectives</label>
-                    <textarea
-                      rows={3}
-                      value={draftForm.schoolObjectives}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, schoolObjectives: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">School Facilities</label>
-                    <textarea
-                      rows={3}
-                      value={draftForm.schoolFacilities}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, schoolFacilities: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">Principal&apos;s Message</label>
-                    <textarea
-                      rows={3}
-                      value={draftForm.principalsMessage}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, principalsMessage: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">Other School Information</label>
-                    <textarea
-                      rows={3}
-                      value={draftForm.otherSchoolInfo}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, otherSchoolInfo: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                  </div>
-                </div>
-
-                {/* Form Footer Buttons */}
-                <div className="pt-4 border-t border-slate-200 flex items-center justify-end gap-2">
-                  <button
-                    type="button"
-                    onClick={handleCancelSchoolEdit}
-                    className="px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    disabled={isSavingSchoolInfo}
-                    onClick={() => void handleSaveSchoolSection('About Us')}
-                    className="inline-flex items-center gap-1.5 px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold shadow-sm disabled:opacity-50"
-                  >
-                    <Save className="w-4 h-4" />
-                    <span>{isSavingSchoolInfo ? 'Saving...' : 'Save Changes'}</span>
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="space-y-5 text-xs">
                 {/* Contact Quick Strip */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                   <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-1">
@@ -1075,7 +701,7 @@ export const AboutUsAppInfo: React.FC<AboutUsAppInfoProps> = ({
                       <MapPin className="w-3.5 h-3.5 text-rose-500" />
                       <span>School Address</span>
                     </span>
-                    <p className="font-bold text-slate-900">{schoolAboutInfo.schoolAddress}</p>
+                    <p className="font-bold text-slate-900">{schoolAboutInfo.schoolAddress || '—'}</p>
                   </div>
                   <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-1">
                     <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
@@ -1182,14 +808,101 @@ export const AboutUsAppInfo: React.FC<AboutUsAppInfoProps> = ({
                     </p>
                   </div>
                 </div>
+
+                {/* Revision History & Recent Updates Audit View inside About Us (Last 5 / Last 10) */}
+                <div className="rounded-2xl border border-slate-200 overflow-hidden bg-white">
+                  <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <History className="w-4 h-4 text-indigo-600" />
+                      <h3 className="font-black text-slate-900">
+                        Revision History &amp; Recent Updates
+                      </h3>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setRevisionLimit(5)}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border ${
+                          revisionLimit === 5
+                            ? 'bg-indigo-600 text-white border-indigo-600'
+                            : 'bg-white text-slate-600 border-slate-200'
+                        }`}
+                      >
+                        Last 5
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setRevisionLimit(10)}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border ${
+                          revisionLimit === 10
+                            ? 'bg-indigo-600 text-white border-indigo-600'
+                            : 'bg-white text-slate-600 border-slate-200'
+                        }`}
+                      >
+                        Last 10
+                      </button>
+                    </div>
+                  </div>
+
+                  {aboutAuditLogs.length === 0 ? (
+                    <div className="p-5 text-center text-slate-500">
+                      No school information revisions recorded yet. Edits by School Admins appear here with Admin name, timestamp, and changed fields.
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-slate-100">
+                      {aboutAuditLogs.slice(0, revisionLimit).map((log) => (
+                        <div
+                          key={log.id}
+                          className="px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 hover:bg-slate-50/70"
+                        >
+                          <div className="space-y-0.5">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-extrabold text-slate-900">{log.actorName}</span>
+                              <span className="px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200 text-[10px] font-bold">
+                                {log.section}
+                              </span>
+                            </div>
+                            <p className="text-slate-600">{log.summary}</p>
+                            {log.changedFields.length > 0 && (
+                              <div className="flex flex-wrap gap-1 pt-0.5">
+                                {log.changedFields.map((field) => (
+                                  <span
+                                    key={`${log.id}-${field}`}
+                                    className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 font-mono text-[10px]"
+                                  >
+                                    {field}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                          <span className="font-mono text-[11px] text-slate-500 whitespace-nowrap">
+                            {new Date(log.timestamp).toLocaleString()}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
-            )}
           </div>
         </section>
       )}
 
       {/* ================================================================= */}
-      {/* SECTION B: APP INFORMATION (SCHOOL ADMIN EDITABLE ONLY)           */}
+      {/* SECTION A2: FREQUENTLY ASKED QUESTIONS (FAQ CENTER — READ-ONLY)   */}
+      {/* ================================================================= */}
+      {activeSection === 'faq' && (
+        <SchoolFaqModule
+          schoolName={currentPrimaryInstitution || 'SchoolMaster Platform'}
+          canEdit={false}
+          actorName={currentUser.name}
+          onNotify={showToast}
+        />
+      )}
+
+      {/* ================================================================= */}
+      {/* SECTION B: APP INFORMATION, SUPPORT, CHANGELOG & NETWORK HEALTH   */}
       {/* ================================================================= */}
       {activeSection === 'app-info' && (
         <section
@@ -1207,186 +920,52 @@ export const AboutUsAppInfo: React.FC<AboutUsAppInfoProps> = ({
                   {schoolAboutInfo.appName}
                 </h2>
                 <p className="text-xs text-slate-500">
-                  Version <strong className="font-mono text-indigo-700">{schoolAboutInfo.appVersion}</strong> • Editable by School Admin (Developer Profile remains untouched)
+                  Version <strong className="font-mono text-indigo-700">{schoolAboutInfo.appVersion}</strong> • Read-Only Protected (Android, iOS, Windows &amp; Web)
                 </p>
               </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-2 shrink-0">
-              {canEditSchoolInfo ? (
-                isEditingAppInfo ? (
-                  <>
-                    <button
-                      type="button"
-                      onClick={handleCancelSchoolEdit}
-                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                      <span>Cancel</span>
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isSavingSchoolInfo}
-                      onClick={() => void handleSaveSchoolSection('App Information')}
-                      data-testid="save-app-info-btn"
-                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold shadow-xs disabled:opacity-50"
-                    >
-                      <Save className="w-3.5 h-3.5" />
-                      <span>{isSavingSchoolInfo ? 'Saving...' : 'Save App Info'}</span>
-                    </button>
-                  </>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={handleStartEditAppInfo}
-                    data-testid="edit-app-info-btn"
-                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-extrabold shadow-xs"
-                  >
-                    <Edit2 className="w-3.5 h-3.5" />
-                    <span>Edit App Information</span>
-                  </button>
-                )
-              ) : (
-                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 text-slate-600 border border-slate-200 text-xs font-bold">
-                  <Lock className="w-3.5 h-3.5" />
-                  <span>Read-Only</span>
-                </span>
-              )}
+              <button
+                type="button"
+                onClick={() => void handleOpenChangelog()}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-extrabold transition-colors"
+              >
+                <History className="w-3.5 h-3.5 text-indigo-600" />
+                <span>View Full Changelog</span>
+              </button>
+
+              <span
+                data-testid="app-info-readonly-badge"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs font-extrabold"
+              >
+                <Lock className="w-3.5 h-3.5 text-amber-600" />
+                <span>Read-Only Protected</span>
+              </span>
             </div>
           </div>
 
           <div className="p-6 text-xs">
-            {isEditingAppInfo ? (
-              <div className="space-y-4">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">App Name *</label>
-                    <input
-                      type="text"
-                      value={draftForm.appName}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, appName: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                    {validationErrors.appName && (
-                      <p className="text-rose-600 font-semibold mt-1">{validationErrors.appName}</p>
-                    )}
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">App Version *</label>
-                    <input
-                      type="text"
-                      value={draftForm.appVersion}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, appVersion: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                    {validationErrors.appVersion && (
-                      <p className="text-rose-600 font-semibold mt-1">{validationErrors.appVersion}</p>
-                    )}
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">App Support Email</label>
-                    <input
-                      type="email"
-                      value={draftForm.appSupportEmail}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, appSupportEmail: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                    {validationErrors.appSupportEmail && (
-                      <p className="text-rose-600 font-semibold mt-1">{validationErrors.appSupportEmail}</p>
-                    )}
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">App Support Contact Number</label>
-                    <input
-                      type="text"
-                      value={draftForm.appSupportContactNumber}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, appSupportContactNumber: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                    {validationErrors.appSupportContactNumber && (
-                      <p className="text-rose-600 font-semibold mt-1">{validationErrors.appSupportContactNumber}</p>
-                    )}
-                  </div>
-                  <div className="md:col-span-2">
-                    <label className="block font-bold text-slate-700 mb-1">Copyright Information</label>
-                    <input
-                      type="text"
-                      value={draftForm.copyrightInfo}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, copyrightInfo: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">App Description</label>
-                    <textarea
-                      rows={3}
-                      value={draftForm.appDescription}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, appDescription: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">App Purpose</label>
-                    <textarea
-                      rows={3}
-                      value={draftForm.appPurpose}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, appPurpose: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                  </div>
-                  <div className="md:col-span-2">
-                    <label className="block font-bold text-slate-700 mb-1">App Features</label>
-                    <textarea
-                      rows={4}
-                      value={draftForm.appFeatures}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, appFeatures: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">Privacy Policy</label>
-                    <textarea
-                      rows={4}
-                      value={draftForm.privacyPolicy}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, privacyPolicy: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">Terms &amp; Conditions</label>
-                    <textarea
-                      rows={4}
-                      value={draftForm.termsAndConditions}
-                      onChange={(e) => setDraftForm((p) => ({ ...p, termsAndConditions: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                  </div>
-                </div>
-
-                <div className="pt-4 border-t border-slate-200 flex items-center justify-end gap-2">
-                  <button
-                    type="button"
-                    onClick={handleCancelSchoolEdit}
-                    className="px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    disabled={isSavingSchoolInfo}
-                    onClick={() => void handleSaveSchoolSection('App Information')}
-                    className="inline-flex items-center gap-1.5 px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold shadow-sm disabled:opacity-50"
-                  >
-                    <Save className="w-4 h-4" />
-                    <span>{isSavingSchoolInfo ? 'Saving...' : 'Save App Information'}</span>
-                  </button>
-                </div>
-              </div>
-            ) : (
               <div className="space-y-5">
+                {/* Fixed Protected App Developer & Administrator Block inside App Information */}
+                <div
+                  data-testid="app-info-fixed-administrator-card"
+                  className="p-4 rounded-2xl bg-slate-900 text-white border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                >
+                  <div className="space-y-1">
+                    <span className="text-[10px] font-black uppercase tracking-wider text-amber-300 flex items-center gap-1.5">
+                      <ShieldCheck className="w-3.5 h-3.5 text-amber-300" />
+                      <span>App Developer &amp; Administrator</span>
+                    </span>
+                    <p className="text-base font-black text-white">{FIXED_ADMIN_NAME}</p>
+                    <p className="text-xs font-bold text-indigo-200">{FIXED_ADMIN_DESIGNATION}</p>
+                  </div>
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-400/20 border border-amber-300/30 text-amber-200 text-[11px] font-extrabold self-start sm:self-center">
+                    <Lock className="w-3.5 h-3.5" />
+                    <span>Fixed • Read-Only</span>
+                  </span>
+                </div>
+
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                   <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80">
                     <span className="text-[10px] font-bold uppercase text-slate-400 block">App Name</span>
@@ -1435,18 +1014,210 @@ export const AboutUsAppInfo: React.FC<AboutUsAppInfoProps> = ({
                   </div>
                 </div>
 
+                {/* Contact Support Action Bar (mailto: & tel:) */}
+                <div className="p-4 rounded-2xl bg-indigo-50/60 border border-indigo-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <h3 className="font-black text-indigo-950">Need Help? Contact Support</h3>
+                    <p className="text-[11px] text-indigo-900/80 mt-0.5">
+                      Reach our school technical support desk directly via email or telephone.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <a
+                      href={`mailto:${schoolAboutInfo.appSupportEmail || 'support@schoolmaster.edu.in'}?subject=${encodeURIComponent(
+                        `SchoolMaster Support Request — ${currentPrimaryInstitution || 'SchoolMaster Platform'}`
+                      )}`}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold shadow-xs"
+                    >
+                      <Mail className="w-3.5 h-3.5" />
+                      <span>Email Support</span>
+                    </a>
+                    <a
+                      href={`tel:${(schoolAboutInfo.appSupportContactNumber || '+911942400000').replace(/[^0-9+]/g, '')}`}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold shadow-xs"
+                    >
+                      <Phone className="w-3.5 h-3.5" />
+                      <span>Call Support</span>
+                    </a>
+                  </div>
+                </div>
+
+                {/* Network Health & Production Connection Test Diagnostics */}
+                <div
+                  data-testid="about-network-health-panel"
+                  className="p-4 sm:p-5 rounded-2xl bg-slate-900 text-white space-y-4 border border-slate-800"
+                >
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5">
+                      <div
+                        className={`w-3 h-3 rounded-full shrink-0 ${
+                          pingResult
+                            ? pingResult.ok
+                              ? 'bg-emerald-400 shadow-[0_0_8px_#34d399]'
+                              : 'bg-rose-500 shadow-[0_0_8px_#f43f5e]'
+                            : isBrowserOnline
+                            ? 'bg-emerald-400'
+                            : 'bg-rose-500'
+                        }`}
+                      />
+                      <div>
+                        <h3 className="font-black text-sm text-white flex items-center gap-1.5">
+                          <Activity className="w-4 h-4 text-emerald-400" />
+                          <span>Network Health &amp; Production Connection Test</span>
+                        </h3>
+                        <p className="text-[11px] text-slate-300">
+                          Verify live backend API reachability to diagnose whether Page Not Found / 404 issues are network-related.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={isPinging}
+                        onClick={() => void handleRunProductionPing()}
+                        data-testid="network-health-ping-btn"
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold transition-colors disabled:opacity-60"
+                      >
+                        {isPinging ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <RefreshCw className="w-3.5 h-3.5" />
+                        )}
+                        <span>{isPinging ? 'Testing...' : 'Production Connection Test (Ping)'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const count = downloadAppErrorsJson();
+                          showToast(`Downloaded app_errors.json (${count} entries).`);
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white border border-white/20 font-bold"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>app_errors.json ({appErrorCount})</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-[11px]">
+                    <div className="p-3 rounded-xl bg-white/5 border border-white/10">
+                      <span className="text-slate-400 uppercase font-bold text-[10px] block">
+                        Browser &amp; Firebase
+                      </span>
+                      <div className="mt-1 flex items-center gap-1.5 font-extrabold">
+                        {isBrowserOnline ? (
+                          <Wifi className="w-3.5 h-3.5 text-emerald-400" />
+                        ) : (
+                          <WifiOff className="w-3.5 h-3.5 text-rose-400" />
+                        )}
+                        <span>
+                          {isBrowserOnline
+                            ? auth.currentUser
+                              ? 'Connected (Firebase Signed In)'
+                              : 'Online (Local + Server Ready)'
+                            : 'Offline Mode'}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="p-3 rounded-xl bg-white/5 border border-white/10">
+                      <span className="text-slate-400 uppercase font-bold text-[10px] block">
+                        Offline Sync Queue
+                      </span>
+                      <strong className="mt-1 block text-sm font-black text-amber-300">
+                        {offlineQueueCount} Pending Item(s)
+                      </strong>
+                    </div>
+
+                    <div className="p-3 rounded-xl bg-white/5 border border-white/10">
+                      <span className="text-slate-400 uppercase font-bold text-[10px] block">
+                        Last Successful Sync
+                      </span>
+                      <strong className="mt-1 block font-mono text-slate-200">
+                        {new Date(lastSyncAt).toLocaleTimeString([], {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                          second: '2-digit',
+                        })}
+                      </strong>
+                    </div>
+
+                    <div className="p-3 rounded-xl bg-white/5 border border-white/10">
+                      <span className="text-slate-400 uppercase font-bold text-[10px] block">
+                        API Ping Status
+                      </span>
+                      {pingResult ? (
+                        <div className="mt-1 flex items-center gap-1.5">
+                          <span
+                            className={`w-2.5 h-2.5 rounded-full ${
+                              pingResult.ok ? 'bg-emerald-400' : 'bg-rose-500'
+                            }`}
+                          />
+                          <strong
+                            className={pingResult.ok ? 'text-emerald-300' : 'text-rose-300'}
+                          >
+                            {pingResult.ok
+                              ? `HTTP ${pingResult.status} • ${pingResult.latencyMs} ms`
+                              : `FAILED (${pingResult.status || 'ERR'})`}
+                          </strong>
+                        </div>
+                      ) : (
+                        <span className="mt-1 block text-slate-400">Click Ping to test /api/health</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* School Master AI Chatbot Promo Card */}
+                <div className="p-5 rounded-2xl bg-gradient-to-r from-indigo-900 via-slate-900 to-emerald-900 text-white flex flex-col md:flex-row md:items-center justify-between gap-4 border border-indigo-700/60">
+                  <div className="flex items-start gap-3">
+                    <div className="w-11 h-11 rounded-2xl bg-white/10 border border-white/20 flex items-center justify-center shrink-0">
+                      <Bot className="w-6 h-6 text-amber-300" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-black text-white">
+                        SCHOOL MASTER AI CHATBOT – Your Smart Learning Companion!
+                      </h3>
+                      <p className="text-[11px] text-indigo-100 mt-0.5">
+                        24/7 homework help, multi-subject explanations, and exam revision. &ldquo;School Master AI – Learn Smart, Learn Better!&rdquo;
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    {onNavigateToChatbot && (
+                      <button
+                        type="button"
+                        onClick={onNavigateToChatbot}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>Open AI Chatbot</span>
+                      </button>
+                    )}
+                    <a
+                      href="https://play.google.com/store/apps"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white border border-white/25 font-bold"
+                    >
+                      <span>Google Play</span>
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </a>
+                  </div>
+                </div>
+
                 <div className="p-3.5 rounded-2xl bg-slate-100/80 border border-slate-200 flex items-center gap-2 text-slate-700 font-semibold">
                   <Copyright className="w-4 h-4 text-slate-500 shrink-0" />
                   <span>{schoolAboutInfo.copyrightInfo}</span>
                 </div>
               </div>
-            )}
           </div>
         </section>
       )}
 
       {/* ================================================================= */}
-      {/* SECTION C: DEVELOPER / ADMINISTRATOR PROFILE (STRICTLY PROTECTED) */}
+      {/* SECTION C: DEVELOPER / ADMINISTRATOR PROFILE (FIXED & PROTECTED)  */}
       {/* ================================================================= */}
       {activeSection === 'developer' && (
         <section
@@ -1459,10 +1230,10 @@ export const AboutUsAppInfo: React.FC<AboutUsAppInfoProps> = ({
             <Lock className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
             <div className="space-y-1">
               <p className="font-black text-amber-950">
-                Strictly Protected Developer &amp; Original Ownership Profile (Read-Only for School Admin)
+                Protected / Read-Only Administrator Identity (Android, iOS, Windows &amp; Web)
               </p>
               <p className="text-amber-900/90 leading-relaxed">
-                Stored in an isolated protected database collection (<code className="font-mono font-bold">/protectedDeveloperProfiles</code>) enforced by both Backend API &amp; Firestore Security Rules. School Admin edits to About Us or App Information never modify, replace, or delete this record.
+                The App Developer &amp; Administrator identity is permanently fixed and read-only. It cannot be edited, renamed, updated, or deleted through application settings or user interface actions.
               </p>
             </div>
           </div>
@@ -1471,257 +1242,95 @@ export const AboutUsAppInfo: React.FC<AboutUsAppInfoProps> = ({
             <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 p-6 text-white flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div className="flex items-center gap-4">
                 <div className="w-16 h-16 rounded-2xl bg-white/10 border border-white/20 flex items-center justify-center text-2xl font-black text-amber-300 shrink-0">
-                  {(activeProfile.name || 'M').charAt(0).toUpperCase()}
+                  M
                 </div>
                 <div className="space-y-1">
                   <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-400/20 border border-amber-300/30 text-[10px] font-extrabold uppercase tracking-wider text-amber-200">
                     <ShieldCheck className="w-3 h-3" />
-                    <span>Verified Original App Developer &amp; Super Administrator</span>
+                    <span>App Developer &amp; Administrator</span>
                   </div>
                   <h2 className="text-xl sm:text-2xl font-black tracking-tight text-white">
-                    {activeProfile.name}
+                    {FIXED_ADMIN_NAME}
                   </h2>
                   <p className="text-xs sm:text-sm font-bold text-indigo-200">
-                    {activeProfile.designation}
+                    {FIXED_ADMIN_DESIGNATION}
                   </p>
                 </div>
               </div>
 
-              {/* Separate Protected Super Admin / App Developer Controls — HIDDEN from School Admin & Teacher */}
               <div className="flex flex-wrap items-center gap-2 self-start md:self-center">
-                {isOriginalSuperDeveloper ? (
-                  devMode === 'view' ? (
-                    <>
-                      {isDevVaultUnlocked && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setIsChangingPassword(true);
-                            setPendingDevAction(null);
-                            setPasswordInput('');
-                            setNewPasswordInput('');
-                            setConfirmPasswordInput('');
-                            setAuthError(null);
-                            setShowAuthModal(true);
-                          }}
-                          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-indigo-100 border border-white/20 text-xs font-bold"
-                        >
-                          <KeyRound className="w-3.5 h-3.5" />
-                          <span>Vault Password</span>
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => handleRequestSuperDevAction('edit')}
-                        className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-extrabold shadow-md"
-                      >
-                        {isDevVaultUnlocked ? <Unlock className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
-                        <span>Super Admin Protected Console</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleRequestSuperDevAction('add')}
-                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white border border-white/25 text-xs font-bold"
-                      >
-                        <UserPlus className="w-3.5 h-3.5" />
-                        <span>Add Protected Profile</span>
-                      </button>
-                    </>
-                  ) : null
-                ) : (
-                  <span className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-rose-500/20 border border-rose-400/40 text-rose-100 text-xs font-extrabold">
-                    <ShieldAlert className="w-4 h-4 text-rose-300" />
-                    <span>Read-Only (Locked for {effectiveRole === 'teacher' ? 'Teacher' : 'School Admin'})</span>
-                  </span>
-                )}
+                <span className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-400/20 border border-amber-300/40 text-amber-100 text-xs font-extrabold">
+                  <Lock className="w-4 h-4 text-amber-300" />
+                  <span>Permanently Locked • Read-Only</span>
+                </span>
               </div>
             </div>
 
             <div className="p-6">
-              {devMode === 'view' || !isOriginalSuperDeveloper ? (
-                <div className="space-y-6">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 text-xs">
-                    <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-1">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
-                        <UserCheck className="w-3.5 h-3.5 text-indigo-600" />
-                        <span>App Developer &amp; Administrator Name</span>
-                      </span>
-                      <p className="text-sm font-black text-slate-900">{activeProfile.name}</p>
-                    </div>
-
-                    <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-1">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
-                        <Sparkles className="w-3.5 h-3.5 text-amber-600" />
-                        <span>Developer / Administrator Profile</span>
-                      </span>
-                      <p className="text-sm font-black text-indigo-900">{activeProfile.designation}</p>
-                    </div>
-
-                    <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-1">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
-                        <Building2 className="w-3.5 h-3.5 text-emerald-600" />
-                        <span>Primary Institution</span>
-                      </span>
-                      <p className="text-sm font-black text-slate-900">{activeProfile.institution}</p>
-                    </div>
-
-                    <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-1">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
-                        <Mail className="w-3.5 h-3.5 text-indigo-600" />
-                        <span>Developer Contact Email</span>
-                      </span>
-                      <p className="text-sm font-bold text-slate-900 break-all">
-                        {activeProfile.email || ORIGINAL_DEVELOPER_EMAIL}
-                      </p>
-                    </div>
-
-                    <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-1">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
-                        <Phone className="w-3.5 h-3.5 text-emerald-600" />
-                        <span>Developer Contact Phone</span>
-                      </span>
-                      <p className="text-sm font-mono font-bold text-slate-900">
-                        {activeProfile.phone || '+91 94190 12345'}
-                      </p>
-                    </div>
-
-                    <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-1">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
-                        <MapPin className="w-3.5 h-3.5 text-rose-600" />
-                        <span>District &amp; Location</span>
-                      </span>
-                      <p className="text-sm font-bold text-slate-900">
-                        {developerLocationSummary || `${activeProfile.district}, ${activeProfile.unionTerritory}`}
-                      </p>
-                    </div>
+              <div className="space-y-6">
+                {/* Display ONLY Mohd Yousuf Wani and App Developer / Administrator */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                  <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-1">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
+                      <UserCheck className="w-3.5 h-3.5 text-indigo-600" />
+                      <span>App Developer &amp; Administrator</span>
+                    </span>
+                    <p className="text-base font-black text-slate-900">{FIXED_ADMIN_NAME}</p>
                   </div>
 
-                  {/* Original App Ownership Statement */}
-                  <div className="p-4 rounded-2xl bg-slate-900 text-slate-100 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div className="space-y-0.5">
-                      <p className="font-extrabold text-amber-300 uppercase tracking-wider text-[10px]">
-                        Original App Ownership &amp; Integrity Protection
-                      </p>
-                      <p className="text-slate-200 leading-relaxed">
-                        Original architecture, administration ownership, and developer identity belong exclusively to <strong>{activeProfile.name}</strong> ({activeProfile.designation}). This record cannot be edited, overwritten, or deleted by School Admins.
-                      </p>
-                    </div>
-                    <span className="px-3 py-1.5 rounded-xl bg-emerald-500/20 border border-emerald-400/40 text-emerald-200 font-mono text-[10px] font-bold shrink-0">
-                      IMMUTABLE TO SCHOOL ADMIN
+                  <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-1">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
+                      <Shield className="w-3.5 h-3.5 text-amber-600" />
+                      <span>Designation</span>
+                    </span>
+                    <p className="text-base font-black text-indigo-900">{FIXED_ADMIN_DESIGNATION}</p>
+                  </div>
+                </div>
+
+                {/* Role-Based Access Control (RBAC) Matrix */}
+                <div className="rounded-2xl border border-slate-200 overflow-hidden">
+                  <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+                    <h3 className="text-xs font-black text-slate-800">
+                      Role-Based Access Control (RBAC) Enforcement Matrix
+                    </h3>
+                    <span className="text-[10px] font-bold text-slate-500">
+                      Consistent across Android, iOS, Windows &amp; Web
                     </span>
                   </div>
-
-                  {/* Role-Based Access Control (RBAC) Matrix */}
-                  <div className="rounded-2xl border border-slate-200 overflow-hidden">
-                    <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
-                      <h3 className="text-xs font-black text-slate-800">
-                        Role-Based Access Control (RBAC) Enforcement Matrix
-                      </h3>
-                      <span className="text-[10px] font-bold text-slate-500">
-                        Enforced on Frontend, Express API &amp; Firestore Rules
-                      </span>
-                    </div>
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-left border-collapse text-xs">
-                        <thead>
-                          <tr className="bg-white border-b border-slate-200 text-[10px] uppercase tracking-wider text-slate-500">
-                            <th className="py-2.5 px-4">User Role</th>
-                            <th className="py-2.5 px-4">About Us</th>
-                            <th className="py-2.5 px-4">App Information</th>
-                            <th className="py-2.5 px-4">Developer / Ownership Profile</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                          <tr>
-                            <td className="py-2.5 px-4 font-bold text-slate-900">School Admin</td>
-                            <td className="py-2.5 px-4 font-bold text-emerald-700">View &amp; Edit</td>
-                            <td className="py-2.5 px-4 font-bold text-emerald-700">View &amp; Edit</td>
-                            <td className="py-2.5 px-4 font-bold text-rose-700">Read-Only (Edit / Delete Blocked)</td>
-                          </tr>
-                          <tr>
-                            <td className="py-2.5 px-4 font-bold text-slate-900">Teacher</td>
-                            <td className="py-2.5 px-4 text-slate-600">Read-Only</td>
-                            <td className="py-2.5 px-4 text-slate-600">Read-Only</td>
-                            <td className="py-2.5 px-4 text-slate-600">Read-Only</td>
-                          </tr>
-                          <tr>
-                            <td className="py-2.5 px-4 font-bold text-indigo-900">App Developer / Super Admin</td>
-                            <td className="py-2.5 px-4 font-bold text-emerald-700">Full Access</td>
-                            <td className="py-2.5 px-4 font-bold text-emerald-700">Full Access</td>
-                            <td className="py-2.5 px-4 font-bold text-indigo-700">Protected Console Access (Delete Disabled)</td>
-                          </tr>
-                        </tbody>
-                      </table>
-                    </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-white border-b border-slate-200 text-[10px] uppercase tracking-wider text-slate-500">
+                          <th className="py-2.5 px-4">User Role</th>
+                          <th className="py-2.5 px-4">Primary Institution</th>
+                          <th className="py-2.5 px-4">App Information</th>
+                          <th className="py-2.5 px-4">App Developer &amp; Administrator</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        <tr>
+                          <td className="py-2.5 px-4 font-bold text-slate-900">Super / School Admin</td>
+                          <td className="py-2.5 px-4 font-bold text-emerald-700">Editable (Independent)</td>
+                          <td className="py-2.5 px-4 font-bold text-amber-700">Locked Read-Only</td>
+                          <td className="py-2.5 px-4 font-bold text-rose-700">Fixed • Read-Only</td>
+                        </tr>
+                        <tr>
+                          <td className="py-2.5 px-4 font-bold text-slate-900">Teacher / Staff / Student</td>
+                          <td className="py-2.5 px-4 text-slate-600">Read-Only (Edit Hidden)</td>
+                          <td className="py-2.5 px-4 text-slate-600">Locked Read-Only</td>
+                          <td className="py-2.5 px-4 text-slate-600">Fixed • Read-Only</td>
+                        </tr>
+                        <tr>
+                          <td className="py-2.5 px-4 font-bold text-indigo-900">System Administration (Server-Level)</td>
+                          <td className="py-2.5 px-4 font-bold text-indigo-700">Editable &amp; Persistent</td>
+                          <td className="py-2.5 px-4 font-bold text-indigo-700">Protected Read-Only UI</td>
+                          <td className="py-2.5 px-4 font-bold text-indigo-700">Protected Immutable Identity</td>
+                        </tr>
+                      </tbody>
+                    </table>
                   </div>
-
-                  {/* Protected Profiles Directory (Switch only for Original Super Developer) */}
-                  {profiles.length > 1 && isOriginalSuperDeveloper && (
-                    <div className="pt-4 border-t border-slate-100 space-y-3">
-                      <div className="flex items-center justify-between">
-                        <h3 className="text-xs font-extrabold uppercase tracking-wider text-slate-500">
-                          Protected Super Admin Profiles ({profiles.length})
-                        </h3>
-                        <button
-                          type="button"
-                          onClick={() => handleRequestSuperDevAction('add')}
-                          className="text-xs font-bold text-indigo-600 hover:text-indigo-800 inline-flex items-center gap-1"
-                        >
-                          <Plus className="w-3.5 h-3.5" />
-                          <span>Add Protected Profile</span>
-                        </button>
-                      </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        {profiles.map((prof) => {
-                          const isActive = prof.id === activeProfile.id;
-                          return (
-                            <div
-                              key={prof.id}
-                              className={`p-3.5 rounded-2xl border flex items-center justify-between gap-3 ${
-                                isActive ? 'bg-indigo-50/70 border-indigo-300' : 'bg-white border-slate-200'
-                              }`}
-                            >
-                              <div className="min-w-0">
-                                <div className="flex items-center gap-2">
-                                  <span className="font-extrabold text-xs text-slate-900 truncate">{prof.name}</span>
-                                  {isActive && (
-                                    <span className="px-2 py-0.5 rounded-full bg-indigo-600 text-white text-[10px] font-bold">
-                                      Active
-                                    </span>
-                                  )}
-                                </div>
-                                <p className="text-[11px] font-semibold text-indigo-700 truncate">{prof.designation}</p>
-                              </div>
-                              {!isActive && (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    onSelectActiveProfile(prof.id);
-                                    showToast(`Active Protected Developer Profile switched to ${prof.name}.`);
-                                  }}
-                                  className="px-3 py-1.5 rounded-xl bg-white border border-slate-300 hover:bg-indigo-600 hover:text-white text-xs font-bold text-slate-700 shrink-0"
-                                >
-                                  Set Active
-                                </button>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
                 </div>
-              ) : (
-                <AdminEditor
-                  mode={devMode}
-                  activeProfile={activeProfile}
-                  school={school}
-                  isAuthorized={isOriginalSuperDeveloper}
-                  isUnlocked={isDevVaultUnlocked}
-                  onSave={(profile, isNew) => void handleAdminEditorSave(profile, isNew)}
-                  onCancel={() => setDevMode('view')}
-                />
-              )}
+              </div>
             </div>
           </div>
         </section>
@@ -1807,116 +1416,73 @@ export const AboutUsAppInfo: React.FC<AboutUsAppInfoProps> = ({
         </section>
       )}
 
-      {/* Protected Super Admin / App Developer Password Modal (ONLY reachable by Original Super Admin) */}
-      {showAuthModal && isOriginalSuperDeveloper && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/75 backdrop-blur-sm">
-          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
-            <div className="p-4 bg-slate-900 text-white flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <KeyRound className="w-4 h-4 text-amber-400" />
-                <h3 className="text-sm font-bold">
-                  {isChangingPassword
-                    ? 'Change Protected Developer Vault Password'
-                    : hasPasswordConfigured
-                    ? 'Super Admin / App Developer Verification'
-                    : 'Set Protected Developer Vault Password'}
-                </h3>
+      {/* Full Version History / Changelog Modal (/version_history.json) */}
+      {showChangelogModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/75 backdrop-blur-sm no-print">
+          <div className="bg-white rounded-3xl max-w-2xl w-full max-h-[85vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="p-5 bg-slate-900 text-white flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2.5">
+                <History className="w-5 h-5 text-amber-300" />
+                <div>
+                  <h3 className="text-sm font-black">SchoolMaster Full Version Changelog</h3>
+                  <p className="text-[11px] text-slate-300">Loaded from /version_history.json</p>
+                </div>
               </div>
               <button
                 type="button"
-                onClick={() => {
-                  setShowAuthModal(false);
-                  setIsChangingPassword(false);
-                  setPendingDevAction(null);
-                }}
-                className="p-1 rounded-lg text-slate-400 hover:text-white"
+                onClick={() => setShowChangelogModal(false)}
+                className="p-1.5 rounded-lg text-slate-300 hover:text-white"
               >
-                <X className="w-4 h-4" />
+                <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleVerifyOrCreatePassword} className="p-6 space-y-4 text-xs">
-              <p className="text-slate-600 leading-relaxed">
-                Separate protected administration vault exclusively for the original App Developer / Super Administrator.
-              </p>
-
-              {(hasPasswordConfigured || isChangingPassword) && (
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">
-                    {isChangingPassword ? 'Current Vault Password *' : 'Super Admin Vault Password *'}
-                  </label>
-                  <input
-                    type="password"
-                    required
-                    autoFocus
-                    value={passwordInput}
-                    onChange={(e) => setPasswordInput(e.target.value)}
-                    placeholder="Enter vault password"
-                    className="w-full px-3.5 py-2.5 border border-slate-300 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  />
+            <div className="p-5 overflow-y-auto space-y-4 text-xs">
+              {loadingChangelog ? (
+                <div className="py-10 flex items-center justify-center gap-2 text-slate-500">
+                  <Loader2 className="w-4 h-4 animate-spin text-indigo-600" />
+                  <span>Loading changelog...</span>
                 </div>
-              )}
-
-              {(!hasPasswordConfigured || isChangingPassword) && (
-                <>
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">
-                      {isChangingPassword ? 'New Vault Password *' : 'Create Vault Password *'}
-                    </label>
-                    <input
-                      type="password"
-                      required
-                      autoFocus={!isChangingPassword}
-                      value={newPasswordInput}
-                      onChange={(e) => setNewPasswordInput(e.target.value)}
-                      placeholder="Minimum 4 characters"
-                      className="w-full px-3.5 py-2.5 border border-slate-300 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
+              ) : changelogEntries.length === 0 ? (
+                <p className="text-center text-slate-500 py-8">
+                  Unable to load version history entries.
+                </p>
+              ) : (
+                changelogEntries.map((rel) => (
+                  <div
+                    key={rel.version}
+                    className="p-4 rounded-2xl border border-slate-200 bg-slate-50/70 space-y-2"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="px-2.5 py-1 rounded-lg bg-indigo-600 text-white font-mono font-extrabold">
+                          v{rel.version}
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-bold uppercase">
+                          {rel.channel}
+                        </span>
+                      </div>
+                      <span className="font-mono text-slate-500">{rel.releaseDate}</span>
+                    </div>
+                    <ul className="space-y-1.5 list-disc pl-5 text-slate-700 leading-relaxed">
+                      {rel.highlights.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
                   </div>
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">Confirm Vault Password *</label>
-                    <input
-                      type="password"
-                      required
-                      value={confirmPasswordInput}
-                      onChange={(e) => setConfirmPasswordInput(e.target.value)}
-                      placeholder="Re-enter password"
-                      className="w-full px-3.5 py-2.5 border border-slate-300 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
-                  </div>
-                </>
+                ))
               )}
+            </div>
 
-              {authError && (
-                <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 font-semibold">
-                  {authError}
-                </div>
-              )}
-
-              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowAuthModal(false);
-                    setIsChangingPassword(false);
-                    setPendingDevAction(null);
-                  }}
-                  className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold shadow-sm"
-                >
-                  {isChangingPassword
-                    ? 'Update Password'
-                    : hasPasswordConfigured
-                    ? 'Unlock Protected Console'
-                    : 'Set Password & Unlock'}
-                </button>
-              </div>
-            </form>
+            <div className="p-4 border-t border-slate-200 bg-slate-50 flex justify-end shrink-0">
+              <button
+                type="button"
+                onClick={() => setShowChangelogModal(false)}
+                className="px-5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-extrabold"
+              >
+                Close Changelog
+              </button>
+            </div>
           </div>
         </div>
       )}

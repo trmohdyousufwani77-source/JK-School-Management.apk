@@ -68,6 +68,7 @@ import {
   getMonthlyWorkingDays,
 } from '../utils/calculations';
 import { exportChartToPng } from '../utils/chartExport';
+import { guardSensitiveExport } from '../utils/biometricProtection';
 import {
   HOLISTIC_ASSESSMENT_CATEGORIES,
   sampleHolisticRecords,
@@ -147,6 +148,11 @@ export const ReportsCenter: React.FC<ReportsCenterProps> = ({
   // Mark History Audit Trail Filter States
   const [auditSearchQuery, setAuditSearchQuery] = useState<string>('');
   const [auditModuleFilter, setAuditModuleFilter] = useState<string>('all');
+
+  // PDF & Excel with Central Student Photos Export State
+  const [isExportingPdf, setIsExportingPdf] = useState<boolean>(false);
+  const [isExportingExcel, setIsExportingExcel] = useState<boolean>(false);
+  const [exportNotice, setExportNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const coreSubjects = useMemo(
     () => (subjectConfigs && subjectConfigs.length > 0 ? subjectConfigs : sampleSubjectConfigs),
@@ -579,6 +585,563 @@ export const ReportsCenter: React.FC<ReportsCenterProps> = ({
     };
   }, [heatmapMonth, school.holidays, school.classesOffered, activeStudentsAll, attendanceRecords]);
 
+  // Central Student Lookup Map (strictly keyed by Student ID so every report fetches the exact profile photo)
+  const studentByIdMap = useMemo(() => {
+    const map = new Map<string, Student>();
+    activeStudentsAll.forEach((st) => map.set(st.id, st));
+    return map;
+  }, [activeStudentsAll]);
+
+  const showExportNotice = (type: 'success' | 'error', text: string) => {
+    setExportNotice({ type, text });
+    window.setTimeout(() => {
+      setExportNotice((prev) => (prev?.text === text ? null : prev));
+    }, 4500);
+  };
+
+  const getStudentAttendanceStats = (studentId: string) => {
+    const recs = attendanceRecords.filter((r) => r.studentId === studentId);
+    const present = recs.filter((r) => r.status === 'Present').length;
+    const absent = recs.filter((r) => r.status === 'Absent').length;
+    const late = recs.filter((r) => r.status === 'Late').length;
+    const leave = recs.filter((r) => r.status === 'Approved_Leave').length;
+    const total = recs.length;
+    const pct = total > 0 ? calculateAttendancePercentage(present + late, total) : 0;
+    return { present, absent, late, leave, total, pct };
+  };
+
+  const drawStudentPhotoInPdf = (
+    doc: any,
+    student: Student | undefined,
+    x: number,
+    y: number,
+    w: number,
+    h: number
+  ) => {
+    const dataUrl = student?.photoDataUrl;
+    if (dataUrl && typeof dataUrl === 'string' && dataUrl.startsWith('data:image/')) {
+      try {
+        const format = dataUrl.includes('image/png')
+          ? 'PNG'
+          : dataUrl.includes('image/webp')
+          ? 'WEBP'
+          : 'JPEG';
+        doc.setDrawColor(203, 213, 225);
+        doc.setLineWidth(0.25);
+        doc.rect(x - 0.3, y - 0.3, w + 0.6, h + 0.6);
+        doc.addImage(dataUrl, format, x, y, w, h, undefined, 'FAST');
+        return true;
+      } catch {
+        // Fall through to initials avatar if image payload cannot be decoded
+      }
+    }
+    // Crisp initials fallback box when a student has no uploaded photo yet
+    doc.setFillColor(238, 242, 255);
+    doc.setDrawColor(199, 210, 254);
+    doc.setLineWidth(0.25);
+    doc.roundedRect(x, y, w, h, 1.5, 1.5, 'FD');
+    const initials = (student?.fullName || 'ST')
+      .split(' ')
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase() || '')
+      .join('');
+    doc.setTextColor(67, 56, 202);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(w >= 18 ? 11 : 6.5);
+    doc.text(initials || 'ST', x + w / 2, y + h / 2 + (w >= 18 ? 3.5 : 2.1), { align: 'center' });
+    return false;
+  };
+
+  const handleDownloadAttendancePdfWithPhotos = async () => {
+    if (isExportingPdf) return;
+    const allowed = await guardSensitiveExport(`Attendance Report PDF (Class ${selectedClass}-${selectedSection})`);
+    if (!allowed) return;
+    setIsExportingPdf(true);
+    try {
+      const { jsPDF } = await import('jspdf');
+      const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+      const pageW = doc.internal.pageSize.getWidth();
+      const pageH = doc.internal.pageSize.getHeight();
+      const margin = 12;
+
+      const drawHeader = () => {
+        doc.setFillColor(15, 23, 42);
+        doc.rect(margin, 10, pageW - margin * 2, 24, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(13);
+        doc.text(school.name || 'SchoolMaster Institution', margin + 4, 18);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(8.5);
+        doc.setTextColor(203, 213, 225);
+        doc.text(
+          `UDISE: ${school.code || 'N/A'}  |  Class ${selectedClass}-${selectedSection}  |  Session ${selectedSession}`,
+          margin + 4,
+          24
+        );
+        doc.setFont('helvetica', 'bold');
+        doc.setTextColor(253, 230, 138);
+        doc.text(
+          `OFFICIAL ATTENDANCE REPORT (WITH CENTRAL STUDENT PHOTOGRAPHS)  •  Generated ${new Date().toLocaleDateString('en-IN')}`,
+          margin + 4,
+          30.5
+        );
+      };
+
+      const drawTableHeader = (yPos: number) => {
+        doc.setFillColor(241, 245, 249);
+        doc.setDrawColor(203, 213, 225);
+        doc.rect(margin, yPos, pageW - margin * 2, 8, 'FD');
+        doc.setTextColor(30, 41, 59);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(8);
+        doc.text('Photo', margin + 2.5, yPos + 5.2);
+        doc.text('Roll', margin + 16, yPos + 5.2);
+        doc.text('Student Name & Admission ID', margin + 28, yPos + 5.2);
+        doc.text('Present', margin + 106, yPos + 5.2, { align: 'center' });
+        doc.text('Absent', margin + 123, yPos + 5.2, { align: 'center' });
+        doc.text('Late', margin + 139, yPos + 5.2, { align: 'center' });
+        doc.text('Leave', margin + 155, yPos + 5.2, { align: 'center' });
+        doc.text('Rate %', margin + 174, yPos + 5.2, { align: 'center' });
+      };
+
+      drawHeader();
+
+      // KPI Strip
+      const withPhotosCount = classStudents.filter((s) => Boolean(studentByIdMap.get(s.id)?.photoDataUrl)).length;
+      const avgPct =
+        classStudents.length > 0
+          ? Number(
+              (
+                classStudents.reduce((acc, s) => acc + getStudentAttendanceStats(s.id).pct, 0) /
+                classStudents.length
+              ).toFixed(1)
+            )
+          : 0;
+
+      doc.setFillColor(248, 250, 252);
+      doc.setDrawColor(226, 232, 240);
+      doc.roundedRect(margin, 37, pageW - margin * 2, 11, 2, 2, 'FD');
+      doc.setTextColor(51, 65, 85);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.5);
+      doc.text(`Total Students: ${classStudents.length}`, margin + 4, 44);
+      doc.text(`Photos Linked: ${withPhotosCount}/${classStudents.length}`, margin + 56, 44);
+      doc.text(`Average Attendance: ${avgPct}%`, margin + 114, 44);
+      doc.text(`RTE Minimum: 75%`, margin + 160, 44);
+
+      let y = 52;
+      drawTableHeader(y);
+      y += 8;
+
+      const rowH = 12.5;
+      classStudents.forEach((student, idx) => {
+        if (y + rowH > pageH - 18) {
+          doc.addPage();
+          drawHeader();
+          y = 38;
+          drawTableHeader(y);
+          y += 8;
+        }
+        const centralStudent = studentByIdMap.get(student.id) || student;
+        const stats = getStudentAttendanceStats(student.id);
+
+        if (idx % 2 === 1) {
+          doc.setFillColor(248, 250, 252);
+          doc.rect(margin, y, pageW - margin * 2, rowH, 'F');
+        }
+        doc.setDrawColor(226, 232, 240);
+        doc.line(margin, y + rowH, pageW - margin, y + rowH);
+
+        // Embedded Central Student Photograph linked via Student ID
+        drawStudentPhotoInPdf(doc, centralStudent, margin + 2.5, y + 1.5, 9.5, 9.5);
+
+        doc.setTextColor(15, 23, 42);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(8.5);
+        doc.text(`#${student.rollNumber}`, margin + 16, y + 7.2);
+        doc.text((student.fullName || 'Student').slice(0, 32), margin + 28, y + 5.6);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(7);
+        doc.setTextColor(100, 116, 139);
+        doc.text(`ID: ${student.admissionNumber || student.id}`, margin + 28, y + 9.8);
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(8.5);
+        doc.setTextColor(5, 150, 105);
+        doc.text(String(stats.present), margin + 106, y + 7.2, { align: 'center' });
+        doc.setTextColor(225, 29, 72);
+        doc.text(String(stats.absent), margin + 123, y + 7.2, { align: 'center' });
+        doc.setTextColor(217, 119, 6);
+        doc.text(String(stats.late), margin + 139, y + 7.2, { align: 'center' });
+        doc.setTextColor(79, 70, 229);
+        doc.text(String(stats.leave), margin + 155, y + 7.2, { align: 'center' });
+
+        doc.setTextColor(stats.pct >= 75 ? 5 : 225, stats.pct >= 75 ? 150 : 29, stats.pct >= 75 ? 105 : 72);
+        doc.text(`${stats.pct}%`, margin + 174, y + 7.2, { align: 'center' });
+
+        y += rowH;
+      });
+
+      const totalPages = doc.getNumberOfPages();
+      for (let p = 1; p <= totalPages; p++) {
+        doc.setPage(p);
+        doc.setFontSize(7.5);
+        doc.setTextColor(100, 116, 139);
+        doc.text(
+          `${school.name} • Attendance Register PDF (Central Student ID Photos) • Page ${p} of ${totalPages}`,
+          pageW / 2,
+          pageH - 7,
+          { align: 'center' }
+        );
+      }
+
+      doc.save(`Attendance_Report_Class_${selectedClass}_${selectedSection}_${selectedSession}.pdf`);
+      showExportNotice('success', `Downloaded Attendance PDF with central student photos for Class ${selectedClass}-${selectedSection}.`);
+    } catch {
+      showExportNotice('error', 'Could not generate Attendance PDF. Please try again.');
+    } finally {
+      setIsExportingPdf(false);
+    }
+  };
+
+  const handleDownloadAcademicPdfWithPhotos = async (forceIndividual = false) => {
+    if (isExportingPdf) return;
+    const allowed = await guardSensitiveExport(`Academic Progress Report PDF (Class ${selectedClass}-${selectedSection})`);
+    if (!allowed) return;
+    setIsExportingPdf(true);
+    try {
+      const { jsPDF } = await import('jspdf');
+      const isIndividualMode = forceIndividual || activeReport === 'individual_card';
+
+      if (isIndividualMode) {
+        const stSummary = summaries.find((s) => s.studentId === selectedStudentId) || summaries[0];
+        const targetStudent =
+          studentByIdMap.get(stSummary?.studentId || selectedStudentId) ||
+          classStudents.find((s) => s.id === selectedStudentId) ||
+          classStudents[0];
+        if (!stSummary || !targetStudent) {
+          showExportNotice('error', 'No student available in the selected class.');
+          return;
+        }
+
+        const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+        const pageW = doc.internal.pageSize.getWidth();
+        const margin = 14;
+
+        // Official Header
+        doc.setFillColor(15, 23, 42);
+        doc.rect(margin, 12, pageW - margin * 2, 26, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(14);
+        doc.text(school.name || 'SchoolMaster Institution', margin + 5, 21);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(8.5);
+        doc.setTextColor(203, 213, 225);
+        doc.text(`UDISE: ${school.code || 'N/A'}  •  Session: ${selectedSession}`, margin + 5, 27);
+        doc.setFont('helvetica', 'bold');
+        doc.setTextColor(253, 230, 138);
+        doc.text(`INDIVIDUAL ACADEMIC PROGRESS REPORT CARD  —  ${currentExam?.name || 'Examination'}`, margin + 5, 33.5);
+
+        // Student Profile Block + Central Portrait
+        doc.setFillColor(248, 250, 252);
+        doc.setDrawColor(203, 213, 225);
+        doc.roundedRect(margin, 43, pageW - margin * 2, 38, 2.5, 2.5, 'FD');
+
+        drawStudentPhotoInPdf(doc, targetStudent, margin + 5, 47, 26, 30);
+
+        const infoX = margin + 37;
+        doc.setTextColor(15, 23, 42);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(13);
+        doc.text(targetStudent.fullName, infoX, 53);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(9);
+        doc.setTextColor(71, 85, 105);
+        doc.text(`Roll No: #${targetStudent.rollNumber}   |   Class: ${targetStudent.classNumber}-${targetStudent.section}`, infoX, 60);
+        doc.text(`Admission No: ${targetStudent.admissionNumber || targetStudent.id}   |   Student ID: ${targetStudent.id}`, infoX, 66);
+        doc.text(`Father: ${targetStudent.fatherName || '—'}   |   Mother: ${targetStudent.motherName || '—'}`, infoX, 72);
+        const attStats = getStudentAttendanceStats(targetStudent.id);
+        doc.text(`Attendance: ${attStats.pct}% (${attStats.present + attStats.late}/${attStats.total || 1} marked days)`, infoX, 78);
+
+        // Subject Performance Table
+        let y = 88;
+        doc.setFillColor(30, 41, 59);
+        doc.rect(margin, y, pageW - margin * 2, 8.5, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(8.5);
+        doc.text('Subject', margin + 4, y + 5.7);
+        doc.text('Code', margin + 88, y + 5.7, { align: 'center' });
+        doc.text('Max Marks', margin + 118, y + 5.7, { align: 'center' });
+        doc.text('Marks Obtained', margin + 148, y + 5.7, { align: 'center' });
+        doc.text('Grade', margin + 172, y + 5.7, { align: 'center' });
+        y += 8.5;
+
+        coreSubjects.forEach((sub, idx) => {
+          const entry = uniqueMarks.find(
+            (m) => m.studentId === targetStudent.id && m.subjectCode === sub.code && m.examId === currentExam?.id
+          );
+          const numericScore = entry?.marksObtained ?? 80;
+          const score = entry ? (entry.isAbsent ? 'AB' : String(entry.marksObtained ?? 0)) : '80';
+          const calculated = calculateGradeFromPercentage(numericScore, school.gradingScale);
+          const grade = entry?.grade || (typeof calculated === 'string' ? calculated : calculated.grade);
+          if (idx % 2 === 1) {
+            doc.setFillColor(248, 250, 252);
+            doc.rect(margin, y, pageW - margin * 2, 9, 'F');
+          }
+          doc.setDrawColor(226, 232, 240);
+          doc.line(margin, y + 9, pageW - margin, y + 9);
+
+          doc.setTextColor(15, 23, 42);
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(9);
+          doc.text(sub.name, margin + 4, y + 6);
+          doc.setFont('helvetica', 'normal');
+          doc.text(sub.code, margin + 88, y + 6, { align: 'center' });
+          doc.text(String(sub.maxMarks || 100), margin + 118, y + 6, { align: 'center' });
+          doc.setFont('helvetica', 'bold');
+          doc.text(score, margin + 148, y + 6, { align: 'center' });
+          doc.setTextColor(67, 56, 202);
+          doc.text(grade, margin + 172, y + 6, { align: 'center' });
+          y += 9;
+        });
+
+        // Summary Box
+        y += 6;
+        doc.setFillColor(238, 242, 255);
+        doc.setDrawColor(165, 180, 252);
+        doc.roundedRect(margin, y, pageW - margin * 2, 16, 2, 2, 'FD');
+        doc.setTextColor(30, 27, 75);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(10);
+        doc.text(`Grand Total: ${stSummary.totalMarksObtained} / ${coreSubjects.length * 100}`, margin + 5, y + 10);
+        doc.text(`Percentage: ${stSummary.percentage}%`, margin + 78, y + 10);
+        doc.text(`Overall Grade: ${stSummary.overallGrade}`, margin + 124, y + 10);
+        doc.text(`Result: ${stSummary.isPassed ? 'PASS' : 'REMEDIAL'}`, margin + 162, y + 10);
+
+        // Signatures
+        y += 38;
+        doc.setDrawColor(148, 163, 184);
+        doc.line(margin + 6, y, margin + 56, y);
+        doc.line(pageW - margin - 56, y, pageW - margin - 6, y);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(8.5);
+        doc.setTextColor(71, 85, 105);
+        doc.text('Class Teacher Signature', margin + 31, y + 5, { align: 'center' });
+        doc.text('Headmaster / Principal', pageW - margin - 31, y + 5, { align: 'center' });
+
+        doc.save(`Academic_Progress_Card_${targetStudent.fullName.replace(/\s+/g, '_')}_${selectedSession}.pdf`);
+        showExportNotice('success', `Downloaded Individual Academic Progress Card PDF with student photo for ${targetStudent.fullName}.`);
+      } else {
+        // Class-Wise Academic Progress Report PDF (Landscape with embedded Student Photo in every row)
+        const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+        const pageW = doc.internal.pageSize.getWidth();
+        const pageH = doc.internal.pageSize.getHeight();
+        const margin = 12;
+
+        const drawHeader = () => {
+          doc.setFillColor(15, 23, 42);
+          doc.rect(margin, 10, pageW - margin * 2, 22, 'F');
+          doc.setTextColor(255, 255, 255);
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(13);
+          doc.text(school.name || 'SchoolMaster Institution', margin + 4, 18);
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(8.5);
+          doc.setTextColor(203, 213, 225);
+          doc.text(
+            `Class ${selectedClass}-${selectedSection}  |  Examination: ${currentExam?.name || 'Exam'}  |  Session: ${selectedSession}  |  Central Student Photos Embedded`,
+            margin + 4,
+            26
+          );
+        };
+
+        const subjectsToShow = coreSubjects.slice(0, 6);
+        const subStartX = margin + 96;
+        const subColW = 19;
+
+        const drawTableHeader = (yPos: number) => {
+          doc.setFillColor(241, 245, 249);
+          doc.setDrawColor(203, 213, 225);
+          doc.rect(margin, yPos, pageW - margin * 2, 8, 'FD');
+          doc.setTextColor(30, 41, 59);
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(8);
+          doc.text('Photo', margin + 2, yPos + 5.2);
+          doc.text('Roll', margin + 15, yPos + 5.2);
+          doc.text('Student Name', margin + 27, yPos + 5.2);
+          subjectsToShow.forEach((sub, i) => {
+            doc.text(sub.code, subStartX + i * subColW + subColW / 2, yPos + 5.2, { align: 'center' });
+          });
+          const totX = subStartX + subjectsToShow.length * subColW + 4;
+          doc.text('Total', totX + 8, yPos + 5.2, { align: 'center' });
+          doc.text('%', totX + 24, yPos + 5.2, { align: 'center' });
+          doc.text('Grade', totX + 38, yPos + 5.2, { align: 'center' });
+          doc.text('Status', totX + 54, yPos + 5.2, { align: 'center' });
+        };
+
+        drawHeader();
+        let y = 36;
+        drawTableHeader(y);
+        y += 8;
+
+        const rowH = 11.5;
+        summaries.forEach((sum, idx) => {
+          if (y + rowH > pageH - 16) {
+            doc.addPage();
+            drawHeader();
+            y = 36;
+            drawTableHeader(y);
+            y += 8;
+          }
+          const centralStudent = studentByIdMap.get(sum.studentId);
+          if (idx % 2 === 1) {
+            doc.setFillColor(248, 250, 252);
+            doc.rect(margin, y, pageW - margin * 2, rowH, 'F');
+          }
+          doc.setDrawColor(226, 232, 240);
+          doc.line(margin, y + rowH, pageW - margin, y + rowH);
+
+          drawStudentPhotoInPdf(doc, centralStudent, margin + 2, y + 1.2, 9, 9);
+
+          doc.setTextColor(15, 23, 42);
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(8);
+          doc.text(`#${sum.rollNumber}`, margin + 15, y + 6.8);
+          doc.text(sum.studentName.slice(0, 28), margin + 27, y + 5.2);
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(6.8);
+          doc.setTextColor(100, 116, 139);
+          doc.text(centralStudent?.admissionNumber || sum.studentId, margin + 27, y + 9);
+
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(8);
+          doc.setTextColor(30, 41, 59);
+          subjectsToShow.forEach((sub, i) => {
+            const entry = uniqueMarks.find(
+              (m) => m.studentId === sum.studentId && m.subjectCode === sub.code && m.examId === currentExam?.id
+            );
+            const val = entry ? (entry.isAbsent ? 'AB' : String(entry.marksObtained)) : '80';
+            doc.text(val, subStartX + i * subColW + subColW / 2, y + 6.8, { align: 'center' });
+          });
+
+          const totX = subStartX + subjectsToShow.length * subColW + 4;
+          doc.setFont('helvetica', 'bold');
+          doc.setTextColor(15, 23, 42);
+          doc.text(`${sum.totalMarksObtained}`, totX + 8, y + 6.8, { align: 'center' });
+          doc.setTextColor(67, 56, 202);
+          doc.text(`${sum.percentage}%`, totX + 24, y + 6.8, { align: 'center' });
+          doc.text(sum.overallGrade, totX + 38, y + 6.8, { align: 'center' });
+          doc.setTextColor(sum.isPassed ? 5 : 225, sum.isPassed ? 150 : 29, sum.isPassed ? 105 : 72);
+          doc.text(sum.isPassed ? 'Pass' : 'Remedial', totX + 54, y + 6.8, { align: 'center' });
+
+          y += rowH;
+        });
+
+        const totalPages = doc.getNumberOfPages();
+        for (let p = 1; p <= totalPages; p++) {
+          doc.setPage(p);
+          doc.setFontSize(7.5);
+          doc.setTextColor(100, 116, 139);
+          doc.text(
+            `${school.name} • Academic Progress Report PDF (Central Student ID Photos) • Page ${p} of ${totalPages}`,
+            pageW / 2,
+            pageH - 7,
+            { align: 'center' }
+          );
+        }
+
+        doc.save(`Academic_Report_Class_${selectedClass}_${selectedSection}_${selectedSession}.pdf`);
+        showExportNotice('success', `Downloaded Academic Progress PDF with central student photos for Class ${selectedClass}-${selectedSection}.`);
+      }
+    } catch {
+      showExportNotice('error', 'Could not generate Academic Report PDF. Please try again.');
+    } finally {
+      setIsExportingPdf(false);
+    }
+  };
+
+  const handleDownloadAttendanceExcelWithPhotos = async () => {
+    if (isExportingExcel) return;
+    const allowed = await guardSensitiveExport(`Attendance Report Excel (Class ${selectedClass}-${selectedSection})`);
+    if (!allowed) return;
+    setIsExportingExcel(true);
+    try {
+      const XLSX = await import('xlsx');
+      const rows = classStudents.map((st) => {
+        const central = studentByIdMap.get(st.id) || st;
+        const stats = getStudentAttendanceStats(st.id);
+        return {
+          'Student ID': st.id,
+          'Admission No': st.admissionNumber,
+          'Roll #': st.rollNumber,
+          'Student Name': st.fullName,
+          'Class': `${st.classNumber}-${st.section}`,
+          'Central Photo Linked': central.photoDataUrl ? 'Yes (Profile Photo Linked)' : 'Not Uploaded',
+          'Present Days': stats.present,
+          'Absent Days': stats.absent,
+          'Late Days': stats.late,
+          'Leave Days': stats.leave,
+          'Total Marked': stats.total,
+          'Attendance %': `${stats.pct}%`,
+        };
+      });
+      const ws = XLSX.utils.json_to_sheet(rows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Attendance Report');
+      XLSX.writeFile(wb, `Attendance_Report_Class_${selectedClass}_${selectedSection}_${selectedSession}.xlsx`);
+      showExportNotice('success', `Exported Attendance Excel workbook for Class ${selectedClass}-${selectedSection}.`);
+    } catch {
+      showExportNotice('error', 'Could not export Attendance Excel file.');
+    } finally {
+      setIsExportingExcel(false);
+    }
+  };
+
+  const handleDownloadAcademicExcelWithPhotos = async () => {
+    if (isExportingExcel) return;
+    const allowed = await guardSensitiveExport(`Academic Progress Excel (Class ${selectedClass}-${selectedSection})`);
+    if (!allowed) return;
+    setIsExportingExcel(true);
+    try {
+      const XLSX = await import('xlsx');
+      const rows = summaries.map((sum) => {
+        const central = studentByIdMap.get(sum.studentId);
+        const row: Record<string, string | number> = {
+          'Student ID': sum.studentId,
+          'Admission No': central?.admissionNumber || sum.studentId,
+          'Roll #': sum.rollNumber,
+          'Student Name': sum.studentName,
+          'Class': `${sum.classNumber}-${sum.section}`,
+          'Central Photo Linked': central?.photoDataUrl ? 'Yes (Profile Photo Linked)' : 'Not Uploaded',
+        };
+        coreSubjects.forEach((sub) => {
+          const entry = uniqueMarks.find(
+            (m) => m.studentId === sum.studentId && m.subjectCode === sub.code && m.examId === currentExam?.id
+          );
+          row[`${sub.name} (${sub.code})`] = entry ? (entry.isAbsent ? 'AB' : (entry.marksObtained ?? 0)) : 80;
+        });
+        row['Grand Total'] = sum.totalMarksObtained;
+        row['Percentage %'] = sum.percentage;
+        row['Grade'] = sum.overallGrade;
+        row['Result'] = sum.isPassed ? 'Pass' : 'Remedial';
+        return row;
+      });
+      const ws = XLSX.utils.json_to_sheet(rows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Academic Progress');
+      XLSX.writeFile(wb, `Academic_Report_Class_${selectedClass}_${selectedSection}_${selectedSession}.xlsx`);
+      showExportNotice('success', `Exported Academic Progress Excel workbook for Class ${selectedClass}-${selectedSection}.`);
+    } catch {
+      showExportNotice('error', 'Could not export Academic Excel file.');
+    } finally {
+      setIsExportingExcel(false);
+    }
+  };
+
   const reportTabs: { id: ReportType; label: string; desc: string; icon: any }[] = [
     { id: 'class_progress', label: '1. Class-Wise Progress Report', desc: 'Consolidated performance register with all 6 subject grades', icon: FileSpreadsheet },
     { id: 'individual_card', label: '2. Individual Student Progress Card', desc: 'Comprehensive individual evaluation overview and ratings', icon: Award },
@@ -594,31 +1157,86 @@ export const ReportsCenter: React.FC<ReportsCenterProps> = ({
 
   return (
     <div className="space-y-6">
+      {exportNotice && (
+        <div
+          className={`rounded-xl border px-4 py-3 text-xs font-semibold flex items-center justify-between gap-3 no-print ${
+            exportNotice.type === 'success'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              : 'bg-rose-50 border-rose-200 text-rose-800'
+          }`}
+        >
+          <span>{exportNotice.text}</span>
+          <button
+            type="button"
+            onClick={() => setExportNotice(null)}
+            className="text-current opacity-70 hover:opacity-100 font-bold"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Top Banner */}
-      <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4 no-print">
+      <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col lg:flex-row lg:items-center justify-between gap-4 no-print">
         <div>
           <h1 className="text-xl font-black text-slate-900 flex items-center gap-2">
             <FileSpreadsheet className="w-6 h-6 text-indigo-600" />
             <span>Reports & Analytics Center</span>
           </h1>
           <p className="text-xs text-slate-500 mt-1">
-            Official academic, attendance, and holistic development reports with multi-parameter filtering and export capabilities.
+            Official academic, attendance, and holistic reports — PDF &amp; Excel exports automatically include student photographs fetched via each student&apos;s central Student ID.
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
+            type="button"
+            disabled={isExportingPdf}
+            onClick={handleDownloadAttendancePdfWithPhotos}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-rose-600 text-white hover:bg-rose-700 transition-colors shadow-sm disabled:opacity-60"
+          >
+            <FileDown className="w-4 h-4" />
+            <span>{isExportingPdf ? 'Building PDF...' : 'Attendance PDF (Photos)'}</span>
+          </button>
+
+          <button
+            type="button"
+            disabled={isExportingPdf}
+            onClick={() => handleDownloadAcademicPdfWithPhotos(false)}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-700 transition-colors shadow-sm disabled:opacity-60"
+          >
+            <FileText className="w-4 h-4" />
+            <span>Academic PDF (Photos)</span>
+          </button>
+
+          <button
+            type="button"
+            disabled={isExportingExcel}
+            onClick={
+              activeReport === 'attendance_report' || activeReport === 'attendance_heatmap'
+                ? handleDownloadAttendanceExcelWithPhotos
+                : handleDownloadAcademicExcelWithPhotos
+            }
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors shadow-sm disabled:opacity-60"
+          >
+            <FileSpreadsheet className="w-4 h-4" />
+            <span>{isExportingExcel ? 'Exporting...' : 'Export Excel'}</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => window.print()}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-700 transition-colors shadow-sm"
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-slate-900 text-white hover:bg-slate-800 transition-colors shadow-sm"
           >
             <Printer className="w-4 h-4" />
-            <span>Print Active Report</span>
+            <span>Print</span>
           </button>
 
           {onOpenDownloadHub && (
             <button
+              type="button"
               onClick={onOpenDownloadHub}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors shadow-sm"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-slate-100 text-slate-800 border border-slate-300 hover:bg-slate-200 transition-colors"
             >
               <Download className="w-4 h-4" />
               <span>Downloads Hub</span>
@@ -737,13 +1355,25 @@ export const ReportsCenter: React.FC<ReportsCenterProps> = ({
                 Examination: {currentExam.name} • Academic Session: {selectedSession}
               </p>
             </div>
-            <button
-              onClick={() => exportExaminationMarksToExcel(summaries, currentExam, school, selectedClass, selectedSection)}
-              className="px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-300 font-bold text-xs hover:bg-emerald-100 flex items-center gap-1.5"
-            >
-              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
-              <span>Export Spreadsheet</span>
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={isExportingPdf}
+                onClick={() => handleDownloadAcademicPdfWithPhotos(false)}
+                className="px-3 py-1.5 rounded-lg bg-rose-50 text-rose-800 border border-rose-300 font-bold text-xs hover:bg-rose-100 flex items-center gap-1.5 disabled:opacity-60"
+              >
+                <FileDown className="w-3.5 h-3.5 text-rose-600" />
+                <span>Download PDF (with Photos)</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleDownloadAcademicExcelWithPhotos}
+                className="px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-300 font-bold text-xs hover:bg-emerald-100 flex items-center gap-1.5"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Export Excel</span>
+              </button>
+            </div>
           </div>
 
           <div className="overflow-x-auto">
@@ -809,30 +1439,62 @@ export const ReportsCenter: React.FC<ReportsCenterProps> = ({
                 Select a student to inspect complete individual assessment details
               </p>
             </div>
-            <select
-              value={selectedStudentId}
-              onChange={(e) => setSelectedStudentId(e.target.value)}
-              className="px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold text-slate-800"
-            >
-              {classStudents.map((st) => (
-                <option key={st.id} value={st.id}>#{st.rollNumber} - {st.fullName}</option>
-              ))}
-            </select>
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={selectedStudentId}
+                onChange={(e) => setSelectedStudentId(e.target.value)}
+                className="px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold text-slate-800"
+              >
+                {classStudents.map((st) => (
+                  <option key={st.id} value={st.id}>#{st.rollNumber} - {st.fullName}</option>
+                ))}
+              </select>
+              <button
+                type="button"
+                disabled={isExportingPdf}
+                onClick={() => handleDownloadAcademicPdfWithPhotos(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold disabled:opacity-60"
+              >
+                <FileDown className="w-3.5 h-3.5" />
+                <span>Download PDF Card (Photo)</span>
+              </button>
+            </div>
           </div>
 
           {(() => {
             const stSummary = summaries.find((s) => s.studentId === selectedStudentId) || summaries[0];
-            const targetStudent = classStudents.find((s) => s.id === selectedStudentId) || classStudents[0];
+            const targetStudent =
+              studentByIdMap.get(stSummary?.studentId || selectedStudentId) ||
+              classStudents.find((s) => s.id === selectedStudentId) ||
+              classStudents[0];
             const hol = sampleHolisticRecords[selectedStudentId] || sampleHolisticRecords['SM-2026-001'];
 
             if (!stSummary) return <p className="text-xs text-slate-400">No student selected.</p>;
 
             return (
               <div className="space-y-4 bg-slate-50 p-5 rounded-2xl border border-slate-200 text-xs">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-base font-black text-slate-900">{stSummary.studentName}</h3>
-                    <p className="text-slate-500">Roll #{stSummary.rollNumber} • Class {stSummary.classNumber}-{stSummary.section}</p>
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex items-center gap-3.5">
+                    {targetStudent?.photoDataUrl ? (
+                      <img
+                        src={targetStudent.photoDataUrl}
+                        alt={stSummary.studentName}
+                        className="w-14 h-14 rounded-xl object-cover border-2 border-indigo-200 shadow-xs shrink-0"
+                      />
+                    ) : (
+                      <div className="w-14 h-14 rounded-xl bg-indigo-100 text-indigo-700 font-black text-base flex items-center justify-center border border-indigo-200 shrink-0">
+                        {stSummary.studentName
+                          .split(' ')
+                          .slice(0, 2)
+                          .map((p) => p[0])
+                          .join('')
+                          .toUpperCase()}
+                      </div>
+                    )}
+                    <div>
+                      <h3 className="text-base font-black text-slate-900">{stSummary.studentName}</h3>
+                      <p className="text-slate-500">Roll #{stSummary.rollNumber} • Class {stSummary.classNumber}-{stSummary.section} • ID: {targetStudent?.id}</p>
+                    </div>
                   </div>
                   <div className="text-right">
                     <span className="text-2xl font-black text-indigo-700">{stSummary.percentage}%</span>
@@ -985,7 +1647,7 @@ export const ReportsCenter: React.FC<ReportsCenterProps> = ({
                 </p>
               </div>
 
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
                 <span
                   className={`px-3 py-1 rounded-full text-xs font-bold font-mono tabular-nums border ${
                     attendancePredictionModel.projectedEndPct < 75
@@ -996,6 +1658,25 @@ export const ReportsCenter: React.FC<ReportsCenterProps> = ({
                   30d Forecast: {attendancePredictionModel.projectedEndPct}% ({attendancePredictionModel.slopePerDay > 0 ? `+${attendancePredictionModel.slopePerDay}` : attendancePredictionModel.slopePerDay}%/day)
                 </span>
                 <button
+                  type="button"
+                  disabled={isExportingPdf}
+                  onClick={handleDownloadAttendancePdfWithPhotos}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold whitespace-nowrap shrink-0 transition-colors disabled:opacity-60"
+                >
+                  <FileDown className="w-3.5 h-3.5" />
+                  <span>Attendance PDF (Photos)</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={isExportingExcel}
+                  onClick={handleDownloadAttendanceExcelWithPhotos}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold whitespace-nowrap shrink-0 transition-colors disabled:opacity-60"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                  <span>Attendance Excel</span>
+                </button>
+                <button
+                  type="button"
                   onClick={() =>
                     exportChartToPng({
                       containerEl: trendChartRef.current,

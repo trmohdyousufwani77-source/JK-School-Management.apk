@@ -393,7 +393,7 @@ service cloud.firestore {
       return data.keys().hasAll(['id', 'section', 'action', 'summary', 'actorUid', 'actorName', 'actorRole', 'createdAt']) &&
         data.keys().hasOnly(['id', 'section', 'action', 'changedFields', 'summary', 'actorUid', 'actorName', 'actorRole', 'createdAt']) &&
         isValidId(data.id) &&
-        data.section in ['About Us', 'App Information', 'School Logo'] &&
+        data.section in ['About Us', 'App Information', 'School Logo', 'FAQ'] &&
         data.action in ['CREATE', 'UPDATE'] &&
         (!('changedFields' in data) || (data.changedFields is string && data.changedFields.size() <= 600)) &&
         data.summary is string && data.summary.size() >= 2 && data.summary.size() <= 600 &&
@@ -426,6 +426,28 @@ service cloud.firestore {
         (!('ownershipNotice' in data) || (data.ownershipNotice is string && data.ownershipNotice.size() <= 500)) &&
         data.isProtected is bool && data.isProtected == true &&
         data.updatedByUid is string && data.updatedByUid.size() > 0 && data.updatedByUid.size() <= 128 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSchoolFaqItem(data) {
+      return data.keys().hasAll([
+          'id', 'question', 'answer', 'category', 'views', 'helpfulYes', 'helpfulNo',
+          'updatedByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'question', 'answer', 'category', 'views', 'helpfulYes', 'helpfulNo',
+          'updatedByUid', 'updatedByName', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.question is string && data.question.size() >= 3 && data.question.size() <= 400 &&
+        data.answer is string && data.answer.size() >= 2 && data.answer.size() <= 3000 &&
+        data.category in ['Admission', 'Attendance', 'Curriculum', 'Examinations', 'Scholarships', 'General'] &&
+        data.views is int && data.views >= 0 && data.views <= 10000000 &&
+        data.helpfulYes is int && data.helpfulYes >= 0 && data.helpfulYes <= 10000000 &&
+        data.helpfulNo is int && data.helpfulNo >= 0 && data.helpfulNo <= 10000000 &&
+        data.updatedByUid is string && data.updatedByUid.size() > 0 && data.updatedByUid.size() <= 128 &&
+        (!('updatedByName' in data) || (data.updatedByName is string && data.updatedByName.size() <= 140)) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -710,66 +732,34 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // /schoolAboutUs/{docId} - School Admin-managed About Us & App Information (strictly separate from developer profile)
+    // /schoolAboutUs/{docId} - Permanently Read-Only About Us & App Information (cross-platform protection)
+    // Client-side modifications and deletions are strictly forbidden; system-level maintenance uses Admin SDK only.
     match /schoolAboutUs/{docId} {
       allow get: if isValidId(docId) && isVerifiedUser();
-      allow list: if isAdmin();
-      allow create: if isValidId(docId) && isValidSchoolAboutUsInfo(incoming()) && isAdmin() &&
-        incoming().id == docId &&
-        incoming().updatedByUid == request.auth.uid &&
-        incoming().updatedAt == request.time;
-      allow update: if isValidId(docId) && isValidSchoolAboutUsInfo(incoming()) && isAdmin() &&
-        incoming().id == existing().id &&
-        incoming().updatedByUid == request.auth.uid &&
-        incoming().updatedAt == request.time &&
-        incoming().diff(existing()).affectedKeys().hasOnly([
-          'schoolName', 'schoolIntroduction', 'schoolHistory', 'schoolVision',
-          'schoolMission', 'schoolObjectives', 'schoolAddress', 'schoolContactNumber',
-          'schoolEmail', 'schoolWebsite', 'schoolLogoUrl', 'schoolFacilities',
-          'principalsMessage', 'otherSchoolInfo', 'appName', 'appDescription',
-          'appVersion', 'appFeatures', 'appPurpose', 'appSupportEmail',
-          'appSupportContactNumber', 'privacyPolicy', 'termsAndConditions',
-          'copyrightInfo', 'updatedByUid', 'updatedByName', 'updatedByRole', 'updatedAt'
-        ]);
-      allow delete: if false;
+      allow list: if isVerifiedUser();
+      allow create, update, delete: if false;
     }
 
-    // /schoolInfoAuditLogs/{logId} - Immutable Audit Log of School About Us & App Information Updates
+    // /schoolInfoAuditLogs/{logId} - Immutable Audit Log of School About Us & App Information History
     match /schoolInfoAuditLogs/{logId} {
       allow get: if isValidId(logId) && isAdmin();
       allow list: if isVerifiedUser() && (isAdmin() || resource.data.actorUid == request.auth.uid);
-      allow create: if isValidId(logId) && isValidSchoolInfoAuditLog(incoming()) && isAdmin() &&
-        incoming().id == logId &&
-        incoming().actorUid == request.auth.uid &&
-        incoming().createdAt == request.time;
-      allow update: if false;
-      allow delete: if false;
+      allow create, update, delete: if false;
     }
 
-    // /protectedDeveloperProfiles/{profileId} - STRICTLY PROTECTED Original App Developer / Super Admin Ownership Record
-    // School Admins can ONLY read; they are strictly forbidden from creating, modifying, replacing, or deleting developer records.
+    // /protectedDeveloperProfiles/{profileId} - PERMANENTLY READ-ONLY Administrator & App Ownership Record
+    // No client user on Android, iOS, Windows, or Web may create, modify, replace, or delete administrator data.
     match /protectedDeveloperProfiles/{profileId} {
       allow get: if isValidId(profileId) && isVerifiedUser();
       allow list: if isVerifiedUser() && resource.data.isProtected == true;
-      allow create: if isValidId(profileId) && isValidProtectedDeveloperProfile(incoming()) && isSuperDeveloperAdmin() &&
-        incoming().id == profileId &&
-        incoming().updatedByUid == request.auth.uid &&
-        incoming().createdAt == request.time &&
-        incoming().updatedAt == request.time;
-      allow update: if isValidId(profileId) && isValidProtectedDeveloperProfile(incoming()) && isSuperDeveloperAdmin() &&
-        incoming().id == existing().id &&
-        incoming().createdAt == existing().createdAt &&
-        incoming().isProtected == true &&
-        incoming().updatedByUid == request.auth.uid &&
-        incoming().updatedAt == request.time &&
-        incoming().diff(existing()).affectedKeys().hasOnly([
-          'developerName', 'developerProfile', 'designation', 'institution',
-          'locality', 'district', 'unionTerritory', 'developerEmail', 'developerPhone',
-          'administratorName', 'administratorProfile', 'ownershipNotice',
-          'updatedByUid', 'updatedAt'
-        ]);
-      // Original App Developer & Ownership records can NEVER be deleted
-      allow delete: if false;
+      allow create, update, delete: if false;
+    }
+
+    // /schoolFaqs/{faqId} - Read-Only School FAQ Catalog (verified read; no unauthorized client edits)
+    match /schoolFaqs/{faqId} {
+      allow get: if isValidId(faqId) && isVerifiedUser();
+      allow list: if isVerifiedUser();
+      allow create, update, delete: if false;
     }
   }
 }

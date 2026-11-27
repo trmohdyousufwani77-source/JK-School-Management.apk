@@ -1,6 +1,7 @@
 package `in`.gov.jk.schoolmaster.ui
 
 import android.annotation.SuppressLint
+import android.content.Intent
 import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
@@ -682,8 +683,16 @@ fun QrIdCardScreen(
     val selectedStudent = students.find { it.id == selectedStudentId } ?: students.firstOrNull()
     val selectedTeacher = teachers.find { it.id == selectedTeacherId } ?: teachers.firstOrNull()
 
+    // Dedicated ZXing Student Admission-Number QR generation state per student ID
+    var generatedAdmissionQrMap by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    val activeAdmissionQrPayload = if (targetType == IdCardTargetType.STUDENT && selectedStudent != null) {
+        generatedAdmissionQrMap[selectedStudent.id]
+    } else null
+
     val payload = when (targetType) {
-        IdCardTargetType.STUDENT -> selectedStudent?.let { QrCodeGenerator.buildStudentQrPayload(it) } ?: ""
+        IdCardTargetType.STUDENT -> activeAdmissionQrPayload
+            ?: selectedStudent?.let { QrCodeGenerator.buildStudentQrPayload(it) }
+            ?: ""
         IdCardTargetType.TEACHER -> selectedTeacher?.let { QrCodeGenerator.buildTeacherQrPayload(it) } ?: ""
     }
 
@@ -850,13 +859,50 @@ fun QrIdCardScreen(
                         )
                     }
 
+                    if (targetType == IdCardTargetType.STUDENT && selectedStudent != null) {
+                        Button(
+                            onClick = {
+                                val admPayload = QrCodeGenerator.buildStudentAdmissionQrPayload(selectedStudent)
+                                generatedAdmissionQrMap = generatedAdmissionQrMap + (selectedStudent.id to admPayload)
+                                exportFeedback = "Generated unique ZXing Student QR for Admission No: $admPayload"
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0F172A)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.QrCode2,
+                                contentDescription = "Generate Student QR Code",
+                                tint = Color(0xFF34D399),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Generate Student QR Code (${selectedStudent.admissionNumber})",
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        if (activeAdmissionQrPayload != null) {
+                            Text(
+                                text = "Active ZXing QR · Admission No: $activeAdmissionQrPayload",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF059669)
+                            )
+                        }
+                    }
+
                     if (qrBitmap != null) {
                         Box(
                             modifier = Modifier
                                 .size(236.dp)
                                 .clip(RoundedCornerShape(16.dp))
                                 .background(Color.White)
-                                .border(2.dp, Color(0xFFE2E8F0), RoundedCornerShape(16.dp))
+                                .border(
+                                    width = 2.dp,
+                                    color = if (activeAdmissionQrPayload != null) Color(0xFF10B981) else Color(0xFFE2E8F0),
+                                    shape = RoundedCornerShape(16.dp)
+                                )
                                 .clickable { showFullScreenQr = true }
                                 .padding(10.dp),
                             contentAlignment = Alignment.Center
@@ -2300,30 +2346,198 @@ private fun TeacherLeaveAuditLogCard(
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun SchoolPortalWebView(modifier: Modifier = Modifier) {
-    AndroidView(
-        modifier = modifier,
-        factory = { context ->
-            WebView(context).apply {
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.mediaPlaybackRequiresUserGesture = false
-                settings.setGeolocationEnabled(true)
-                settings.cacheMode = WebSettings.LOAD_DEFAULT
-                webViewClient = WebViewClient()
-                webChromeClient = object : WebChromeClient() {
-                    override fun onPermissionRequest(request: PermissionRequest?) {
-                        request?.grant(request.resources)
-                    }
+    val context = LocalContext.current
+    val productionRootUrl = remember {
+        val url = `in`.gov.jk.schoolmaster.BuildConfig.APP_URL.trim().trimEnd('/')
+        if (url.startsWith("https://")) url
+        else "https://ais-pre-r7tdws3aisr6uosq6lza7m-370699773036.asia-northeast1.run.app"
+    }
+    var isLoading by remember { mutableStateOf(true) }
+    var httpErrorCode by remember { mutableStateOf<Int?>(null) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var failedUrl by remember { mutableStateOf<String?>(null) }
+    var webViewRef by remember { mutableStateOf<WebView?>(null) }
 
-                    override fun onGeolocationPermissionsShowPrompt(
-                        origin: String?,
-                        callback: GeolocationPermissions.Callback?
-                    ) {
-                        callback?.invoke(origin, true, false)
+    Box(modifier = modifier.fillMaxSize()) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                WebView(ctx).apply {
+                    webViewRef = this
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.databaseEnabled = true
+                    settings.mediaPlaybackRequiresUserGesture = false
+                    settings.setGeolocationEnabled(true)
+                    settings.cacheMode = WebSettings.LOAD_DEFAULT
+                    addJavascriptInterface(
+                        `in`.gov.jk.schoolmaster.ai.LessonPlanAndroidBridge(ctx),
+                        "SchoolMasterLessonPlanBridge"
+                    )
+                    webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(
+                            view: WebView,
+                            request: android.webkit.WebResourceRequest
+                        ): Boolean {
+                            val uri = request.url ?: return false
+                            val scheme = uri.scheme?.lowercase(java.util.Locale.US) ?: ""
+                            if (scheme == "mailto" || scheme == "tel" || scheme == "whatsapp") {
+                                return try {
+                                    ctx.startActivity(Intent(Intent.ACTION_VIEW, uri))
+                                    true
+                                } catch (_: Exception) {
+                                    false
+                                }
+                            }
+                            val rootHost = android.net.Uri.parse(productionRootUrl).host
+                            if (uri.host == rootHost) {
+                                val path = uri.path ?: "/"
+                                val isAssetOrApi = path.startsWith("/assets/") ||
+                                    path.startsWith("/api/") ||
+                                    path.contains(".")
+                                if (!isAssetOrApi && path != "/" && path.isNotEmpty()) {
+                                    view.stopLoading()
+                                    view.clearHistory()
+                                    view.loadUrl("$productionRootUrl/")
+                                    return true
+                                }
+                            }
+                            return false
+                        }
+
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            super.onPageFinished(view, url)
+                            isLoading = false
+                        }
+
+                        override fun onReceivedError(
+                            view: WebView,
+                            request: android.webkit.WebResourceRequest,
+                            error: android.webkit.WebResourceError
+                        ) {
+                            if (request.isForMainFrame) {
+                                isLoading = false
+                                httpErrorCode = error.errorCode
+                                failedUrl = request.url?.toString()
+                                errorMessage = "Connection Failed: ${error.description}"
+                            }
+                        }
+
+                        override fun onReceivedHttpError(
+                            view: WebView,
+                            request: android.webkit.WebResourceRequest,
+                            errorResponse: android.webkit.WebResourceResponse
+                        ) {
+                            if (request.isForMainFrame && (errorResponse.statusCode == 404 || errorResponse.statusCode >= 500)) {
+                                isLoading = false
+                                httpErrorCode = errorResponse.statusCode
+                                failedUrl = request.url?.toString()
+                                errorMessage = "HTTP ${errorResponse.statusCode}: ${errorResponse.reasonPhrase ?: "Page Not Found"}"
+                                try {
+                                    val logFile = java.io.File(ctx.filesDir, "app_errors.json")
+                                    val line = "{\"timestamp\":\"${java.util.Date()}\",\"status\":${errorResponse.statusCode},\"url\":\"${request.url}\"}\n"
+                                    logFile.appendText(line)
+                                } catch (_: Exception) { }
+                            }
+                        }
                     }
+                    webChromeClient = object : WebChromeClient() {
+                        override fun onPermissionRequest(request: PermissionRequest?) {
+                            request?.grant(request.resources)
+                        }
+
+                        override fun onGeolocationPermissionsShowPrompt(
+                            origin: String?,
+                            callback: GeolocationPermissions.Callback?
+                        ) {
+                            callback?.invoke(origin, true, false)
+                        }
+                    }
+                    loadUrl(productionRootUrl)
                 }
-                loadUrl("https://ais-pre-r7tdws3aisr6uosq6lza7m-370699773036.asia-northeast1.run.app")
+            }
+        )
+
+        if (isLoading && errorMessage == null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFF0F172A)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.School,
+                        contentDescription = "School Logo",
+                        tint = Color.White,
+                        modifier = Modifier.size(56.dp)
+                    )
+                    Text(
+                        text = "School Master Portal",
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    CircularProgressIndicator(color = Color(0xFF818CF8))
+                }
             }
         }
-    )
+
+        if (errorMessage != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFFF8FAFC))
+                    .padding(24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = if (httpErrorCode == 404) "Page Not Found (404)" else "Connection Failed",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF0F172A)
+                    )
+                    Text(
+                        text = errorMessage ?: "",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color(0xFF475569)
+                    )
+                    if (!failedUrl.isNullOrBlank()) {
+                        Text(
+                            text = failedUrl ?: "",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF64748B)
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(onClick = {
+                            errorMessage = null
+                            httpErrorCode = null
+                            isLoading = true
+                            webViewRef?.stopLoading()
+                            webViewRef?.clearHistory()
+                            webViewRef?.loadUrl("$productionRootUrl/")
+                        }) {
+                            Text(if (httpErrorCode == 404) "Return to Dashboard" else "Retry")
+                        }
+                        OutlinedButton(onClick = {
+                            val intent = android.content.Intent(context, `in`.gov.jk.schoolmaster.WebViewActivity::class.java)
+                            intent.putExtra(`in`.gov.jk.schoolmaster.WebViewActivity.EXTRA_START_URL, "$productionRootUrl/")
+                            context.startActivity(intent)
+                        }) {
+                            Text("Full WebView / Logs")
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
+
