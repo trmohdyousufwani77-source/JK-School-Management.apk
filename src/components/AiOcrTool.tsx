@@ -1,3 +1,4 @@
+import { apiFetch } from "../utils/apiConfig";
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ScanText,
@@ -195,7 +196,7 @@ export const AiOcrTool: React.FC<AiOcrToolProps> = ({
     setErrorMsg(null);
     setIsExtracting(true);
     try {
-      const res = await fetch('/api/ai/ocr-extract', {
+      const res = await apiFetch('/api/ai/ocr-extract', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

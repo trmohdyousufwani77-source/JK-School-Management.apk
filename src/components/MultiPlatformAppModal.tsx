@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { usePWAInstall, DetectedPlatform } from '../hooks/usePWAInstall';
 import { Language, translations } from '../utils/translations';
+import { PRODUCTION_APP_URL } from '../utils/apiConfig';
 
 interface MultiPlatformAppModalProps {
   isOpen: boolean;
@@ -550,15 +551,15 @@ export const MultiPlatformAppModal: React.FC<MultiPlatformAppModalProps> = ({
                     <span>Windows MSIX / Store Packaging for School Computer Labs</span>
                   </span>
                   <button
-                    onClick={() => copyToClipboard('npx @pwabuilder/cli http://localhost:3000', 102)}
+                    onClick={() => copyToClipboard(`npx @pwabuilder/cli ${PRODUCTION_APP_URL}`, 102)}
                     className="p-1 hover:text-white flex items-center gap-1 text-[10px] text-blue-400"
                   >
                     {copiedIndex === 102 ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                     <span>{copiedIndex === 102 ? 'Copied' : 'Copy Command'}</span>
                   </button>
                 </div>
-                <code className="block p-2 rounded-lg bg-slate-950 text-blue-300 font-mono text-[10px]">
-                  npx @pwabuilder/cli packaging --platform windows
+                <code className="block p-2 rounded-lg bg-slate-950 text-blue-300 font-mono text-[10px] break-all">
+                  npx @pwabuilder/cli {PRODUCTION_APP_URL}
                 </code>
               </div>
             </div>

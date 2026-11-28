@@ -1,3 +1,4 @@
+import { apiFetch } from "../utils/apiConfig";
 import React, { useState } from 'react';
 import {
   FileText,
@@ -254,7 +255,7 @@ export const AiQuestionGenerator: React.FC<AiQuestionGeneratorProps> = ({
     setErrorMsg(null);
     setIsLoading(true);
     try {
-      const res = await fetch('/api/smart-edu/generate', {
+      const res = await apiFetch('/api/smart-edu/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

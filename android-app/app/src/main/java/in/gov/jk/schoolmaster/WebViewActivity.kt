@@ -71,6 +71,7 @@ class WebViewActivity : FragmentActivity() {
     private var lastFailedUrl: String = ""
     private var lastHttpStatus: Int = 0
     private var lastResponseHeaders: Map<String, String> = emptyMap()
+    private var hasAutoRecovered404: Boolean = false
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -124,9 +125,34 @@ class WebViewActivity : FragmentActivity() {
 
         configureWebClients()
 
-        val initialUrl = intent?.getStringExtra(EXTRA_START_URL)?.takeIf { it.startsWith("https://") }
-            ?: productionRootUrl
+        val deepLinkHash = extractHashRoute(intent?.data?.toString())
+        val rawStartUrl = intent?.getStringExtra(EXTRA_START_URL)?.takeIf { it.startsWith("https://") }
+        val initialUrl = when {
+            rawStartUrl != null && rawStartUrl.contains("#") -> rawStartUrl
+            rawStartUrl != null -> "${rawStartUrl.trimEnd('/')}/$deepLinkHash"
+            else -> "$productionRootUrl/$deepLinkHash"
+        }
         webView.loadUrl(initialUrl)
+    }
+
+    private fun extractHashRoute(rawUrl: String?): String {
+        if (rawUrl.isNullOrBlank()) return "#/dashboard"
+        return try {
+            val uri = Uri.parse(rawUrl)
+            val frag = uri.fragment
+            if (!frag.isNullOrBlank()) {
+                if (frag.startsWith("/")) "#$frag" else "#/$frag"
+            } else {
+                val p = uri.path ?: ""
+                if (p.isNotBlank() && p != "/" && !p.endsWith("index.html")) {
+                    "#${if (p.startsWith("/")) p else "/$p"}"
+                } else {
+                    "#/dashboard"
+                }
+            }
+        } catch (_: Exception) {
+            "#/dashboard"
+        }
     }
 
     private fun configureWebClients() {
@@ -159,15 +185,9 @@ class WebViewActivity : FragmentActivity() {
                         path.endsWith(".apk")
 
                     if (!isStaticAsset && path !in validSpaRoots) {
-                        appendDiagnosticLog(
-                            statusCode = 404,
-                            requestedUrl = uri.toString(),
-                            reason = "Sub-path not registered in React router; forcing root reload ($productionRootUrl/)",
-                            headers = emptyMap()
-                        )
+                        val hashRoute = "#${if (path.startsWith("/")) path else "/$path"}"
                         view.stopLoading()
-                        view.clearHistory()
-                        view.loadUrl("$productionRootUrl/")
+                        view.loadUrl("$productionRootUrl/$hashRoute")
                         return true
                     }
                 }
@@ -236,6 +256,14 @@ class WebViewActivity : FragmentActivity() {
                     )
 
                     if (statusCode == 404) {
+                        if (!hasAutoRecovered404) {
+                            hasAutoRecovered404 = true
+                            val hashRoute = extractHashRoute(failedUrl)
+                            view.stopLoading()
+                            view.clearHistory()
+                            view.loadUrl("$productionRootUrl/$hashRoute")
+                            return
+                        }
                         showErrorOverlay(
                             isNotFound = true,
                             title = "Page Not Found (HTTP 404)",

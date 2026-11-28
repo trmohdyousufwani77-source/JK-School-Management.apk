@@ -1,3 +1,4 @@
+import { resolveStaticAssetUrl } from "../utils/apiConfig";
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
@@ -295,7 +296,7 @@ export const AboutUsAppInfo: React.FC<AboutUsAppInfoProps> = ({
     if (changelogEntries.length > 0) return;
     setLoadingChangelog(true);
     try {
-      const res = await fetch('/version_history.json', { cache: 'no-store' });
+      const res = await fetch(resolveStaticAssetUrl('version_history.json'), { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data?.releases)) {

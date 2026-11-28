@@ -4,6 +4,14 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import {
+  HashRouter,
+  Routes,
+  Route,
+  Navigate,
+  useLocation,
+  useNavigate,
+} from 'react-router-dom';
 import { Header } from './components/Header';
 import { Sidebar, TabType } from './components/Sidebar';
 import { BottomNav } from './components/BottomNav';
@@ -53,6 +61,8 @@ import { GlobalBiometricExportModal } from './components/BiometricExportGuard';
 import { setBiometricProtectionEnabled } from './utils/biometricProtection';
 import { SchoolEmblem } from './components/SchoolEmblem';
 import { observeAndRecoverRoute } from './utils/diagnosticsLogger';
+import { parseRouteFromLocation, resolveSegmentToTab } from './utils/hashRouter';
+import { apiFetch } from './utils/apiConfig';
 import {
   NEW_CPIS_CODE_OFFICIAL,
   OLD_CPIS_CODE_LEGACY,
@@ -171,8 +181,11 @@ function SchoolMasterApp() {
     localStorage.setItem(`${STORAGE_KEY_PREFIX}lang`, language);
   }, [language]);
 
-  // 2. Active Tab state
-  const [currentTab, setCurrentTab] = useState<TabType>('dashboard');
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  // 2. Active Tab state (initialized from React Router HashRouter path `#/...`, query `?tab=...`, or deep-link path)
+  const [currentTab, setCurrentTab] = useState<TabType>(() => parseRouteFromLocation().tab);
   const [principalInitialMode, setPrincipalInitialMode] = useState<'list' | 'add' | 'edit'>('list');
   const [teacherSubTab, setTeacherSubTab] = useState<'jkhrms' | 'service-book' | 'jkepm' | 'attendance'>('jkhrms');
   const [settingsSubTab, setSettingsSubTab] = useState<SchoolSettingsSubTab>('profile');
@@ -343,18 +356,36 @@ function SchoolMasterApp() {
     );
   };
 
-  // NavigationObserver: capture navigation state and recover invalid deep-links to root '/'
+  // React Router HashRouter + NavigationObserver: sync `#/<tab>` without triggering server 404s
   useEffect(() => {
-    observeAndRecoverRoute(currentTab);
-  }, [currentTab]);
+    const firstSegment = (location.pathname || '/').replace(/^\/+|\/+$/g, '').split('/')[0] || '';
+    const routeTab = resolveSegmentToTab(firstSegment);
+    if (routeTab && routeTab !== currentTab) {
+      setCurrentTab(routeTab);
+    }
+    observeAndRecoverRoute(routeTab || currentTab);
+  }, [location.pathname, location.search]);
 
   useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const handlePopState = () => {
-      observeAndRecoverRoute(currentTab);
-    };
-    window.addEventListener('popstate', handlePopState);
-    return () => window.removeEventListener('popstate', handlePopState);
+    const firstSegment = (location.pathname || '/').replace(/^\/+|\/+$/g, '').split('/')[0] || '';
+    const routeTab = resolveSegmentToTab(firstSegment);
+    if (routeTab !== currentTab) {
+      navigate(`/${currentTab}`, { replace: false });
+    }
+    // Normalize any legacy HTTP(S) pathname deep link (e.g. /attendance) back to root index.html + hash
+    if (
+      typeof window !== 'undefined' &&
+      (window.location.protocol === 'http:' || window.location.protocol === 'https:') &&
+      window.location.pathname !== '/' &&
+      window.location.pathname !== '/index.html'
+    ) {
+      try {
+        window.history.replaceState(null, '', `/#/${currentTab}`);
+      } catch {
+        // ignore sandbox history errors
+      }
+    }
+    observeAndRecoverRoute(currentTab);
   }, [currentTab]);
 
   // 3. Device simulation mode
@@ -417,7 +448,7 @@ function SchoolMasterApp() {
 
   // Hydrate Primary Institution from backend store if persisted server-side and local is unset
   useEffect(() => {
-    fetch('/api/primary-institution')
+    apiFetch('/api/primary-institution')
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.ok && typeof data.primaryInstitution === 'string' && data.primaryInstitution.trim()) {
@@ -445,7 +476,7 @@ function SchoolMasterApp() {
         adminName: 'Mohd Yousuf Wani',
       };
       localStorage.setItem('sm_primary_institution_default_cleared_v1', 'true');
-      void fetch('/api/primary-institution', {
+      void apiFetch('/api/primary-institution', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ primaryInstitution: protectedSchool.name || '' }),
@@ -463,7 +494,7 @@ function SchoolMasterApp() {
       name: trimmed,
       adminName: 'Mohd Yousuf Wani',
     }));
-    void fetch('/api/primary-institution', {
+    void apiFetch('/api/primary-institution', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ primaryInstitution: trimmed }),
@@ -947,7 +978,7 @@ function SchoolMasterApp() {
         localStorage.setItem('sm_had_offline_period_v1', 'true');
       } catch { /* ignore */ }
     } else {
-      fetch('/api/teacher-attendance', {
+      apiFetch('/api/teacher-attendance', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(enrichedRecord),
@@ -1663,7 +1694,7 @@ function SchoolMasterApp() {
         localStorage.setItem('sm_had_offline_period_v1', 'true');
       } catch { /* ignore */ }
     } else {
-      fetch('/api/leaves', {
+      apiFetch('/api/leaves', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newLeave),
@@ -1696,7 +1727,7 @@ function SchoolMasterApp() {
         localStorage.setItem('sm_had_offline_period_v1', 'true');
       } catch { /* ignore */ }
     } else {
-      fetch(`/api/leaves/${encodeURIComponent(updatedLeave.id)}`, {
+      apiFetch(`/api/leaves/${encodeURIComponent(updatedLeave.id)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updatedLeave),
@@ -1730,7 +1761,7 @@ function SchoolMasterApp() {
       ],
     };
     setLeaveApplications((prev) => prev.map((l) => (l.id === leaveId ? archived : l)));
-    fetch(`/api/leaves/${encodeURIComponent(leaveId)}`, {
+    apiFetch(`/api/leaves/${encodeURIComponent(leaveId)}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ deletedBy: currentUser.name, reason: deletionReason }),
@@ -1766,7 +1797,7 @@ function SchoolMasterApp() {
       ],
     };
     setLeaveApplications((prev) => prev.map((l) => (l.id === leaveId ? updated : l)));
-    fetch(`/api/leaves/${encodeURIComponent(leaveId)}/decision`, {
+    apiFetch(`/api/leaves/${encodeURIComponent(leaveId)}/decision`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status: 'Under_Review', actorName: currentUser.name, headmasterRemarks: remarks }),
@@ -1825,7 +1856,7 @@ function SchoolMasterApp() {
     };
 
     setLeaveApplications((prev) => prev.map((l) => (l.id === leaveId ? updated : l)));
-    fetch(`/api/leaves/${encodeURIComponent(leaveId)}/decision`, {
+    apiFetch(`/api/leaves/${encodeURIComponent(leaveId)}/decision`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status: 'Approved', actorName: currentUser.name, headmasterRemarks: remarks }),
@@ -1864,7 +1895,7 @@ function SchoolMasterApp() {
       ],
     };
     setLeaveApplications((prev) => prev.map((l) => (l.id === leaveId ? updated : l)));
-    fetch(`/api/leaves/${encodeURIComponent(leaveId)}/decision`, {
+    apiFetch(`/api/leaves/${encodeURIComponent(leaveId)}/decision`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -2999,8 +3030,14 @@ function SchoolMasterApp() {
 
 export default function App() {
   return (
-    <PermissionsProvider>
-      <SchoolMasterApp />
-    </PermissionsProvider>
+    <HashRouter>
+      <PermissionsProvider>
+        <Routes>
+          <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          <Route path="/:module/*" element={<SchoolMasterApp />} />
+          <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        </Routes>
+      </PermissionsProvider>
+    </HashRouter>
   );
 }

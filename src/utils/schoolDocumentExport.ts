@@ -102,6 +102,20 @@ async function renderBrandedDocumentPages(
   const CONTENT_W = W - PAD * 2;
   const FOOTER_H = 74;
 
+  if (typeof document !== 'undefined' && document.fonts?.ready) {
+    try {
+      await document.fonts.ready;
+    } catch {
+      // Ignore font readiness errors
+    }
+  }
+
+  const containsRtl = (text: string): boolean => /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/.test(text);
+  const KASHMIRI_HEADING_FONT = '700 25px "Scheherazade New", "Noto Sans Arabic", "Noto Nastaliq Urdu", "Plus Jakarta Sans", serif';
+  const KASHMIRI_BODY_FONT = '400 24px "Scheherazade New", "Noto Sans Arabic", "Noto Nastaliq Urdu", "Plus Jakarta Sans", serif';
+  const LATIN_HEADING_FONT = '800 21px "Plus Jakarta Sans", Arial, sans-serif';
+  const LATIN_BODY_FONT = '400 19px "Plus Jakarta Sans", Arial, sans-serif';
+
   const logoImg = options.school.logoDataUrl
     ? await loadImageSafe(options.school.logoDataUrl)
     : null;
@@ -190,12 +204,12 @@ async function renderBrandedDocumentPages(
       ctx.direction = 'ltr';
       ctx.textAlign = 'left';
 
-      // Document Type Pill Label
+      // Document Type Label
       ctx.fillStyle = '#FCD34D';
       ctx.font = 'bold 20px "Plus Jakarta Sans", Arial, sans-serif';
       ctx.fillText(options.documentType.toUpperCase(), textLeft, 90);
 
-      // School Name (never invented)
+      // School Name
       if (schoolName) {
         ctx.fillStyle = '#FFFFFF';
         ctx.font = '800 32px "Plus Jakarta Sans", Arial, sans-serif';
@@ -225,7 +239,7 @@ async function renderBrandedDocumentPages(
 
       y = 268;
 
-      // Structured Metadata Grid (Academic Session, Teacher, Class/Section, Subject, Date, Exam Marks/Time)
+      // Structured Metadata Grid
       const metaEntries: Array<[string, string]> = [];
       if (options.examName) metaEntries.push(['Examination', options.examName]);
       if (schoolSession) metaEntries.push(['Academic Session', schoolSession]);
@@ -245,7 +259,7 @@ async function renderBrandedDocumentPages(
 
       const cols = 2;
       const rowsCount = Math.ceil(metaEntries.length / cols);
-      const boxH = Math.max(66, rowsCount * 36 + 26);
+      const boxH = Math.max(70, rowsCount * 38 + 26);
 
       ctx.fillStyle = '#F8FAFC';
       ctx.strokeStyle = '#E2E8F0';
@@ -260,39 +274,54 @@ async function renderBrandedDocumentPages(
         const col = idx % cols;
         const row = Math.floor(idx / cols);
         const mx = PAD + 18 + col * colW;
-        const my = y + 32 + row * 34;
+        const my = y + 34 + row * 36;
+        ctx.direction = 'ltr';
+        ctx.textAlign = 'left';
         ctx.fillStyle = '#64748B';
         ctx.font = '700 17px "Plus Jakarta Sans", Arial, sans-serif';
         ctx.fillText(`${label}: `, mx, my);
         const lw = ctx.measureText(`${label}: `).width;
         ctx.fillStyle = '#0F172A';
-        ctx.font = '700 18px "Plus Jakarta Sans", Arial, sans-serif';
+        ctx.font = containsRtl(val)
+          ? '700 21px "Scheherazade New", "Noto Sans Arabic", "Plus Jakarta Sans", serif'
+          : '700 18px "Plus Jakarta Sans", Arial, sans-serif';
         ctx.fillText(val.slice(0, 42), mx + lw, my);
       });
 
-      y += boxH + 26;
+      y += boxH + 28;
 
-      // Document Title Banner
+      // Document Title Banner (auto-adapts to Kashmiri RTL or English LTR)
+      const titleIsRtl = containsRtl(options.title);
       ctx.fillStyle = '#1E1B4B';
-      ctx.font = '800 26px "Plus Jakarta Sans", Arial, sans-serif';
+      ctx.font = titleIsRtl
+        ? '700 32px "Scheherazade New", "Noto Sans Arabic", "Noto Nastaliq Urdu", serif'
+        : '800 26px "Plus Jakarta Sans", Arial, sans-serif';
+      ctx.direction = titleIsRtl ? 'rtl' : 'ltr';
+      ctx.textAlign = titleIsRtl ? 'right' : 'left';
       const titleLines = wrapCanvasText(ctx, options.title, CONTENT_W);
+      const titleStep = titleIsRtl ? 46 : 34;
       for (const tl of titleLines) {
-        ctx.fillText(tl, PAD, y);
-        y += 34;
+        ctx.fillText(tl, titleIsRtl ? W - PAD : PAD, y);
+        y += titleStep;
       }
       ctx.strokeStyle = '#6366F1';
       ctx.lineWidth = 3;
       ctx.beginPath();
-      ctx.moveTo(PAD, y - 6);
-      ctx.lineTo(PAD + 140, y - 6);
+      if (titleIsRtl) {
+        ctx.moveTo(W - PAD - 140, y - 6);
+        ctx.lineTo(W - PAD, y - 6);
+      } else {
+        ctx.moveTo(PAD, y - 6);
+        ctx.lineTo(PAD + 140, y - 6);
+      }
       ctx.stroke();
-      y += 22;
+      y += 24;
     } else {
       // Continuation page compact header
       ctx.fillStyle = '#F1F5F9';
       ctx.fillRect(36, 36, W - 72, 64);
       ctx.fillStyle = '#334155';
-      ctx.font = '700 18px "Plus Jakarta Sans", Arial, sans-serif';
+      ctx.font = '700 18px "Plus Jakarta Sans", "Scheherazade New", "Noto Sans Arabic", sans-serif';
       ctx.direction = 'ltr';
       ctx.textAlign = 'left';
       ctx.fillText(
@@ -309,56 +338,54 @@ async function renderBrandedDocumentPages(
 
   let pageNum = 1;
   let { ctx, startY: y } = createPage(pageNum);
-  const maxY = H - FOOTER_H - 36;
-  const isRtl = Boolean(options.isRtl);
+  const maxY = H - FOOTER_H - 42;
+  const docRtl = Boolean(options.isRtl);
 
   for (const blk of blocks) {
     if (blk.kind === 'spacer') {
-      y += 12;
+      y += 14;
       continue;
     }
 
     if (blk.kind === 'heading') {
-      ctx.font = isRtl
-        ? '700 24px "Noto Nastaliq Urdu", "Noto Sans Arabic", Arial, sans-serif'
-        : '800 21px "Plus Jakarta Sans", Arial, sans-serif';
-      const wrapped = wrapCanvasText(ctx, blk.text, CONTENT_W);
-      const neededH = wrapped.length * 32 + 16;
-      if (y + neededH > maxY) {
+      const headingRtl = docRtl || containsRtl(blk.text);
+      ctx.font = headingRtl ? KASHMIRI_HEADING_FONT : LATIN_HEADING_FONT;
+      const headingStep = headingRtl ? 40 : 30;
+      const wrapped = wrapCanvasText(ctx, blk.text, CONTENT_W - 24);
+      const boxH = wrapped.length * headingStep + 16;
+      if (y + boxH + 28 > maxY) {
         pageNum += 1;
         ({ ctx, startY: y } = createPage(pageNum));
+        ctx.font = headingRtl ? KASHMIRI_HEADING_FONT : LATIN_HEADING_FONT;
       }
       ctx.fillStyle = '#EEF2FF';
       ctx.beginPath();
-      ctx.roundRect(PAD, y - 22, CONTENT_W, wrapped.length * 30 + 12, 8);
+      ctx.roundRect(PAD, y - 26, CONTENT_W, boxH, 8);
       ctx.fill();
 
       ctx.fillStyle = '#312E81';
-      ctx.direction = isRtl ? 'rtl' : 'ltr';
-      ctx.textAlign = isRtl ? 'right' : 'left';
+      ctx.direction = headingRtl ? 'rtl' : 'ltr';
+      ctx.textAlign = headingRtl ? 'right' : 'left';
       for (const line of wrapped) {
-        ctx.fillText(line, isRtl ? W - PAD - 12 : PAD + 12, y + 4);
-        y += 30;
+        ctx.fillText(line, headingRtl ? W - PAD - 14 : PAD + 14, y + 6);
+        y += headingStep;
       }
-      y += 14;
+      y += 18;
     } else {
-      ctx.font = isRtl
-        ? '500 22px "Noto Nastaliq Urdu", "Noto Sans Arabic", Arial, sans-serif'
-        : '400 19px "Plus Jakarta Sans", Arial, sans-serif';
-      const lineStep = isRtl ? 38 : 29;
-      const wrapped = wrapCanvasText(ctx, blk.text, CONTENT_W - 12);
+      const lineRtl = docRtl ? (containsRtl(blk.text) || !/^[A-Za-z0-9]+:/.test(blk.text.trim())) : containsRtl(blk.text);
+      ctx.font = lineRtl ? KASHMIRI_BODY_FONT : LATIN_BODY_FONT;
+      const lineStep = lineRtl ? 44 : 30;
+      const wrapped = wrapCanvasText(ctx, blk.text, CONTENT_W - 16);
       for (const line of wrapped) {
         if (y + lineStep > maxY) {
           pageNum += 1;
           ({ ctx, startY: y } = createPage(pageNum));
-          ctx.font = isRtl
-            ? '500 22px "Noto Nastaliq Urdu", "Noto Sans Arabic", Arial, sans-serif'
-            : '400 19px "Plus Jakarta Sans", Arial, sans-serif';
+          ctx.font = lineRtl ? KASHMIRI_BODY_FONT : LATIN_BODY_FONT;
         }
         ctx.fillStyle = '#1E293B';
-        ctx.direction = isRtl ? 'rtl' : 'ltr';
-        ctx.textAlign = isRtl ? 'right' : 'left';
-        ctx.fillText(line, isRtl ? W - PAD - 6 : PAD + 6, y);
+        ctx.direction = lineRtl ? 'rtl' : 'ltr';
+        ctx.textAlign = lineRtl ? 'right' : 'left';
+        ctx.fillText(line, lineRtl ? W - PAD - 8 : PAD + 8, y);
         y += lineStep;
       }
     }

@@ -61,18 +61,31 @@ cat << 'EOF' > "$WORK_DIR/AndroidManifest.xml"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:hardwareAccelerated="true"
-        android:usesCleartextTraffic="true"
+        android:usesCleartextTraffic="false"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
         
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:configChanges="orientation|screenSize|keyboardHidden|screenLayout"
             android:windowSoftInputMode="adjustResize"
             android:label="@string/app_name">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="ais-pre-r7tdws3aisr6uosq6lza7m-370699773036.asia-northeast1.run.app" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="schoolmaster" />
             </intent-filter>
         </activity>
     </application>
@@ -224,18 +237,16 @@ public class MainActivity extends Activity {
                             path.startsWith("/assets/") || path.startsWith("/api/") || path.contains(".")
                         );
                         if (path != null && !path.isEmpty() && !path.equals("/") && !isAssetOrApi) {
-                            logDiagnosticError(404, url, "Unmapped sub-path redirected to root /", "");
+                            String hashRoute = "#" + (path.startsWith("/") ? path : "/" + path);
                             view.stopLoading();
-                            view.clearHistory();
-                            view.loadUrl(CLOUD_URL + "/");
+                            view.loadUrl(CLOUD_URL + "/" + hashRoute);
                             return true;
                         }
                     }
                 } catch (Exception ignored) { }
 
                 if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("file:///")) {
-                    view.loadUrl(url);
-                    return true;
+                    return false;
                 }
                 return false;
             }
@@ -253,8 +264,11 @@ public class MainActivity extends Activity {
                 mLastFailedUrl = failingUrl != null ? failingUrl : CLOUD_URL;
                 logDiagnosticError(errorCode, mLastFailedUrl, "Connection Failed: " + description, "");
                 if (failingUrl != null && !failingUrl.startsWith("file:///")) {
-                    showErrorOverlay(false, "Connection Failed",
-                        "Could not reach SchoolMaster cloud (" + description + "). You can Retry or open Offline Mode.");
+                    // Seamlessly fall back to bundled offline SPA (retaining hash route) instead of trapping user
+                    String targetHash = extractHashRoute(failingUrl);
+                    view.stopLoading();
+                    view.loadUrl(OFFLINE_URL + targetHash);
+                    Toast.makeText(MainActivity.this, "Switched to Offline Portal — data will sync when online", Toast.LENGTH_SHORT).show();
                 }
             }
 
@@ -267,8 +281,10 @@ public class MainActivity extends Activity {
                 String desc = error.getDescription() != null ? error.getDescription().toString() : "Network error";
                 logDiagnosticError(error.getErrorCode(), failingUrl, "Connection Failed: " + desc, "");
                 if (!failingUrl.startsWith("file:///")) {
-                    showErrorOverlay(false, "Connection Failed",
-                        "Could not reach SchoolMaster cloud (" + desc + "). Tap Retry or open Offline Mode.");
+                    String targetHash = extractHashRoute(failingUrl);
+                    view.stopLoading();
+                    view.loadUrl(OFFLINE_URL + targetHash);
+                    Toast.makeText(MainActivity.this, "Switched to Offline Portal — data will sync when online", Toast.LENGTH_SHORT).show();
                 }
             }
 
@@ -289,9 +305,11 @@ public class MainActivity extends Activity {
                     }
                     mLastHeadersSummary = hdr.toString();
                     logDiagnosticError(status, failingUrl, "HTTP " + status + " " + errorResponse.getReasonPhrase(), mLastHeadersSummary);
-                    showErrorOverlay(status == 404,
-                        status == 404 ? "Page Not Found (HTTP 404)" : "Server Error (HTTP " + status + ")",
-                        "Requested URL: " + failingUrl + "\\nTap Return to Dashboard to clear history and reload the root SchoolMaster portal.");
+                    // Automatically recover from 404/5xx by loading bundled offline SPA with preserved hash route
+                    String targetHash = extractHashRoute(failingUrl);
+                    view.stopLoading();
+                    view.clearHistory();
+                    view.loadUrl(OFFLINE_URL + targetHash);
                 }
             }
         });
@@ -325,12 +343,35 @@ public class MainActivity extends Activity {
             }
         });
 
+        String initialHash = resolveInitialHashFromIntent(getIntent());
         if (isNetworkAvailable()) {
-            mWebView.loadUrl(CLOUD_URL + "/");
+            mWebView.loadUrl(CLOUD_URL + "/" + initialHash);
         } else {
-            mWebView.loadUrl(OFFLINE_URL);
+            mWebView.loadUrl(OFFLINE_URL + initialHash);
             Toast.makeText(MainActivity.this, "Offline mode activated - loading local database", Toast.LENGTH_SHORT).show();
         }
+    }
+
+    private String resolveInitialHashFromIntent(Intent intent) {
+        if (intent != null && intent.getData() != null) {
+            return extractHashRoute(intent.getData().toString());
+        }
+        return "#/dashboard";
+    }
+
+    private String extractHashRoute(String rawUrl) {
+        try {
+            Uri uri = Uri.parse(rawUrl);
+            String fragment = uri.getFragment();
+            if (fragment != null && !fragment.isEmpty()) {
+                return fragment.startsWith("/") ? "#" + fragment : "#/" + fragment;
+            }
+            String path = uri.getPath();
+            if (path != null && !path.isEmpty() && !path.equals("/") && !path.endsWith("index.html")) {
+                return "#" + (path.startsWith("/") ? path : "/" + path);
+            }
+        } catch (Exception ignored) { }
+        return "#/dashboard";
     }
 
     private LinearLayout buildSplashOverlay() {

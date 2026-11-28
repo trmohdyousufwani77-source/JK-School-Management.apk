@@ -10,6 +10,8 @@ import {
   requireAdminPrivilege,
   validateAdminPrivilege,
 } from './server/utils/adminAuthGuard';
+import { registerSmartAttendanceRoutes } from './server/smartAttendanceRouter';
+import { registerShortLessonPlanRoutes } from './server/shortLessonPlanRouter';
 
 const PORT = 3000;
 const JKEPM_STORE_PATH = path.resolve(process.cwd(), '.jkepm-portal-store.json');
@@ -172,15 +174,53 @@ async function startServer() {
     next();
   });
 
+  // Cross-platform CORS middleware for Android WebView (file:// -> Origin: null),
+  // iOS WKWebView, Capacitor, and Desktop PWA clients calling production /api/* endpoints.
+  app.use('/api', (req, res, next) => {
+    const origin = req.headers.origin;
+    const configuredAppUrl = (
+      process.env.APP_URL ||
+      process.env.VITE_APP_URL ||
+      'https://ais-pre-r7tdws3aisr6uosq6lza7m-370699773036.asia-northeast1.run.app'
+    ).replace(/\/+$/, '');
+
+    const isAllowedOrigin =
+      !origin ||
+      origin === 'null' ||
+      origin === configuredAppUrl ||
+      origin.startsWith('capacitor://') ||
+      origin.startsWith('ionic://') ||
+      origin.startsWith('file://') ||
+      /^https:\/\/[a-z0-9-]+\.[a-z0-9-]+\.run\.app$/i.test(origin) ||
+      /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+
+    if (isAllowedOrigin) {
+      res.setHeader('Access-Control-Allow-Origin', origin && origin !== 'null' ? origin : '*');
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+      res.setHeader(
+        'Access-Control-Allow-Headers',
+        'Content-Type, Authorization, X-Requested-With, X-SchoolMaster-Role, X-Admin-Email'
+      );
+    }
+
+    if (req.method === 'OPTIONS') {
+      return res.status(204).end();
+    }
+    return next();
+  });
+
   app.get('/api/health', (_req, res) => {
     res.setHeader('X-SchoolMaster-Version', '1.0.4');
     res.setHeader('X-Routing-Fallback', 'active');
     res.setHeader('Cache-Control', 'no-store');
     res.json({
+      ok: true,
       status: 'ok',
       version: '1.0.4',
       service: 'SchoolMaster Production API',
       routingFallback: 'spa-index-html',
+      routingMode: 'hash-and-spa-fallback',
       appUrl:
         process.env.APP_URL ||
         process.env.VITE_APP_URL ||
@@ -1150,7 +1190,7 @@ async function startServer() {
   });
 
   // =========================================================================
-  // DAILY TEACHER'S DIARY — AUTOMATIC AI GENERATOR (DATE + LESSON NAME + OCR)
+  // DAILY TEACHER'S DIARY — AUTOMATIC KASHMIRI-FIRST AI GENERATOR (5 FIELDS)
   // =========================================================================
   app.post('/api/smart-edu/diary/generate', async (req, res) => {
     try {
@@ -1163,25 +1203,32 @@ async function startServer() {
       }
 
       const payload = req.body || {};
+      const topic = String(payload.topic || '').trim().slice(0, 300);
       const date = String(payload.date || '').trim().slice(0, 20);
+      const subject = String(payload.subject || '').trim().slice(0, 120);
       const lessonName = String(payload.lessonName || '').trim().slice(0, 300);
-      const classNumber = String(payload.classNumber || 'Class 8').trim().slice(0, 40);
-      const section = String(payload.section || 'A').trim().slice(0, 12);
-      const subject = String(payload.subject || 'Science').trim().slice(0, 80);
+      const introduction = String(payload.introduction ?? payload.lessonIntroduction ?? '').trim().slice(0, 1200);
+      const classNumber = String(payload.classNumber || '').trim().slice(0, 40);
+      const section = String(payload.section || '').trim().slice(0, 12);
       const teacherName = String(payload.teacherName || 'Teacher').trim().slice(0, 120);
       const schoolName = String(payload.schoolName || '').trim().slice(0, 200);
       const academicSession = String(payload.academicSession || '').trim().slice(0, 40);
       const language =
-        payload.language === 'Urdu' || payload.language === 'Kashmiri'
+        payload.language === 'English' || payload.language === 'Urdu'
           ? payload.language
-          : 'English';
+          : 'Kashmiri';
       const kashmiriScript = payload.kashmiriScript === 'devanagari' ? 'devanagari' : 'perso-arabic';
-      const ocrExtractedText = String(payload.ocrExtractedText || '').trim().slice(0, 8000);
 
-      if (!date || !lessonName) {
+      if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
         return res.status(400).json({
           ok: false,
-          error: 'Please enter Date and Lesson Name / Topic to generate the Daily Teacher Diary.',
+          error: 'Please enter a valid Date (YYYY-MM-DD).',
+        });
+      }
+      if (!topic || !subject || !lessonName) {
+        return res.status(400).json({
+          ok: false,
+          error: 'Please enter Topic Name, Date, Subject, and Lesson Name to automatically generate the diary.',
         });
       }
 
@@ -1194,30 +1241,37 @@ async function startServer() {
 
       const langInstruction =
         language === 'Urdu'
-          ? 'Write ALL generated fields naturally and professionally in Urdu (اردو Perso-Arabic script).'
-          : language === 'Kashmiri'
-          ? kashmiriScript === 'devanagari'
-            ? 'Write ALL generated fields naturally in Kashmiri (Devanagari script).'
-            : 'Write ALL generated fields naturally in Kashmiri (Perso-Arabic script).'
-          : 'Write ALL generated fields in clear, professional, age-appropriate school English.';
+          ? 'Write ALL generated diary sections in simple, short, professional educational Urdu (اردو Perso-Arabic script).'
+          : language === 'English'
+          ? 'Write ALL generated diary sections in simple, short, professional educational English.'
+          : kashmiriScript === 'devanagari'
+          ? 'Write ALL generated diary sections strictly in simple, short, professional Kashmiri (Devanagari script) with proper Kashmiri grammar.'
+          : [
+              'Write ALL generated diary sections STRICTLY in authentic Kashmiri Script (کٲشُر — Perso-Arabic Kashmiri Unicode script).',
+              'Use proper Kashmiri Unicode letters and vowel marks (such as کٲشُر، ٲ، ؠ، ۍ، ژ، ٹ، ڈ، ڑ، ں، ہ، ے) and natural, grammatically accurate Kashmiri school terminology (e.g., تٔعلیمی مقصَد، سبق، طالب عٔلِم، کلاس روم، گھرٕچ کٲم، اُستاد).',
+              'Do NOT write English or Urdu paragraphs — every generated section must be in genuine Kashmiri script.',
+            ].join(' ');
 
       const prompt = [
-        'Generate a complete, structured, editable Daily Teacher\'s Diary draft for teacher review.',
-        `Date: ${date}`,
-        `Lesson Name / Topic: ${lessonName}`,
-        `Class & Section: ${classNumber}${section ? ` - ${section}` : ''}`,
-        `Subject: ${subject}`,
-        `Teacher: ${teacherName}`,
+        'Automatically generate a complete, concise Teacher\'s Daily Diary from the teacher\'s five approved manual inputs:',
+        `1. Topic Name: ${topic}`,
+        `2. Date: ${date}`,
+        `3. Subject: ${subject}`,
+        `4. Lesson Name: ${lessonName}`,
+        `5. Introduction (Minimal): ${introduction || '(Minimal introduction not entered — infer brief context directly from Topic Name, Subject, and Lesson Name)'}`,
+        classNumber ? `School Context (auto-loaded, do not ask teacher): Class ${classNumber}${section ? `-${section}` : ''}` : '',
         schoolName ? `School: ${schoolName}` : '',
         academicSession ? `Academic Session: ${academicSession}` : '',
-        ocrExtractedText
-          ? `Teacher-verified OCR textbook/notes excerpt to incorporate accurately:\n"""\n${ocrExtractedText}\n"""`
-          : '',
+        teacherName ? `Teacher: ${teacherName}` : '',
+        '',
         langInstruction,
-        'IMPORTANT SAFETY & INTEGRITY RULES:',
-        '- Draft practical, syllabus-aligned, age-appropriate planned/reference content for the teacher to verify and edit.',
-        '- NEVER mark student attendance, NEVER invent student attendance numbers, and NEVER claim unverified personal incidents occurred.',
-        '- Phrase remarks and summary as editable teacher-reviewable notes.',
+        '',
+        'STYLE & QUALITY RULES:',
+        '- Use simple, professional, educational language.',
+        '- Keep EVERY section short, crisp, and meaningful (1 to 3 concise sentences or 2 to 3 short bullet points per field).',
+        '- Avoid unnecessary or lengthy explanations.',
+        '- Align all sections accurately with the given Topic Name, Subject, Lesson Name, and Introduction.',
+        '- NEVER invent student attendance numbers or unverified classroom incidents.',
       ]
         .filter(Boolean)
         .join('\n');
@@ -1227,36 +1281,63 @@ async function startServer() {
         contents: prompt,
         config: {
           systemInstruction:
-            'You are an experienced school pedagogy assistant drafting official Daily Teacher Diary entries for NCERT/JKBOSE schools. Always return structured, concise, editable JSON.',
+            'You are a Kashmiri-first educational pedagogy expert who creates short, clean, grammatically accurate Teacher Daily Diaries in authentic Kashmiri Script (کٲشُر — Perso-Arabic Unicode). Always return valid, concise JSON matching the schema.',
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
             properties: {
-              topic: { type: Type.STRING },
-              subTopic: { type: Type.STRING },
-              lessonIntroduction: { type: Type.STRING },
-              learningObjectives: { type: Type.STRING },
-              topicsCovered: { type: Type.STRING },
-              teachingMethodology: { type: Type.STRING },
-              classroomTeachingActivities: { type: Type.STRING },
-              lessonExplanation: { type: Type.STRING },
-              teachingLearningMaterials: { type: Type.STRING },
-              studentParticipationActivities: { type: Type.STRING },
-              learningOutcomes: { type: Type.STRING },
-              homeworkAssigned: { type: Type.STRING },
-              teachersRemarks: { type: Type.STRING },
-              dailyTeachingSummary: { type: Type.STRING },
+              kashmiriHeaderSummary: {
+                type: Type.STRING,
+                description: 'One short Kashmiri line summarizing the lesson & topic title in Kashmiri script.',
+              },
+              learningObjectives: {
+                type: Type.STRING,
+                description: '2-3 short bullet points of learning objectives in Kashmiri script.',
+              },
+              teachingMethodology: {
+                type: Type.STRING,
+                description: '1-2 short sentences describing the teaching method in Kashmiri script.',
+              },
+              classroomTeachingActivities: {
+                type: Type.STRING,
+                description: '2-3 short classroom activities in Kashmiri script.',
+              },
+              teachingLearningMaterials: {
+                type: Type.STRING,
+                description: 'Short list of teaching aids / TLM in Kashmiri script.',
+              },
+              lessonExplanation: {
+                type: Type.STRING,
+                description: '2-3 short, clear sentences explaining the core concept in Kashmiri script.',
+              },
+              studentParticipationActivities: {
+                type: Type.STRING,
+                description: '1-2 short sentences on student participation/Q&A in Kashmiri script.',
+              },
+              learningOutcomes: {
+                type: Type.STRING,
+                description: '2 short expected learning outcomes in Kashmiri script.',
+              },
+              homeworkAssigned: {
+                type: Type.STRING,
+                description: '1-2 brief, meaningful homework tasks in Kashmiri script.',
+              },
+              teachersRemarks: {
+                type: Type.STRING,
+                description: '1 short professional teacher remark in Kashmiri script.',
+              },
+              dailyTeachingSummary: {
+                type: Type.STRING,
+                description: '2 short sentences summarizing the daily teaching record in Kashmiri script.',
+              },
             },
             required: [
-              'topic',
-              'subTopic',
-              'lessonIntroduction',
+              'kashmiriHeaderSummary',
               'learningObjectives',
-              'topicsCovered',
               'teachingMethodology',
               'classroomTeachingActivities',
-              'lessonExplanation',
               'teachingLearningMaterials',
+              'lessonExplanation',
               'studentParticipationActivities',
               'learningOutcomes',
               'homeworkAssigned',
@@ -1270,7 +1351,13 @@ async function startServer() {
       const generated = JSON.parse((response.text || '{}').trim());
       return res.json({
         ok: true,
-        diary: generated,
+        diary: {
+          ...generated,
+          topic,
+          subject,
+          lessonName,
+          lessonIntroduction: introduction,
+        },
         language,
         kashmiriScript,
         isRtl: language === 'Urdu' || (language === 'Kashmiri' && kashmiriScript === 'perso-arabic'),
@@ -1291,19 +1378,24 @@ async function startServer() {
     const lessonNo = String(payload.lessonNo || '-').trim().slice(0, 60);
     const topic = String(payload.topic || lessonName).trim().slice(0, 300);
     const subTopic = String(payload.subTopic || '-').trim().slice(0, 300);
+    const subject = String(payload.subject || 'General').trim().slice(0, 120);
 
-    if (!date || !lessonName) {
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !lessonName) {
       return res.status(400).json({
         ok: false,
-        error: 'Date and Lesson Name are required for a Daily Teacher Diary entry.',
+        error: 'A valid Date (YYYY-MM-DD) and Lesson Name are required for a Daily Teacher Diary entry.',
       });
+    }
+
+    const rawId = String(payload.id || `diary-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`).trim();
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(rawId)) {
+      return res.status(400).json({ ok: false, error: 'Invalid diary entry identifier.' });
     }
 
     const store = readTeacherDiaryStore();
     const now = new Date().toISOString();
-    const id = String(payload.id || `diary-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
     const record: Record<string, any> = {
-      id,
+      id: rawId,
       date,
       lessonName,
       lessonNo,
@@ -1311,9 +1403,10 @@ async function startServer() {
       subTopic,
       classNumber: String(payload.classNumber || '').trim().slice(0, 40),
       section: String(payload.section || '').trim().slice(0, 12),
-      subject: String(payload.subject || '').trim().slice(0, 80),
+      subject,
       academicSession: String(payload.academicSession || '').trim().slice(0, 40),
-      lessonIntroduction: String(payload.lessonIntroduction || '').trim().slice(0, 2000),
+      lessonIntroduction: String(payload.lessonIntroduction ?? payload.introduction ?? '').trim().slice(0, 2000),
+      kashmiriHeaderSummary: String(payload.kashmiriHeaderSummary || '').trim().slice(0, 500),
       learningObjectives: String(payload.learningObjectives || '').trim().slice(0, 2000),
       topicsCovered: String(payload.topicsCovered || '').trim().slice(0, 2000),
       teachingMethodology: String(payload.teachingMethodology || '').trim().slice(0, 2000),
@@ -1328,16 +1421,16 @@ async function startServer() {
       ocrExtractedText: String(payload.ocrExtractedText || '').trim().slice(0, 8000),
       auditHistory: Array.isArray(payload.auditHistory) ? payload.auditHistory.slice(0, 30) : [],
       language:
-        payload.language === 'Urdu' || payload.language === 'Kashmiri'
+        payload.language === 'Urdu' || payload.language === 'English'
           ? payload.language
-          : 'English',
+          : 'Kashmiri',
       kashmiriScript: payload.kashmiriScript === 'devanagari' ? 'devanagari' : 'perso-arabic',
       teacherName: String(payload.teacherName || 'Teacher').trim().slice(0, 120),
       createdAt: String(payload.createdAt || now),
       updatedAt: now,
     };
 
-    const idx = store.entries.findIndex((e) => e.id === id);
+    const idx = store.entries.findIndex((e) => e.id === rawId);
     if (idx >= 0) {
       store.entries[idx] = record as any;
     } else {
@@ -1349,24 +1442,40 @@ async function startServer() {
 
   app.put('/api/smart-edu/diary/:id', (req, res) => {
     const { id } = req.params;
+    if (!id || !/^[a-zA-Z0-9_-]{1,128}$/.test(id)) {
+      return res.status(400).json({ ok: false, error: 'Invalid diary entry identifier.' });
+    }
     const payload = req.body || {};
     const store = readTeacherDiaryStore();
     const idx = store.entries.findIndex((e) => e.id === id);
     const now = new Date().toISOString();
     const existing: any = idx >= 0 ? store.entries[idx] : null;
+    const nextDate = String(payload.date ?? existing?.date ?? '').trim().slice(0, 20);
+    if (!nextDate || !/^\d{4}-\d{2}-\d{2}$/.test(nextDate)) {
+      return res.status(400).json({ ok: false, error: 'Invalid Date format (YYYY-MM-DD required).' });
+    }
     const updated: Record<string, any> = {
       ...(existing || {}),
       id,
-      date: String(payload.date ?? existing?.date ?? '').trim().slice(0, 20),
+      date: nextDate,
       lessonName: String(payload.lessonName ?? existing?.lessonName ?? '').trim().slice(0, 300),
       lessonNo: String(payload.lessonNo ?? existing?.lessonNo ?? '-').trim().slice(0, 60),
       topic: String(payload.topic ?? existing?.topic ?? payload.lessonName ?? '').trim().slice(0, 300),
       subTopic: String(payload.subTopic ?? existing?.subTopic ?? '-').trim().slice(0, 300),
       classNumber: String(payload.classNumber ?? existing?.classNumber ?? '').trim().slice(0, 40),
       section: String(payload.section ?? existing?.section ?? '').trim().slice(0, 12),
-      subject: String(payload.subject ?? existing?.subject ?? '').trim().slice(0, 80),
+      subject: String(payload.subject ?? existing?.subject ?? '').trim().slice(0, 120),
       academicSession: String(payload.academicSession ?? existing?.academicSession ?? '').trim().slice(0, 40),
-      lessonIntroduction: String(payload.lessonIntroduction ?? existing?.lessonIntroduction ?? '').trim().slice(0, 2000),
+      lessonIntroduction: String(
+        payload.lessonIntroduction ?? payload.introduction ?? existing?.lessonIntroduction ?? ''
+      )
+        .trim()
+        .slice(0, 2000),
+      kashmiriHeaderSummary: String(
+        payload.kashmiriHeaderSummary ?? existing?.kashmiriHeaderSummary ?? ''
+      )
+        .trim()
+        .slice(0, 500),
       learningObjectives: String(payload.learningObjectives ?? existing?.learningObjectives ?? '').trim().slice(0, 2000),
       topicsCovered: String(payload.topicsCovered ?? existing?.topicsCovered ?? '').trim().slice(0, 2000),
       teachingMethodology: String(payload.teachingMethodology ?? existing?.teachingMethodology ?? '').trim().slice(0, 2000),
@@ -1383,9 +1492,9 @@ async function startServer() {
         ? payload.auditHistory.slice(0, 30)
         : existing?.auditHistory || [],
       language:
-        payload.language === 'Urdu' || payload.language === 'Kashmiri'
+        payload.language === 'Urdu' || payload.language === 'English' || payload.language === 'Kashmiri'
           ? payload.language
-          : existing?.language || 'English',
+          : existing?.language || 'Kashmiri',
       kashmiriScript:
         payload.kashmiriScript === 'devanagari'
           ? 'devanagari'
@@ -1405,6 +1514,9 @@ async function startServer() {
 
   app.delete('/api/smart-edu/diary/:id', (req, res) => {
     const { id } = req.params;
+    if (!id || !/^[a-zA-Z0-9_-]{1,128}$/.test(id)) {
+      return res.status(400).json({ ok: false, error: 'Invalid diary entry identifier.' });
+    }
     const store = readTeacherDiaryStore();
     const before = store.entries.length;
     store.entries = store.entries.filter((e) => e.id !== id);
@@ -2663,6 +2775,17 @@ async function startServer() {
     }
   });
 
+  // Mount Smart Digital School Attendance Management System REST APIs
+  registerSmartAttendanceRoutes(app);
+
+  // Mount AI-Powered Short Lesson Plan Generator REST APIs
+  registerShortLessonPlanRoutes(app);
+
+  // Return clean JSON 404 for unknown /api/* routes in both development and production
+  app.use('/api', (_req, res) => {
+    res.status(404).json({ ok: false, error: 'API endpoint not found.' });
+  });
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -2671,11 +2794,18 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.resolve(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.use('/api', (_req, res) => {
-      res.status(404).json({ error: 'API endpoint not found.' });
-    });
+    app.use(
+      express.static(distPath, {
+        index: false,
+        setHeaders(res, filePath) {
+          if (filePath.endsWith('index.html') || filePath.endsWith('sw.js')) {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          }
+        },
+      })
+    );
     app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

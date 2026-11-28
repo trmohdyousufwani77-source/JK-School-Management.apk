@@ -1,3 +1,4 @@
+import { apiFetch } from "../utils/apiConfig";
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Camera,
@@ -233,7 +234,7 @@ export const DashboardAiAssistant: React.FC<DashboardAiAssistantProps> = ({
     setIsLoading(true);
 
     try {
-      const response = await fetch('/api/dashboard-ai', {
+      const response = await apiFetch('/api/dashboard-ai', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

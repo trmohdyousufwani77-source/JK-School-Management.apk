@@ -1,3 +1,4 @@
+import { apiFetch } from "../utils/apiConfig";
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Bot,
@@ -157,7 +158,7 @@ export const AiStudyChatbot: React.FC<AiStudyChatbotProps> = ({
     setIsSending(true);
 
     try {
-      const res = await fetch('/api/smart-edu/generate', {
+      const res = await apiFetch('/api/smart-edu/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -201,7 +202,7 @@ export const AiStudyChatbot: React.FC<AiStudyChatbotProps> = ({
     setTranslatingKey(key);
     setErrorMsg(null);
     try {
-      const res = await fetch('/api/smart-edu/generate', {
+      const res = await apiFetch('/api/smart-edu/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -242,7 +243,7 @@ export const AiStudyChatbot: React.FC<AiStudyChatbotProps> = ({
     setIsTranslatingPanel(true);
     setErrorMsg(null);
     try {
-      const res = await fetch('/api/smart-edu/generate', {
+      const res = await apiFetch('/api/smart-edu/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

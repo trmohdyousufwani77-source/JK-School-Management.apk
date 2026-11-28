@@ -9,8 +9,10 @@ export const NAVIGATION_LOG_STORAGE_KEY = 'school_master_navigation_logs_v1';
 export const OFFLINE_SYNC_QUEUE_KEY = 'school_master_offline_sync_queue_v1';
 export const DEVICE_ID_STORAGE_KEY = 'school_master_device_id_v1';
 
-export const PRODUCTION_APP_URL =
-  'https://ais-pre-r7tdws3aisr6uosq6lza7m-370699773036.asia-northeast1.run.app';
+import { PRODUCTION_APP_URL, resolveApiUrl } from './apiConfig';
+import { isValidSpaRoutePath } from './hashRouter';
+
+export { PRODUCTION_APP_URL };
 
 export interface AppErrorLogEntry {
   id: string;
@@ -66,19 +68,7 @@ export interface HeartbeatPingResult {
   errorMessage?: string;
 }
 
-const VALID_SPA_PATHS = new Set<string>([
-  '/',
-  '/index.html',
-  '/dashboard',
-  '/students',
-  '/attendance',
-  '/progress-cards',
-  '/about-us',
-  '/settings',
-  '/teacher-leave',
-  '/jkepm-appraisal',
-  '/ai-chatbot',
-]);
+// Valid SPA path checks now delegate to hashRouter.isValidSpaRoutePath (covers all 38 tabs + nested paths + Android asset paths)
 
 export function getOrCreateDeviceId(): string {
   if (typeof window === 'undefined') return 'SM-WEB-SERVER';
@@ -254,27 +244,41 @@ export function recordNavigationEvent(
  */
 export function observeAndRecoverRoute(activeTab: string): { recovered: boolean; path: string } {
   if (typeof window === 'undefined') return { recovered: false, path: '/' };
+  const protocol = (window.location.protocol || '').toLowerCase();
   const currentPath = window.location.pathname || '/';
   const normalized = currentPath.length > 1 ? currentPath.replace(/\/+$/, '') : '/';
 
-  if (!VALID_SPA_PATHS.has(normalized) && !normalized.startsWith('/api/')) {
+  // On file:// / Capacitor / Android WebView asset bundles, NEVER rewrite pathname to '/'
+  // (doing so corrupts file:///android_asset/www/index.html into file:/// and causes Page Not Found).
+  if (protocol !== 'http:' && protocol !== 'https:') {
+    recordNavigationEvent(
+      window.location.hash || `#/${activeTab}`,
+      window.location.hash || `#/${activeTab}`,
+      activeTab,
+      'OK'
+    );
+    return { recovered: false, path: window.location.hash || `#/${activeTab}` };
+  }
+
+  if (!isValidSpaRoutePath(normalized) && !normalized.startsWith('/api/')) {
     logAppError({
       type: '404_NOT_FOUND',
       requestedUrl: window.location.href,
       httpStatus: 404,
-      message: `Client-side NavigationObserver detected unrecognized route "${currentPath}" and recovered to root dashboard.`,
+      message: `Client-side NavigationObserver detected unrecognized route "${currentPath}" and recovered to hash dashboard.`,
       recoveredToRoot: true,
     });
-    recordNavigationEvent(currentPath, '/', activeTab, 'RECOVERED_404');
+    const safeHash = window.location.hash && window.location.hash !== '#' ? window.location.hash : `#/${activeTab || 'dashboard'}`;
+    recordNavigationEvent(currentPath, `/${safeHash}`, activeTab, 'RECOVERED_404');
     try {
-      window.history.replaceState({}, '', '/' + (window.location.hash || ''));
+      window.history.replaceState({}, '', `/${safeHash}`);
     } catch {
       // ignore history errors in sandboxed iframes
     }
     return { recovered: true, path: currentPath };
   }
 
-  recordNavigationEvent(normalized, normalized, activeTab, window.location.hash ? 'DEEP_LINK' : 'OK');
+  recordNavigationEvent(normalized, window.location.hash || normalized, activeTab, window.location.hash ? 'DEEP_LINK' : 'OK');
   return { recovered: false, path: normalized };
 }
 
@@ -350,8 +354,9 @@ export async function runProductionHeartbeatPing(
 ): Promise<HeartbeatPingResult> {
   const started = typeof performance !== 'undefined' ? performance.now() : Date.now();
   const timestamp = new Date().toISOString();
+  const resolvedEndpoint = resolveApiUrl(endpoint);
   try {
-    const response = await fetch(endpoint, {
+    const response = await fetch(resolvedEndpoint, {
       method: 'GET',
       cache: 'no-store',
       headers: { Accept: 'application/json' },

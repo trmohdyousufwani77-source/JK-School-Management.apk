@@ -141,7 +141,7 @@ const INITIAL_LOGIN_SESSIONS: LoginSessionItem[] = [
     userRole: 'System Daemon',
     email: 'daemon.udise@school.internal',
     timestamp: '2026-10-29T16:45:00Z',
-    ipAddress: '127.0.0.1 (Localhost)',
+    ipAddress: '10.0.0.4 (Internal Sync Worker)',
     location: 'School Master Server Service Worker',
     deviceInfo: 'Node.js / Chromium Sandbox',
     authMethod: 'API_Key',

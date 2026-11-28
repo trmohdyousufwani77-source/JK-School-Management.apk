@@ -1,3 +1,4 @@
+import { apiFetch } from "../utils/apiConfig";
 import React, { useEffect, useState } from 'react';
 import {
   BookOpen,
@@ -153,7 +154,7 @@ export const DashboardLessonPlanGenerator: React.FC<DashboardLessonPlanGenerator
     setIsEditing(false);
 
     try {
-      const response = await fetch('/api/lesson-plan-generator', {
+      const response = await apiFetch('/api/lesson-plan-generator', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

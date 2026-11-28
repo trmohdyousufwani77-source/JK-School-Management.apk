@@ -1,3 +1,4 @@
+import { apiFetch } from "../utils/apiConfig";
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   BookOpen,
@@ -60,6 +61,7 @@ import { StudioImageQaGenerator } from './StudioImageQaGenerator';
 import { DailyTeacherDiary } from './DailyTeacherDiary';
 import { ScienceHandwrittenImageCreator } from './ScienceHandwrittenImageCreator';
 import { AiOcrTool } from './AiOcrTool';
+import { ShortLessonPlanGenerator } from './ShortLessonPlanGenerator';
 import { useVoiceDictation } from '../hooks/useVoiceDictation';
 import { exportTextToDocx } from '../utils/docxExport';
 import { guardSensitiveExport } from '../utils/biometricProtection';
@@ -427,6 +429,7 @@ export const AiSmartEducationStudio: React.FC<AiSmartEducationStudioProps> = ({
   isAdmin = true,
 }) => {
   const [activeTab, setActiveTab] = useState<SmartEduTab>('home');
+  const [lessonPlanMode, setLessonPlanMode] = useState<'short' | 'detailed'>('short');
   const [subject, setSubject] = useState<string>('Science');
   const [classLevel, setClassLevel] = useState<string>('Class 8');
   const [selectedLang, setSelectedLang] = useState<SmartEduLang>('English');
@@ -767,7 +770,7 @@ export const AiSmartEducationStudio: React.FC<AiSmartEducationStudioProps> = ({
     setIsLoading(true);
     setErrorMsg(null);
     try {
-      const res = await fetch('/api/smart-edu/generate', {
+      const res = await apiFetch('/api/smart-edu/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -1387,7 +1390,7 @@ export const AiSmartEducationStudio: React.FC<AiSmartEducationStudioProps> = ({
     setChatInput('');
     setIsLoading(true);
     try {
-      const res = await fetch('/api/smart-edu/generate', {
+      const res = await apiFetch('/api/smart-edu/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1500,7 +1503,7 @@ export const AiSmartEducationStudio: React.FC<AiSmartEducationStudioProps> = ({
     {
       id: 'lesson_plan',
       title: 'Lesson Plan',
-      shortDesc: 'Create editable 13-section AI lesson plans with voice input, section regeneration & PDF/JPEG/DOCX.',
+      shortDesc: 'AI Short Lesson Plan Generator (One-View, English/Urdu/Kashmiri) & 13-section textbook lesson plans with voice input.',
       ctaLabel: 'Open Lesson Plan',
       icon: ClipboardList,
       accent: 'text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/60 border-emerald-200 dark:border-emerald-800',
@@ -2559,6 +2562,38 @@ export const AiSmartEducationStudio: React.FC<AiSmartEducationStudioProps> = ({
       {/* ================================================================= */}
       {activeTab === 'lesson_plan' && (
         <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-5 space-y-5">
+          {/* Switcher between Short Lesson Plan (One-View) and Detailed 13-Section Textbook Plan */}
+          <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100 dark:border-slate-800">
+            <div className="inline-flex items-center gap-1 p-1 rounded-xl bg-slate-100 dark:bg-slate-800">
+              <button
+                type="button"
+                onClick={() => setLessonPlanMode('short')}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-colors whitespace-nowrap ${
+                  lessonPlanMode === 'short'
+                    ? 'bg-teal-600 text-white'
+                    : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+                }`}
+              >
+                Short Lesson Plan (One-View AI)
+              </button>
+              <button
+                type="button"
+                onClick={() => setLessonPlanMode('detailed')}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-colors whitespace-nowrap ${
+                  lessonPlanMode === 'detailed'
+                    ? 'bg-emerald-600 text-white'
+                    : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+                }`}
+              >
+                Detailed Textbook Lesson Plan (13-Section + Voice)
+              </button>
+            </div>
+          </div>
+
+          {lessonPlanMode === 'short' ? (
+            <ShortLessonPlanGenerator school={school} />
+          ) : (
+            <div className="space-y-5">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-base font-extrabold text-slate-900 dark:text-white flex items-center gap-2">
@@ -3240,6 +3275,8 @@ export const AiSmartEducationStudio: React.FC<AiSmartEducationStudioProps> = ({
                   </button>
                 </div>
               </div>
+            </div>
+          )}
             </div>
           )}
         </div>

@@ -108,6 +108,15 @@
   direction: rtl;
 }
 
+.font-kashmiri {
+  font-family: 'Scheherazade New', 'Noto Sans Arabic', 'Noto Nastaliq Urdu', 'Noori Nastaleeq', serif;
+  direction: rtl;
+  unicode-bidi: plaintext;
+  text-align: right;
+  font-feature-settings: "kern" 1, "liga" 1, "calt" 1;
+  text-rendering: optimizeLegibility;
+}
+
 @layer base {
   body {
     font-family: 'Plus Jakarta Sans', 'Noto Sans Devanagari', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;

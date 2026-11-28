@@ -2356,6 +2356,7 @@ fun SchoolPortalWebView(modifier: Modifier = Modifier) {
     var httpErrorCode by remember { mutableStateOf<Int?>(null) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var failedUrl by remember { mutableStateOf<String?>(null) }
+    var hasAutoRecovered404 by remember { mutableStateOf(false) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
 
     Box(modifier = modifier.fillMaxSize()) {
@@ -2396,9 +2397,9 @@ fun SchoolPortalWebView(modifier: Modifier = Modifier) {
                                     path.startsWith("/api/") ||
                                     path.contains(".")
                                 if (!isAssetOrApi && path != "/" && path.isNotEmpty()) {
+                                    val hashRoute = "#${if (path.startsWith("/")) path else "/$path"}"
                                     view.stopLoading()
-                                    view.clearHistory()
-                                    view.loadUrl("$productionRootUrl/")
+                                    view.loadUrl("$productionRootUrl/$hashRoute")
                                     return true
                                 }
                             }
@@ -2429,6 +2430,13 @@ fun SchoolPortalWebView(modifier: Modifier = Modifier) {
                             errorResponse: android.webkit.WebResourceResponse
                         ) {
                             if (request.isForMainFrame && (errorResponse.statusCode == 404 || errorResponse.statusCode >= 500)) {
+                                if (errorResponse.statusCode == 404 && !hasAutoRecovered404) {
+                                    hasAutoRecovered404 = true
+                                    view.stopLoading()
+                                    view.clearHistory()
+                                    view.loadUrl("$productionRootUrl/#/dashboard")
+                                    return
+                                }
                                 isLoading = false
                                 httpErrorCode = errorResponse.statusCode
                                 failedUrl = request.url?.toString()
@@ -2453,7 +2461,7 @@ fun SchoolPortalWebView(modifier: Modifier = Modifier) {
                             callback?.invoke(origin, true, false)
                         }
                     }
-                    loadUrl(productionRootUrl)
+                    loadUrl("$productionRootUrl/#/dashboard")
                 }
             }
         )

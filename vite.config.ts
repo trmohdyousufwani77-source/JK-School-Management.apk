@@ -55,6 +55,7 @@ export default defineConfig(() => {
     (process.env.APP_URL || process.env.VITE_APP_URL || '').trim() || DEFAULT_PRODUCTION_APP_URL;
 
   return {
+    base: './',
     define: {
       __APP_PRODUCTION_URL__: JSON.stringify(configuredAppUrl),
     },
@@ -67,32 +68,38 @@ export default defineConfig(() => {
         includeAssets: ['icon.svg', 'pwa-192x192.svg', 'pwa-512x512.svg', 'version_history.json'],
         manifest: false,
         workbox: {
+          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2,webmanifest,json}'],
           maximumFileSizeToCacheInBytes: 16 * 1024 * 1024, // 16 MiB limit for offline cache
-          navigateFallback: '/index.html',
-          navigateFallbackDenylist: [/^\/api\//, /\.apk$/i],
+          navigateFallback: 'index.html',
+          navigateFallbackDenylist: [/^\/api\//, /\.apk$/i, /^\/assets\//, /^\/__\//],
+          cleanupOutdatedCaches: true,
+          clientsClaim: true,
+          skipWaiting: true,
           runtimeCaching: [
             {
-              // Network-First strategy for HTML document / navigation requests so offline boots never 404
-              urlPattern: ({ request }) => request.mode === 'navigate' || request.destination === 'document',
+              urlPattern: ({ url }) =>
+                url.pathname.startsWith('/api/health') || url.pathname.endsWith('version_history.json'),
               handler: 'NetworkFirst',
               options: {
-                cacheName: 'schoolmaster-documents-v1',
-                networkTimeoutSeconds: 4,
-                expiration: {
-                  maxEntries: 20,
-                  maxAgeSeconds: 60 * 60 * 24 * 14,
-                },
+                cacheName: 'schoolmaster-meta-v2',
+                networkTimeoutSeconds: 3,
                 cacheableResponse: {
-                  statuses: [0, 200],
+                  statuses: [200],
                 },
               },
             },
             {
-              urlPattern: ({ url }) => url.pathname.startsWith('/api/health') || url.pathname.endsWith('version_history.json'),
-              handler: 'NetworkFirst',
+              urlPattern: ({ url }) => url.origin === 'https://fonts.googleapis.com' || url.origin === 'https://fonts.gstatic.com',
+              handler: 'StaleWhileRevalidate',
               options: {
-                cacheName: 'schoolmaster-meta-v1',
-                networkTimeoutSeconds: 3,
+                cacheName: 'schoolmaster-fonts-v2',
+                expiration: {
+                  maxEntries: 30,
+                  maxAgeSeconds: 60 * 60 * 24 * 30,
+                },
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
               },
             },
           ],
